@@ -3,7 +3,7 @@
 中文 | [English](README.en.md)
 
 [下载 v1.8.11](https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11) ·
-[申请 7 天独立托管试用](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
+[加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
 [商业支持与授权](COMMERCIAL.md) ·
 [讨论区](https://github.com/beyondcy1013/webClx/discussions)
 
@@ -34,7 +34,7 @@ cargo run --release -- serve
 
 准备远程使用前，请先阅读 [安全策略](SECURITY.md)，并配置 TLS、主机防火墙或 VPN。不要把 `11111` 管理端口直接暴露到公网。
 
-不想自行部署时，可[申请 7 天独立托管试用](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml)。试用实例按客户隔离，不与项目维护者或其他客户共享管理员账号、Cookie、工作区或模型凭据。
+不想自行部署时，可[加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml)。当前由维护者逐一确认容量和开通时间，不承诺提交后立即交付。获准开通的试用实例按客户隔离，不与项目维护者或其他客户共享管理员账号、Cookie、工作区或模型凭据。
 
 一个用 Rust 写的轻量 Web 工作区：
 

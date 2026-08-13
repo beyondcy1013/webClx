@@ -18,7 +18,7 @@ webClx 使用 AGPL-3.0-or-later 开源。遵守该许可证的个人和组织可
 
 ### 7 天独立托管试用
 
-[提交试用申请](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml)。每位试用者使用独立 OS 用户、端口、工作区、登录凭据和服务实例。试用期结束后提供 7 天只读导出窗口，随后删除实例数据。
+[加入试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml)。当前由维护者逐一确认容量、地区和开通时间，提交申请不代表实例已经可用。获准开通后，每位试用者使用独立 OS 用户、端口、工作区、登录凭据和服务实例。试用期结束后提供 7 天只读导出窗口，随后删除实例数据。
 
 不要在公开 Issue 中提交密码、Cookie、API Key、私有仓库地址或客户数据。模型凭据应在实例交付后由试用者自行配置。
 
@@ -38,6 +38,6 @@ Model usage, cloud infrastructure, domains, and third-party services are billed 
 
 ### Seven-day isolated hosted trial
 
-[Submit a trial request](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml). Each trial receives an isolated OS user, port, workspace, login credential, and service instance. A seven-day read-only export window follows the trial before instance data is deleted.
+[Join the trial waitlist](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml). Capacity, region, and activation time are confirmed manually; submitting the form does not mean an instance is already available. Once approved, each trial receives an isolated OS user, port, workspace, login credential, and service instance. A seven-day read-only export window follows the trial before instance data is deleted.
 
 Never place passwords, cookies, API keys, private repository URLs, or customer data in a public issue. Trial users configure model credentials themselves after instance delivery.
