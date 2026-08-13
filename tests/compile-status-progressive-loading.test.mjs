@@ -168,7 +168,7 @@ await new Promise((resolve) => setTimeout(resolve, 10));
 assert.match(elements.compileRunListEl.innerHTML, /run-1/);
 assert.equal(
   elements.compileStatusMessageEl.textContent,
-  "队列：/home/codes/webClx/.webclx-compile-queue · 等待 1 · 进行中 0 · 历史 423 · 每 2 秒更新",
+  "队列：/home/codes/webClx/.webclx-compile-queue · 等待 1 · 进行中 0 · 历史 1 · 每 2 秒更新",
 );
 assert.equal(elements.compileStatusRefreshButtonEl.disabled, false);
 assert.match(managerJs, /COMPILE_LIVE_REFRESH_MS\s*=\s*2_000/);

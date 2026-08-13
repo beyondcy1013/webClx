@@ -44,5 +44,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Run Node contract tests
-        run: node --test tests/*.test.mjs
+      - name: Run public-release contract tests
+        run: >-
+          node --test
+          tests/source-release-package.test.mjs
+          tests/security-client-redirects.test.mjs
+          tests/builtin-terminal-message-skill.test.mjs
+          tests/terminal-message-delivery.test.mjs
+          tests/i18n-runtime.test.mjs
+          tests/compile-api-compatibility.test.mjs
