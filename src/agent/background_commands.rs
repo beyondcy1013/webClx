@@ -452,7 +452,10 @@ mod tests {
         command_id: &str,
         predicate: impl Fn(&BackgroundCommandSession) -> bool,
     ) -> BackgroundCommandSession {
-        for _ in 0..100 {
+        // A cold CI runner can take several seconds to schedule the tmux-backed
+        // process even though the command is healthy. Keep condition polling,
+        // but allow enough time to distinguish slow startup from a deadlock.
+        for _ in 0..300 {
             let record = manager
                 .get("agent-test", command_id)
                 .await

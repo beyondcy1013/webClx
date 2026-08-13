@@ -44,6 +44,6 @@ assert.match(
   /normalized === "running" \|\| normalized === "stalled"/,
   "stalled work must remain visible in the live run table",
 );
-assert.match(index, /app-compile-status-manager\.js\?v=20260812a/);
+assert.match(index, /app-compile-status-manager\.js\?v=20260813b/);
 
 console.log("compile stalled install status contracts passed");
