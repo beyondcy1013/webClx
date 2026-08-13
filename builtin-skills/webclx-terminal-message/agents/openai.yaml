@@ -1,0 +1,4 @@
+interface:
+  display_name: "webClx Terminal Message"
+  short_description: "Delegate and reply across webClx terminals"
+  default_prompt: "Use $webclx-terminal-message to send a reliable tagged task to another terminal and request a reply."

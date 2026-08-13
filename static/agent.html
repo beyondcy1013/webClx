@@ -1,0 +1,1984 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>webClx Agent</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      (() => {
+        try {
+          const mode = window.localStorage.getItem("webclx:theme-mode");
+          let resolved;
+          if (mode === "dark" || mode === "light") {
+            resolved = mode;
+          } else {
+            resolved = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20260727b" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260727b" />
+    <script defer src="/assets/i18n.js?v=20260814a"></script>
+    <style>
+      .agent-page { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; }
+      .agent-main { flex: 1; display: flex; overflow: hidden; gap: 1px; background: var(--line); }
+      .agent-sidebar {
+        width: 240px; min-width: 240px; background: var(--panel); display: flex; flex-direction: column; overflow: hidden;
+      }
+      .agent-sidebar-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .agent-new-btn {
+        background: var(--accent); color: #fff; border: none; border-radius: 8px; padding: 6px 14px;
+        font-size: var(--font-size-tier-3); cursor: pointer; white-space: nowrap; transition: background 0.15s;
+      }
+      .agent-new-btn:hover { background: var(--accent-strong); }
+      .agent-sidebar-actions { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+      .agent-action-btn {
+        display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+        border: 1px solid var(--field-border); border-radius: 8px;
+        background: var(--field-bg); color: var(--text);
+        font-size: var(--font-size-tier-3); text-decoration: none;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .agent-action-btn:hover { border-color: var(--accent); background: var(--field-bg-elevated); }
+      .agent-action-icon { font-size: 14px; line-height: 1; color: var(--accent); }
+      .agent-profile-head { padding: 10px 12px 6px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .agent-profile-head strong { font-size: var(--font-size-tier-2); color: var(--text); }
+      .agent-profile-add { width: 28px; height: 28px; padding: 0; border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--text); cursor: pointer; }
+      .agent-profile-list { display: grid; gap: 6px; padding: 0 12px 10px; border-bottom: 1px solid var(--line); max-height: 42vh; overflow-y: auto; }
+      .agent-profile-item { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--field-bg); }
+      .agent-profile-name { font-size: var(--font-size-tier-3); font-weight: 600; color: var(--text); }
+      .agent-profile-title-row { display: flex; align-items: center; gap: 7px; min-width: 0; }
+      .agent-profile-type { flex: none; border: 1px solid var(--field-border); border-radius: 5px; padding: 2px 5px; color: var(--muted); background: var(--panel); font-size: var(--font-size-tier-1); line-height: 1; }
+      .agent-profile-description { margin-top: 4px; color: var(--muted); font-size: var(--font-size-tier-1); line-height: 1.45; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+      .agent-profile-controls { display: grid; grid-template-columns: repeat(4, minmax(42px, 1fr)); gap: 5px; margin-top: 7px; }
+      .agent-profile-controls button { min-width: 42px; min-height: 28px; border: 1px solid var(--field-border); border-radius: 6px; padding: 3px 7px; background: var(--panel); color: var(--text); font-size: var(--font-size-tier-1); line-height: 1; white-space: nowrap; cursor: pointer; }
+      .agent-profile-controls .primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+      .agent-profile-status { padding: 0 12px 8px; font-size: var(--font-size-tier-1); color: var(--muted); }
+      .agent-profile-status[data-tone="error"] { color: var(--warm); }
+      .agent-profile-dialog { width: min(680px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; background: var(--panel); color: var(--text); }
+      .agent-profile-dialog::backdrop { background: rgba(0,0,0,0.4); }
+      .agent-profile-form { padding: 18px; display: grid; gap: 14px; }
+      .agent-profile-form-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+      .agent-profile-form-head h2 { margin: 0; font-size: var(--font-size-tier-5); }
+      .agent-profile-close { border: 0; background: transparent; color: var(--text); font-size: 22px; cursor: pointer; }
+      .agent-profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .agent-profile-field { display: grid; gap: 5px; font-size: var(--font-size-tier-2); color: var(--text); }
+      .agent-profile-field.full { grid-column: 1 / -1; }
+      .agent-profile-field input, .agent-profile-field select, .agent-profile-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--text); padding: 8px; font: inherit; }
+      .agent-profile-form-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .agent-session-list { flex: 1; overflow-y: auto; padding: 6px 0; }
+      .agent-session-item {
+        padding: 9px 14px; cursor: pointer; font-size: var(--font-size-tier-3); color: var(--text);
+        display: flex; align-items: center; justify-content: space-between; gap: 6px;
+        border-left: 3px solid transparent; transition: background 0.1s;
+      }
+      .agent-session-item:hover { background: rgba(0,0,0,0.03); }
+      [data-theme="dark"] .agent-session-item:hover { background: rgba(255,255,255,0.05); }
+      .agent-session-item.active { border-left-color: var(--accent); background: rgba(15,122,98,0.08); }
+      .agent-session-item .session-delete {
+        opacity: 0; color: var(--warm); font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: 4px; transition: opacity 0.1s;
+      }
+      .agent-session-item:hover .session-delete { opacity: 0.6; }
+      .agent-session-item .session-delete:hover { opacity: 1; }
+
+      .agent-chat-area { flex: 1; display: flex; flex-direction: column; background: var(--bg); overflow: hidden; }
+      .agent-terminal-shell { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--bg); }
+      .agent-terminal-toolbar { min-height: 42px; padding: 6px 10px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; background: var(--panel); }
+      .agent-terminal-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: var(--font-size-tier-3); }
+      .agent-terminal-action { min-height: 28px; box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; padding: 4px 9px; border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg); color: var(--text); font-size: var(--font-size-tier-1); line-height: 1; text-decoration: none; white-space: nowrap; cursor: pointer; }
+      .agent-terminal-action:hover { border-color: var(--accent); background: var(--field-bg-elevated); }
+      .agent-terminal-session-switcher { width: min(220px, 34vw); min-width: 112px; text-overflow: ellipsis; }
+      .agent-terminal-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+      .agent-terminal-frame { width: 100%; height: 100%; border: 0; background: var(--bg); opacity: 0; pointer-events: none; }
+      .agent-terminal-pending { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 7px; padding: 24px; text-align: center; background: var(--bg); color: var(--muted); }
+      .agent-terminal-pending strong { color: var(--text); font-size: var(--font-size-tier-4); }
+      .agent-terminal-shell.ready .agent-terminal-frame { opacity: 1; pointer-events: auto; }
+      .agent-terminal-shell.ready .agent-terminal-pending { display: none; }
+      .agent-terminal-shell.failed .agent-terminal-pending strong { color: var(--warm); }
+      .agent-chat-head {
+        padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+        display: flex; align-items: center; gap: 12px; min-height: 48px;
+      }
+      .agent-chat-title { font-size: var(--font-size-tier-4); font-weight: 600; color: var(--text); flex: 1; }
+      .agent-context-meter { width: 190px; min-width: 150px; display: grid; gap: 4px; }
+      .agent-context-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--font-size-tier-1); }
+      .agent-context-track { height: 4px; overflow: hidden; border-radius: 2px; background: var(--line); }
+      .agent-context-progress { display: block; width: 0; height: 100%; background: var(--accent); transition: width 0.2s ease, background 0.2s ease; }
+      .agent-context-progress.warning { background: var(--warm); }
+      .agent-chat-routing { display: flex; align-items: center; gap: 8px; min-width: 0; }
+      .agent-model-select {
+        font-size: var(--font-size-tier-2); padding: 4px 8px; border: 1px solid var(--field-border);
+        border-radius: 6px; background: var(--field-bg); color: var(--text); min-width: 120px; max-width: 200px;
+      }
+      .agent-preset-select { width: min(220px, 24vw); }
+
+      .agent-messages { flex: 1; overflow-y: auto; padding: 20px 24px; scroll-behavior: smooth; }
+      .agent-msg { margin-bottom: 16px; max-width: 860px; }
+      .agent-msg-role {
+        font-size: var(--font-size-tier-1); text-transform: uppercase; letter-spacing: 0.5px;
+        color: var(--muted); margin-bottom: 4px; font-weight: 600;
+      }
+      .agent-msg-content { font-size: var(--font-size-tier-3); line-height: 1.6; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+      .agent-msg.user .agent-msg-content { background: var(--field-bg-elevated); padding: 10px 14px; border-radius: 10px; border: 1px solid var(--line); }
+      .agent-msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+      .agent-msg-images img { width: 112px; height: 84px; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; background: var(--field-bg); }
+      .agent-msg.assistant .agent-msg-role { color: var(--accent); }
+
+      .agent-tool-card {
+        margin: 8px 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; max-width: 860px;
+      }
+      .agent-tool-head {
+        padding: 7px 12px; background: var(--bg-accent); font-size: var(--font-size-tier-2);
+        color: var(--text); display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;
+      }
+      .agent-tool-head .tool-icon { font-size: 12px; width: 14px; text-align: center; }
+      .agent-tool-head .tool-name { font-weight: 600; font-family: var(--font-family-mono); }
+      .agent-tool-head .tool-badge {
+        margin-left: auto; font-size: var(--font-size-tier-1); padding: 2px 8px; border-radius: 10px; font-weight: 600;
+      }
+      .tool-badge.running { background: rgba(15,122,98,0.15); color: var(--accent); }
+      .tool-badge.ok { background: rgba(15,122,98,0.12); color: var(--accent); }
+      .tool-badge.error { background: rgba(197,107,54,0.15); color: var(--warm); }
+      .agent-tool-body { padding: 10px 12px; font-size: var(--font-size-tier-2); display: none; }
+      .agent-tool-body.open { display: block; }
+      .agent-tool-body pre {
+        margin: 4px 0; padding: 8px 10px; background: var(--field-bg-code); border-radius: 6px;
+        font-family: var(--font-family-mono); font-size: var(--font-size-tier-2); overflow-x: auto;
+        white-space: pre-wrap; word-break: break-word; color: var(--text); max-height: 400px; overflow-y: auto;
+      }
+      [data-theme="dark"] .agent-tool-body pre { background: rgba(0,0,0,0.25); }
+      .agent-tool-meta { color: var(--muted); font-size: var(--font-size-tier-1); margin-bottom: 4px; }
+
+      .agent-input-area { padding: 12px 20px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+      .agent-input-shell { position: relative; max-width: 860px; }
+      .agent-input-row { display: flex; gap: 8px; align-items: flex-end; width: 100%; }
+      .agent-attachment-preview { display: none; gap: 7px; margin: 0 0 8px 50px; overflow-x: auto; }
+      .agent-attachment-preview.has-items { display: flex; }
+      .agent-attachment-chip { position: relative; flex: none; width: 64px; height: 48px; }
+      .agent-attachment-chip img { width: 100%; height: 100%; object-fit: cover; border: 1px solid var(--line); border-radius: 6px; }
+      .agent-attachment-remove { position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; padding: 0; border: 0; border-radius: 50%; background: rgba(0,0,0,0.72); color: #fff; cursor: pointer; }
+      .agent-skill-button {
+        flex: 0 0 42px; width: 42px; height: 42px; padding: 0; border: 1px solid var(--field-border);
+        border-radius: 8px; background: var(--field-bg); color: var(--accent); font: 700 18px/1 var(--font-family-mono);
+        cursor: pointer;
+      }
+      .agent-skill-button:hover, .agent-skill-button[aria-expanded="true"] { border-color: var(--accent); background: var(--field-bg-elevated); }
+      .agent-skill-picker {
+        position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); z-index: 20;
+        max-height: min(380px, 48vh); overflow: hidden; border: 1px solid var(--field-border);
+        border-radius: 8px; background: var(--bg); box-shadow: 0 10px 28px rgba(0,0,0,0.18);
+      }
+      .agent-skill-picker[hidden] { display: none; }
+      .agent-skill-picker-head {
+        height: 36px; padding: 0 12px; display: flex; align-items: center; justify-content: space-between;
+        border-bottom: 1px solid var(--line); color: var(--text); font-size: var(--font-size-tier-2);
+      }
+      .agent-skill-picker-count { color: var(--muted); font-size: var(--font-size-tier-1); }
+      .agent-skill-options { max-height: min(343px, calc(48vh - 37px)); overflow-y: auto; padding: 4px; }
+      .agent-skill-option {
+        width: 100%; min-height: 42px; padding: 7px 9px; display: grid; grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+        align-items: baseline; gap: 10px; border: 0; border-radius: 6px; background: transparent; color: var(--text);
+        text-align: left; cursor: pointer;
+      }
+      .agent-skill-option:hover, .agent-skill-option.active { background: var(--bg-accent); }
+      .agent-skill-name { overflow: hidden; text-overflow: ellipsis; font: 600 var(--font-size-tier-2)/1.4 var(--font-family-mono); color: var(--accent); }
+      .agent-skill-description { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: var(--font-size-tier-1); }
+      .agent-skill-empty { padding: 20px 12px; text-align: center; color: var(--muted); font-size: var(--font-size-tier-2); }
+      .agent-input {
+        flex: 1; min-height: 42px; max-height: 180px; padding: 10px 14px; border: 1px solid var(--field-border);
+        border-radius: 10px; background: var(--field-bg); color: var(--text); font-size: var(--font-size-tier-3);
+        font-family: var(--font-family-sans); resize: none; line-height: 1.5; outline: none; transition: border-color 0.15s;
+      }
+      .agent-input:focus { border-color: var(--field-focus-border); box-shadow: var(--field-focus-ring); }
+      .agent-input::placeholder { color: var(--muted); }
+      .agent-send-btn {
+        background: var(--accent); color: #fff; border: none; border-radius: 10px; padding: 0 20px;
+        height: 42px; font-size: var(--font-size-tier-3); cursor: pointer; white-space: nowrap; transition: background 0.15s; font-weight: 600;
+      }
+      .agent-send-btn:hover:not(:disabled) { background: var(--accent-strong); }
+      .agent-send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+      .agent-hint { font-size: var(--font-size-tier-1); color: var(--muted); margin-top: 6px; }
+
+      .agent-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); gap: 8px; }
+      .agent-empty-icon { font-size: 48px; opacity: 0.3; }
+      .agent-empty-text { font-size: var(--font-size-tier-3); }
+
+      .agent-thinking { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: var(--font-size-tier-2); }
+      .agent-thinking .dot { animation: pulse-dot 1.2s infinite; }
+      .agent-thinking .dot:nth-child(2) { animation-delay: 0.2s; }
+      .agent-thinking .dot:nth-child(3) { animation-delay: 0.4s; }
+      @keyframes pulse-dot { 0%,60%,100% { opacity: 0.3; } 30% { opacity: 1; } }
+
+      .agent-error-banner {
+        padding: 8px 14px; background: rgba(197,107,54,0.1); border: 1px solid rgba(197,107,54,0.3);
+        border-radius: 8px; color: var(--warm); font-size: var(--font-size-tier-2); margin: 8px 0;
+      }
+      .agent-status-banner {
+        padding: 8px 14px; background: rgba(15,122,98,0.08); border: 1px solid rgba(15,122,98,0.25);
+        border-radius: 8px; color: var(--accent); font-size: var(--font-size-tier-2); margin: 8px 0;
+      }
+      .agent-queued-banner {
+        padding: 8px 14px; background: rgba(15,122,98,0.08); border: 1px solid rgba(15,122,98,0.25);
+        border-radius: 8px; color: var(--accent); font-size: var(--font-size-tier-2); margin: 8px 0;
+      }
+      .agent-run-banner {
+        padding: 7px 16px; background: rgba(15,122,98,0.08); border-bottom: 1px solid rgba(15,122,98,0.25);
+        color: var(--accent); font-size: var(--font-size-tier-2); display: flex; align-items: center; gap: 10px;
+      }
+      .agent-run-banner button { flex: none; }
+      .agent-reasoning {
+        margin: 6px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--field-bg);
+        font-size: var(--font-size-tier-2); overflow: hidden;
+      }
+      .agent-reasoning summary { padding: 6px 12px; cursor: pointer; color: var(--muted); user-select: none; }
+      .agent-reasoning-content {
+        padding: 4px 12px 10px; color: var(--muted); white-space: pre-wrap; word-break: break-word;
+        font-size: var(--font-size-tier-2); line-height: 1.55; max-height: 320px; overflow-y: auto;
+      }
+      .agent-checkpoint-restore {
+        margin-top: 8px; display: inline-flex; align-items: center; gap: 6px;
+        padding: 5px 10px; border: 1px solid var(--field-border); border-radius: 6px;
+        background: var(--field-bg); color: var(--text); font-size: var(--font-size-tier-2); cursor: pointer;
+      }
+      .agent-checkpoint-restore:hover { border-color: var(--warm); color: var(--warm); }
+      .agent-dialog { width: min(620px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; background: var(--panel); color: var(--text); }
+      .agent-dialog::backdrop { background: rgba(0,0,0,0.4); }
+      .agent-dialog-form { padding: 18px; display: grid; gap: 14px; }
+      .agent-dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+      .agent-dialog-head h2 { margin: 0; font-size: var(--font-size-tier-5); }
+      .agent-dialog-body { display: grid; gap: 10px; }
+      .agent-dialog-body textarea {
+        width: 100%; box-sizing: border-box; min-height: 180px; resize: vertical;
+        border: 1px solid var(--field-border); border-radius: 6px; background: var(--field-bg);
+        color: var(--text); padding: 10px; font: inherit; line-height: 1.5;
+      }
+      .agent-dialog-files { display: flex; flex-wrap: wrap; gap: 6px; }
+      .agent-file-chip {
+        padding: 3px 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--field-bg);
+        color: var(--muted); font-size: var(--font-size-tier-1); font-family: var(--font-family-mono);
+      }
+      .agent-checkpoint-row {
+        padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--field-bg);
+        display: flex; align-items: center; gap: 10px; font-size: var(--font-size-tier-2); color: var(--text);
+      }
+      .agent-checkpoint-row .agent-checkpoint-id { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: var(--font-family-mono); }
+      .agent-checkpoint-row .agent-checkpoint-meta { color: var(--muted); font-size: var(--font-size-tier-1); white-space: nowrap; }
+      .agent-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      .agent-model-switch-warn { padding: 10px 12px; border: 1px solid rgba(197,107,54,0.35); border-radius: 8px; background: rgba(197,107,54,0.08); color: var(--text); font-size: var(--font-size-tier-2); line-height: 1.55; }
+      .agent-model-switch-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+      .agent-retry-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+      .agent-approvals-badge {
+        margin-left: 4px; min-width: 16px; height: 16px; line-height: 16px; border-radius: 8px;
+        background: var(--warm); color: #fff; font-size: 11px; font-weight: 700; display: inline-block;
+        text-align: center; padding: 0 4px;
+      }
+      .agent-approvals-badge:empty { display: none; }
+      .agent-approval-summary {
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        color: var(--muted); font-size: var(--font-size-tier-1);
+      }
+      .agent-approval-policy-row {
+        padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+        display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        background: var(--field-bg);
+      }
+      .agent-approval-prompt {
+        padding: 9px 16px; background: rgba(15,122,98,0.08); border-bottom: 1px solid rgba(15,122,98,0.25);
+        color: var(--text); font-size: var(--font-size-tier-2); display: flex; align-items: center;
+        gap: 8px; flex-wrap: wrap;
+      }
+      .agent-approval-prompt .agent-approval-prompt-text { flex: 1; min-width: 220px; }
+
+      .agent-sidebar-toggle {
+        display: none;
+        background: var(--accent); color: #fff; border: none; border-radius: 8px;
+        padding: 6px 12px; font-size: var(--font-size-tier-2); cursor: pointer;
+        white-space: nowrap; margin-right: 8px;
+      }
+      .agent-sidebar-backdrop {
+        display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.3);
+        z-index: 99;
+      }
+      .agent-sidebar-backdrop.open { display: block; }
+
+      @media (max-width: 768px) {
+        .agent-sidebar-toggle { display: inline-block; }
+        .agent-sidebar {
+          position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
+          width: 260px; min-width: 260px; transform: translateX(-100%);
+          transition: transform 0.2s; box-shadow: 2px 0 8px rgba(0,0,0,0.15);
+        }
+        .agent-sidebar.open { transform: translateX(0); }
+        .agent-messages { padding: 14px; }
+        .agent-input-area { padding: 8px 14px 12px; }
+        .agent-skill-picker { max-height: min(320px, 42vh); }
+        .agent-skill-options { max-height: min(283px, calc(42vh - 37px)); }
+        .agent-skill-option { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+        .agent-chat-head { padding: 8px 12px; flex-wrap: wrap; gap: 8px; }
+        .agent-chat-title { min-width: 0; }
+        .agent-context-meter { order: 3; flex: 1; width: auto; min-width: 160px; }
+        .agent-chat-routing { order: 3; width: 100%; }
+        .agent-chat-routing .agent-model-select { flex: 1; width: 50%; max-width: none; }
+        .agent-profile-grid { grid-template-columns: 1fr; }
+        .agent-profile-field.full { grid-column: auto; }
+        .agent-terminal-session-switcher { width: min(150px, 38vw); }
+      }
+    </style>
+  </head>
+  <body class="app-shell">
+    <div class="page agent-page">
+      <header class="topbar slim browser-topbar terminal-page-nav">
+        <nav class="tabs page-tabs" aria-label="webClx 顶级导航">
+          <a class="tab-button topbar-link-button" href="/terminal">终端管理</a>
+          <a class="tab-button topbar-link-button" href="/workspace">工作区</a>
+          <a class="tab-button topbar-link-button" href="/workspace_history">历史工作区</a>
+          <a class="tab-button topbar-link-button" href="/codex_api">Codex_API</a>
+          <a class="tab-button topbar-link-button" href="/claude_api">Claude_API</a>
+          <a class="tab-button topbar-link-button" href="/settings">设置</a>
+          <a class="tab-button topbar-link-button" href="/desktop">远程桌面</a>
+          <a class="tab-button topbar-link-button active" href="/agent" aria-current="page">Agent</a>
+          <a class="tab-button topbar-link-button" href="/codex_oauth">Codex_OAuth</a>
+          <a class="tab-button topbar-link-button" href="/archives">归档列表</a>
+          <a class="tab-button topbar-link-button" href="/downloads">编译产物</a>
+        </nav>
+      </header>
+
+      <main class="agent-main">
+        <div class="agent-sidebar-backdrop" id="agent-sidebar-backdrop"></div>
+        <aside class="agent-sidebar" id="agent-sidebar">
+          <div class="agent-sidebar-head">
+            <span style="font-size: var(--font-size-tier-4); font-weight: 600; color: var(--text);">Agent 会话</span>
+            <button class="agent-new-btn" id="agent-new-session">+ 新建</button>
+          </div>
+          <div class="agent-sidebar-actions">
+            <div class="agent-profile-head">
+              <strong>智能体</strong>
+              <button id="agent-terminal-profile-add" class="agent-profile-add" type="button" title="新建智能体" aria-label="新建智能体">+</button>
+            </div>
+            <div id="agent-terminal-profiles" class="agent-profile-list"></div>
+            <div id="agent-terminal-profile-status" class="agent-profile-status" role="status"></div>
+          </div>
+          <div class="agent-session-list" id="agent-session-list"></div>
+        </aside>
+
+        <div class="agent-chat-area" id="agent-chat-area">
+          <div class="agent-empty" id="agent-empty-state">
+            <button class="agent-sidebar-toggle" type="button" data-agent-sidebar-toggle>菜单</button>
+            <div class="agent-empty-icon">AI</div>
+            <button class="agent-new-btn" id="agent-empty-new-session" style="margin-bottom: 8px;">+ 新建会话</button>
+            <div class="agent-empty-text">或点击左上角菜单查看已有会话</div>
+            <div class="agent-empty-text" style="font-size: var(--font-size-tier-2); opacity: 0.7;">通过自然语言驱动 Codex skill 和命令执行</div>
+          </div>
+        </div>
+      </main>
+    </div>
+    <dialog id="agent-terminal-profile-dialog" class="agent-profile-dialog">
+      <form id="agent-terminal-profile-form" class="agent-profile-form">
+        <div class="agent-profile-form-head">
+          <h2 id="agent-terminal-profile-title">新建智能体</h2>
+          <button id="agent-terminal-profile-close" class="agent-profile-close" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <input id="agent-terminal-profile-id" type="hidden" />
+        <div class="agent-profile-grid">
+          <label class="agent-profile-field"><span>名称</span><input id="agent-terminal-profile-name" maxlength="64" required /></label>
+          <label class="agent-profile-field"><span>智能体类型</span><select id="agent-terminal-profile-agent-type" required><option value="native">原生智能体</option><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+          <label class="agent-profile-field"><span>API 预设</span><select id="agent-terminal-profile-preset" required></select></label>
+          <label class="agent-profile-field full"><span>说明</span><textarea id="agent-terminal-profile-description" rows="2" maxlength="240" placeholder="说明这个智能体适合处理什么工作"></textarea></label>
+          <label class="agent-profile-field"><span>工作目录</span><input id="agent-terminal-profile-cwd" value="/home/system" required /></label>
+          <label class="agent-profile-field"><span>项目路径</span><input id="agent-terminal-profile-project" value="/home/system" required /></label>
+          <label class="agent-profile-field"><span>Skill</span><select id="agent-terminal-profile-skill" required></select></label>
+          <label class="agent-profile-field"><span>会话名称</span><input id="agent-terminal-profile-terminal-name" maxlength="64" required /></label>
+          <label class="agent-profile-field full"><span>待命上下文</span><textarea id="agent-terminal-profile-task" rows="3" maxlength="4096" placeholder="提供给智能体的必要上下文；新建后不会自动执行"></textarea></label>
+        </div>
+        <div id="agent-terminal-profile-form-status" class="agent-profile-status" role="status"></div>
+        <div class="agent-profile-form-actions">
+          <button id="agent-terminal-profile-cancel" class="agent-profile-controls" type="button">取消</button>
+          <button class="agent-new-btn" type="submit">保存智能体</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="agent-checkpoint-dialog" class="agent-dialog">
+      <div class="agent-dialog-form">
+        <div class="agent-dialog-head">
+          <h2>检查点</h2>
+          <button class="agent-profile-close" type="button" data-agent-dialog-close="agent-checkpoint-dialog" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="agent-dialog-body" id="agent-checkpoint-body">加载中…</div>
+        <div class="agent-dialog-actions">
+          <button class="agent-terminal-action" type="button" data-agent-dialog-close="agent-checkpoint-dialog">关闭</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="agent-summary-dialog" class="agent-dialog">
+      <div class="agent-dialog-form">
+        <div class="agent-dialog-head">
+          <h2>压缩摘要</h2>
+          <button class="agent-profile-close" type="button" data-agent-dialog-close="agent-summary-dialog" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="agent-dialog-body">
+          <label style="display:grid; gap:5px; font-size: var(--font-size-tier-2); color: var(--text);">摘要（会注入到后续模型上下文中）<textarea id="agent-summary-input" placeholder="没有摘要"></textarea></label>
+          <div>
+            <div style="font-size: var(--font-size-tier-2); color: var(--text); margin-bottom: 6px;">相关文件</div>
+            <div class="agent-dialog-files" id="agent-summary-files"></div>
+          </div>
+          <div id="agent-summary-status" class="agent-profile-status" role="status"></div>
+        </div>
+        <div class="agent-dialog-actions">
+          <button class="agent-terminal-action" type="button" data-agent-dialog-close="agent-summary-dialog">关闭</button>
+          <button class="agent-new-btn" id="agent-summary-save" type="button">保存摘要</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="agent-model-switch-dialog" class="agent-dialog">
+      <div class="agent-dialog-form">
+        <div class="agent-dialog-head">
+          <h2>切换模型</h2>
+          <button class="agent-profile-close" type="button" data-agent-dialog-close="agent-model-switch-dialog" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="agent-model-switch-warn">切换到新模型后，当前会话的历史消息（工具调用、推理内容、格式差异）可能不兼容，继续对话可能报错。你可以直接继续，或先清空上下文再切换。</div>
+        <div class="agent-model-switch-actions">
+          <button class="agent-terminal-action" id="agent-model-switch-cancel" type="button">取消</button>
+          <button class="agent-terminal-action" id="agent-model-switch-clear" type="button">清空后切换</button>
+          <button class="agent-new-btn" id="agent-model-switch-confirm" type="button">继续切换</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="agent-approvals-dialog" class="agent-dialog">
+      <div class="agent-dialog-form">
+        <div class="agent-dialog-head">
+          <h2>待批准</h2>
+          <button class="agent-profile-close" type="button" data-agent-dialog-close="agent-approvals-dialog" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="agent-approval-policy-row">
+          <span style="font-size: var(--font-size-tier-2); color: var(--text);">授权方式</span>
+          <select class="agent-model-select" id="agent-approval-policy-select" aria-label="授权方式" title="授权方式">
+            <option value="ask_once">只问一次（默认）</option>
+            <option value="ask_each">每次询问</option>
+            <option value="allow_all">允许全部</option>
+          </select>
+        </div>
+        <div class="agent-dialog-body" id="agent-approvals-body">加载中…</div>
+        <div class="agent-dialog-actions">
+          <button class="agent-new-btn" id="agent-approvals-allow-all" type="button" title="允许当前所有待批准请求，并把本会话设为允许全部">允许全部</button>
+          <button class="agent-terminal-action" type="button" data-agent-dialog-close="agent-approvals-dialog">关闭</button>
+        </div>
+      </div>
+    </dialog>
+    <script defer src="/assets/agent-terminal-profiles.js?v=20260731a"></script>
+    <script>
+      (() => {
+        "use strict";
+
+        const $ = (sel) => document.querySelector(sel);
+        const $$ = (sel) => document.querySelectorAll(sel);
+
+        let currentSessionId = null;
+        let isStreaming = false;
+        let availableModels = [];
+        let availablePresets = [];
+        let availableSkills = null;
+        let skillChoicesPromise = null;
+        let visibleSkills = [];
+        let activeSkillIndex = 0;
+        let pendingAttachments = [];
+        let lastTurn = null;
+        let runWatchTimer = null;
+        let streamFinished = false;
+        let pendingModelSwitch = null;
+        let previousModel = "";
+        let currentSessionApprovalPolicy = "ask_once";
+        const approvalPromptDismissed = new Set();
+
+        async function api(path, options = {}) {
+          const resp = await fetch(path, {
+            ...options,
+            headers: { "Content-Type": "application/json", ...options.headers },
+          });
+          if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+          }
+          return resp;
+        }
+
+        async function apiJson(path, options = {}) {
+          const resp = await api(path, options);
+          return resp.json();
+        }
+
+        // ---- Session list ----
+        async function loadSessions() {
+          const data = await apiJson("/api/agent/sessions");
+          renderSessionList(data.sessions || []);
+        }
+
+        function renderSessionList(sessions) {
+          const list = $("#agent-session-list");
+          if (sessions.length === 0) {
+            list.innerHTML = '<div style="padding: 14px; color: var(--muted); font-size: var(--font-size-tier-2);">暂无会话</div>';
+            return;
+          }
+          list.innerHTML = sessions.map(s => `
+            <div class="agent-session-item ${s.id === currentSessionId ? 'active' : ''}" data-id="${s.id}">
+              <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(s.title)}</span>
+              <span class="session-delete" data-id="${s.id}" title="删除">&times;</span>
+            </div>
+          `).join("");
+        }
+
+        // ---- Session chat ----
+        async function selectSession(sessionId) {
+          if (isStreaming) return;
+          currentSessionId = sessionId;
+          const session = await apiJson(`/api/agent/sessions/${sessionId}`);
+          renderSessionList(await apiJson("/api/agent/sessions").then(d => d.sessions || []));
+          renderChatArea(session);
+          await loadPresets(session.api_preset_id || "");
+          await loadModels(session.model, session.api_preset_id || "");
+          rebuildLastTurn(session);
+          currentSessionApprovalPolicy = session.approval_policy || "ask_once";
+          await checkRunStatus();
+          maybeShowApprovalPrompt(session);
+        }
+
+        function renderChatArea(session) {
+          const area = $("#agent-chat-area");
+          const messagesHtml = renderStoredMessages(session.messages || []);
+          area.innerHTML = `
+            <div class="agent-chat-head">
+              <button class="agent-sidebar-toggle" type="button" data-agent-sidebar-toggle aria-label="打开 Agent 菜单">&#9776;</button>
+              <input type="text" class="agent-chat-title" value="${escapeAttr(session.title)}" id="agent-title-input" />
+              <div class="agent-context-meter" id="agent-context-meter" title="上下文窗口用量">
+                <div class="agent-context-label" id="agent-context-status">${escapeHtml(session.model)} · 计算中</div>
+                <div class="agent-context-track"><span class="agent-context-progress" id="agent-context-progress"></span></div>
+              </div>
+              <div class="agent-chat-routing">
+                <select class="agent-model-select agent-preset-select" id="agent-session-preset-select" aria-label="API 预设" title="API 预设">
+                  <option value="${escapeAttr(session.api_preset_id || '')}">加载预设...</option>
+                </select>
+                <select class="agent-model-select" id="agent-model-select" aria-label="模型" title="模型">
+                  <option value="${escapeAttr(session.model)}">${escapeHtml(session.model)}</option>
+                </select>
+                <select class="agent-model-select" id="agent-sandbox-select" aria-label="沙箱" title="沙箱">
+                  <option value="default">默认沙箱</option>
+                  <option value="read_only">只读</option>
+                  <option value="full_access">全开</option>
+                </select>
+              </div>
+              <button class="agent-terminal-action" id="agent-compact-btn" type="button" title="压缩较早的对话上下文">压缩</button>
+              <button class="agent-terminal-action agent-retry-btn" id="agent-retry-btn" type="button" title="重新发送上一轮消息" disabled>重试</button>
+              <button class="agent-terminal-action" id="agent-summary-btn" type="button" title="查看或编辑压缩摘要">摘要</button>
+              <button class="agent-terminal-action" id="agent-checkpoint-btn" type="button" title="查看检查点并撤销修改">检查点</button>
+              <button class="agent-terminal-action" id="agent-approvals-btn" type="button" title="待人工批准的请求">批准<span class="agent-approvals-badge" id="agent-approvals-badge">0</span></button>
+              <button class="agent-new-btn" id="agent-clear-btn" style="background: var(--field-bg); color: var(--text); border: 1px solid var(--field-border);">清空</button>
+            </div>
+            <div class="agent-run-banner" id="agent-run-banner" hidden>
+              <span id="agent-run-banner-text">智能体仍在运行…</span>
+              <button class="agent-terminal-action" id="agent-run-refresh-btn" type="button">刷新</button>
+            </div>
+            <div class="agent-run-banner" id="agent-interrupted-banner" hidden>
+              <span>上次运行因服务重启中断，会话进度保留到中断前；可点「重试」重新执行上一轮。</span>
+            </div>
+            <div class="agent-messages" id="agent-messages">${messagesHtml}</div>
+            <div class="agent-input-area">
+              <div class="agent-input-shell">
+                <div class="agent-skill-picker" id="agent-skill-picker" role="listbox" aria-label="可用 Skills" hidden>
+                  <div class="agent-skill-picker-head"><strong>Skills</strong><span class="agent-skill-picker-count">加载中</span></div>
+                  <div class="agent-skill-options" id="agent-skill-options"></div>
+                </div>
+                <div class="agent-attachment-preview" id="agent-attachment-preview"></div>
+                <div class="agent-input-row">
+                  <button class="agent-skill-button" id="agent-skill-button" type="button" aria-label="选择 Skill" title="选择 Skill" aria-expanded="false" aria-controls="agent-skill-picker">$</button>
+                  <label class="agent-skill-button" for="agent-attachment-input" aria-label="添加图片" title="添加图片" style="display:grid;place-items:center;font-family:var(--font-family-sans);font-size:13px;">图片</label>
+                  <input id="agent-attachment-input" type="file" accept="image/*" multiple hidden />
+                  <textarea class="agent-input" id="agent-input" placeholder="输入消息，Enter 发送，Shift+Enter 换行..." rows="1" aria-autocomplete="list" aria-expanded="false" aria-controls="agent-skill-picker"></textarea>
+                  <button class="agent-send-btn" id="agent-send-btn">发送</button>
+                </div>
+              </div>
+              <div class="agent-hint">内置 Agent 可检查和修改工作区、运行验证，也能按需使用专项 skill。</div>
+            </div>
+          `;
+          populateModelSelect(session.model);
+          const sandboxSelect = $("#agent-sandbox-select");
+          if (sandboxSelect) sandboxSelect.value = session.sandbox_mode || "default";
+          const interruptedBanner = $("#agent-interrupted-banner");
+          if (interruptedBanner) interruptedBanner.hidden = !session.run_interrupted_at;
+          scrollToBottom();
+          bindChatEvents();
+          refreshContextStatus();
+          refreshApprovals();
+        }
+
+        function renderStoredMessages(messages, render = renderMessage) {
+          const toolResults = new Map();
+          for (const message of messages) {
+            if (message.role !== "tool" || !message.tool_call_id) continue;
+            const result = message.content;
+            const legacyError = result
+              && typeof result === "object"
+              && !Array.isArray(result)
+              && typeof result.error === "string"
+              && Object.keys(result).length === 1;
+            toolResults.set(message.tool_call_id, {
+              result,
+              is_error: typeof message.is_error === "boolean" ? message.is_error : Boolean(legacyError),
+            });
+          }
+          return messages
+            .filter(message => message.role !== "tool")
+            .map(message => render(message, toolResults))
+            .join("");
+        }
+
+        function renderMessage(msg, toolResults = new Map()) {
+          if (msg.role === "user") {
+            return renderUserMessage(msg.content);
+          }
+          if (msg.role === "assistant") {
+            const content = strVal(msg.content);
+            let html = '<div class="agent-msg assistant"><div class="agent-msg-role">Assistant</div>';
+            if (msg.reasoning_content) {
+              html += `<details class="agent-reasoning"><summary>思考过程</summary><div class="agent-reasoning-content">${escapeHtml(msg.reasoning_content)}</div></details>`;
+            }
+            if (content) html += `<div class="agent-msg-content">${escapeHtml(content)}</div>`;
+            if (msg.tool_calls) {
+              for (const tc of msg.tool_calls) {
+                html += renderToolCallCard(tc, toolResults.get(tc.id) || null);
+              }
+            }
+            html += '</div>';
+            return html;
+          }
+          return '';
+        }
+
+        function renderUserMessage(content) {
+          const items = Array.isArray(content) ? content : [{ type: "text", text: strVal(content) }];
+          const text = items.filter(item => item?.type === "text").map(item => item.text || "").join("\n");
+          const images = items
+            .filter(item => item?.type === "image_url" && item.image_url?.url)
+            .map(item => `<img src="${escapeAttr(item.image_url.url)}" alt="${escapeAttr(item.name || '附件图片')}" />`)
+            .join("");
+          return `<div class="agent-msg user"><div class="agent-msg-role">你</div><div class="agent-msg-content">${escapeHtml(text)}${images ? `<div class="agent-msg-images">${images}</div>` : ""}</div></div>`;
+        }
+
+        function renderToolCallCard(tc, result) {
+          const args = tc.function?.arguments || "{}";
+          const cardId = 'tc-' + tc.id;
+          let badgeHtml = '<span class="tool-badge running">运行中</span>';
+          if (result) {
+            badgeHtml = result.is_error
+              ? '<span class="tool-badge error">错误</span>'
+              : '<span class="tool-badge ok">完成</span>';
+          }
+          let bodyHtml = `<div class="agent-tool-meta">参数:</div><pre>${escapeHtml(formatJson(args))}</pre>`;
+          if (result) {
+            bodyHtml += `<div class="agent-tool-meta">结果:</div><pre>${escapeHtml(typeof result.result === 'string' ? result.result : JSON.stringify(result.result, null, 2))}</pre>`;
+            if (!result.is_error && result.result && typeof result.result === "object" && result.result.checkpoint_id) {
+              bodyHtml += `<button class="agent-checkpoint-restore" type="button" data-restore-checkpoint="${escapeAttr(result.result.checkpoint_id)}">撤销到检查点 ${escapeHtml(result.result.checkpoint_id)}</button>`;
+            }
+          }
+          return `
+            <div class="agent-tool-card" id="${cardId}">
+              <div class="agent-tool-head" onclick="document.getElementById('${cardId}-body').classList.toggle('open')">
+                <span class="tool-icon">&#9881;</span>
+                <span class="tool-name">${escapeHtml(tc.function?.name || '')}</span>
+                ${badgeHtml}
+              </div>
+              <div class="agent-tool-body" id="${cardId}-body">${bodyHtml}</div>
+            </div>`;
+        }
+
+        // ---- Send message + SSE handling ----
+        async function sendMessage() {
+          if (isStreaming) {
+            const queuedInput = $("#agent-input");
+            const queuedMessage = queuedInput?.value.trim() || "";
+            if (!queuedMessage && !pendingAttachments.length) {
+              await stopCurrentTurn();
+              return;
+            }
+          }
+          const input = $("#agent-input");
+          const message = input.value.trim();
+          if ((!message && !pendingAttachments.length) || !currentSessionId) return;
+          if (!pendingAttachments.length && await handleSlashCommand(message)) {
+            input.value = "";
+            autoResize(input);
+            return;
+          }
+          const attachments = pendingAttachments.splice(0);
+          lastTurn = {
+            message,
+            attachments: attachments.map(item => ({ ...item })),
+          };
+          renderRetryButton();
+          streamFinished = false;
+
+          isStreaming = true;
+          closeSkillPicker();
+          input.value = "";
+          autoResize(input);
+          renderAttachmentPreview();
+
+          // Optimistic render user message
+          const messagesDiv = $("#agent-messages");
+          messagesDiv.insertAdjacentHTML("beforeend",
+            renderUserMessage([
+              { type: "text", text: message },
+              ...attachments.map(item => ({ type: "image_url", image_url: { url: item.data_url }, name: item.name })),
+            ]));
+          scrollToBottom();
+
+          const sendBtn = $("#agent-send-btn");
+          sendBtn.disabled = false;
+          sendBtn.textContent = "停止";
+
+          // Thinking indicator
+          const thinkingId = 'thinking-' + Date.now();
+          messagesDiv.insertAdjacentHTML("beforeend",
+            `<div class="agent-msg assistant" id="${thinkingId}"><div class="agent-msg-role">Assistant</div><div class="agent-thinking"><span class="dot">&bull;</span><span class="dot">&bull;</span><span class="dot">&bull;</span></div></div>`);
+          scrollToBottom();
+
+          let keepStreaming = false;
+          try {
+            const resp = await fetch(`/api/agent/sessions/${currentSessionId}/chat`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ message, attachments }),
+            });
+            if (!resp.ok) {
+              const errText = await resp.text();
+              throw new Error(errText);
+            }
+
+            const responseType = resp.headers.get("content-type") || "";
+            if (responseType.includes("application/json")) {
+              const result = await resp.json();
+              if (result.queued) {
+                keepStreaming = true;
+                const thinkingEl = document.getElementById(thinkingId);
+                if (thinkingEl) thinkingEl.remove();
+                messagesDiv.insertAdjacentHTML("beforeend",
+                  '<div class="agent-queued-banner">消息已暂存，将在当前工具调用完成后发送</div>');
+                return;
+              }
+              throw new Error("消息发送失败");
+            }
+
+            // Process SSE stream
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let assistantDiv = null;
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop();
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+                const dataStr = line.slice(5).trim();
+                if (!dataStr) continue;
+                let event;
+                try { event = JSON.parse(dataStr); } catch { continue; }
+                handleSseEvent(event, thinkingId);
+              }
+            }
+          } catch (e) {
+            const messagesDiv2 = $("#agent-messages");
+            messagesDiv2.insertAdjacentHTML("beforeend", renderErrorBannerHtml(e.message));
+            scrollToBottom();
+            refreshApprovals();
+          } finally {
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            isStreaming = keepStreaming;
+            sendBtn.disabled = false;
+            sendBtn.textContent = "发送";
+            refreshContextStatus();
+            if (!keepStreaming) {
+              if (streamFinished) {
+                stopRunWatch();
+              } else {
+                await checkRunStatus();
+              }
+            }
+            refreshApprovals();
+          }
+        }
+
+        async function handleSlashCommand(message) {
+          const command = message.trim().toLowerCase();
+          if (!/^\/(compact|status|model)(?:\s+.*)?$/.test(command)) return false;
+          const messagesDiv = $("#agent-messages");
+          if (command === "/compact") {
+            await compactCurrentSession();
+            return true;
+          }
+          if (command === "/status") {
+            await refreshContextStatus();
+            messagesDiv?.insertAdjacentHTML("beforeend", '<div class="agent-status-banner">上下文状态已刷新</div>');
+            scrollToBottom();
+            return true;
+          }
+          const modelSelect = $("#agent-model-select");
+          modelSelect?.focus();
+          modelSelect?.scrollIntoView({ block: "nearest", inline: "nearest" });
+          messagesDiv?.insertAdjacentHTML("beforeend", '<div class="agent-status-banner">已打开模型选择</div>');
+          scrollToBottom();
+          return true;
+        }
+
+        function handleSseEvent(event, thinkingId) {
+          const messagesDiv = $("#agent-messages");
+          if (event.type === "assistant_delta") {
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            const streamId = `assistant-stream-${thinkingId}`;
+            let streamMessage = document.getElementById(streamId);
+            if (!streamMessage) {
+              messagesDiv.insertAdjacentHTML("beforeend", `<div class="agent-msg assistant" id="${streamId}"><div class="agent-msg-role">Assistant</div><div class="agent-msg-content"></div></div>`);
+              streamMessage = document.getElementById(streamId);
+            }
+            streamMessage.querySelector(".agent-msg-content").textContent += event.content || "";
+            scrollToBottom();
+          } else if (event.type === "reasoning_delta") {
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            const reasoningId = `reasoning-${thinkingId}`;
+            let reasoningBlock = document.getElementById(reasoningId);
+            if (!reasoningBlock) {
+              messagesDiv.insertAdjacentHTML("beforeend",
+                `<div class="agent-msg assistant" id="${reasoningId}"><div class="agent-msg-role">Assistant</div><details class="agent-reasoning" open><summary>思考过程</summary><div class="agent-reasoning-content"></div></details></div>`);
+              reasoningBlock = document.getElementById(reasoningId);
+            }
+            const content = reasoningBlock.querySelector(".agent-reasoning-content");
+            if (content) content.textContent += event.content || "";
+            scrollToBottom();
+          } else if (event.type === "assistant_message") {
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            messagesDiv.insertAdjacentHTML("beforeend",
+              `<div class="agent-msg assistant"><div class="agent-msg-role">Assistant</div><div class="agent-msg-content">${escapeHtml(event.content)}</div></div>`);
+            scrollToBottom();
+          } else if (event.type === "notice") {
+            messagesDiv.insertAdjacentHTML("beforeend",
+              `<div class="agent-status-banner">${escapeHtml(event.message)}</div>`);
+            scrollToBottom();
+          } else if (event.type === "tool_call_start") {
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            document.getElementById(`assistant-stream-${thinkingId}`)?.removeAttribute("id");
+            messagesDiv.insertAdjacentHTML("beforeend", renderToolCallCard({
+              id: event.id,
+              function: { name: event.name, arguments: event.arguments },
+            }, null));
+            scrollToBottom();
+          } else if (event.type === "tool_result") {
+            updateToolCard(event.id, event);
+            // Re-add thinking indicator for next LLM call
+            if (!document.getElementById(thinkingId)) {
+              messagesDiv.insertAdjacentHTML("beforeend",
+                `<div class="agent-msg assistant" id="${thinkingId}"><div class="agent-msg-role">Assistant</div><div class="agent-thinking"><span class="dot">&bull;</span><span class="dot">&bull;</span><span class="dot">&bull;</span></div></div>`);
+              scrollToBottom();
+            }
+          } else if (event.type === "context_status") {
+            renderContextStatus(event.status);
+          } else if (event.type === "compact_start") {
+            const compactBtn = $("#agent-compact-btn");
+            if (compactBtn) {
+              compactBtn.disabled = true;
+              compactBtn.textContent = "压缩中";
+            }
+          } else if (event.type === "compact_done") {
+            renderContextStatus(event.status);
+            const compactBtn = $("#agent-compact-btn");
+            if (compactBtn) {
+              compactBtn.disabled = false;
+              compactBtn.textContent = "压缩";
+            }
+            if (event.compacted) {
+              openSummaryDialog().catch(() => {});
+            }
+          } else if (event.type === "error") {
+            streamFinished = true;
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+            messagesDiv.insertAdjacentHTML("beforeend", renderErrorBannerHtml(event.message));
+            scrollToBottom();
+            refreshApprovals();
+          } else if (event.type === "done") {
+            streamFinished = true;
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+          } else if (event.type === "stopped") {
+            streamFinished = true;
+            const thinkingEl = document.getElementById(thinkingId);
+            if (thinkingEl) thinkingEl.remove();
+          }
+        }
+
+        async function stopCurrentTurn() {
+          if (!currentSessionId || !isStreaming) return;
+          const sendBtn = $("#agent-send-btn");
+          sendBtn.disabled = true;
+          sendBtn.textContent = "停止中";
+          try {
+            await apiJson(`/api/agent/sessions/${currentSessionId}/chat/stop`, { method: "POST" });
+          } catch (error) {
+            sendBtn.disabled = false;
+            sendBtn.textContent = "停止";
+            throw error;
+          }
+        }
+
+        function formatTokenCount(value) {
+          const tokens = Math.max(0, Number(value) || 0);
+          if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
+          if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1)}K`;
+          return String(Math.round(tokens));
+        }
+
+        function renderContextStatus(status) {
+          if (!status) return;
+          const label = $("#agent-context-status");
+          const progress = $("#agent-context-progress");
+          const meter = $("#agent-context-meter");
+          const percent = Math.max(0, Number(status.used_percent) || 0);
+          const display = `${status.model || "未知模型"} · ${formatTokenCount(status.used_tokens)} / ${formatTokenCount(status.context_window)} · ${percent}%`;
+          if (label) label.textContent = display;
+          if (meter) meter.title = `${display}；用量来源 ${status.context_usage_source === "api" ? "API" : "估算"}；自动压缩阈值 ${formatTokenCount(status.compact_threshold)}`;
+          if (progress) {
+            progress.style.width = `${Math.min(100, percent)}%`;
+            progress.classList.toggle("warning", Number(status.used_tokens) >= Number(status.compact_threshold));
+          }
+        }
+
+        async function refreshContextStatus() {
+          if (!currentSessionId) return;
+          try {
+            const status = await apiJson(`/api/agent/sessions/${currentSessionId}/context`);
+            renderContextStatus(status);
+          } catch (error) {
+            const label = $("#agent-context-status");
+            if (label) label.textContent = `上下文状态不可用`;
+          }
+        }
+
+        async function compactCurrentSession() {
+          if (!currentSessionId || isStreaming) return;
+          const compactBtn = $("#agent-compact-btn");
+          if (compactBtn) {
+            compactBtn.disabled = true;
+            compactBtn.textContent = "压缩中";
+          }
+          try {
+            const result = await apiJson(`/api/agent/sessions/${currentSessionId}/compact`, { method: "POST" });
+            renderContextStatus(result.status);
+            if (result.compacted) {
+              const session = await apiJson(`/api/agent/sessions/${currentSessionId}`);
+              const messages = $("#agent-messages");
+              if (messages) messages.innerHTML = renderStoredMessages(session.messages || []);
+              scrollToBottom();
+              openSummaryDialog().catch(() => {});
+            }
+          } catch (error) {
+            const messages = $("#agent-messages");
+            messages?.insertAdjacentHTML("beforeend", `<div class="agent-error-banner">${escapeHtml(error.message)}</div>`);
+            scrollToBottom();
+          } finally {
+            if (compactBtn) {
+              compactBtn.disabled = false;
+              compactBtn.textContent = "压缩";
+            }
+          }
+        }
+
+        function updateToolCard(toolCallId, result) {
+          const card = document.getElementById("tc-" + toolCallId);
+          if (!card) return;
+          const badge = card.querySelector(".tool-badge");
+          if (badge) {
+            badge.className = "tool-badge " + (result.is_error ? "error" : "ok");
+            badge.textContent = result.is_error ? "错误" : "完成";
+          }
+          const body = card.querySelector(".agent-tool-body");
+          if (body) {
+            body.insertAdjacentHTML("beforeend",
+              `<div class="agent-tool-meta">结果:</div><pre>${escapeHtml(typeof result.result === 'string' ? result.result : JSON.stringify(result.result, null, 2))}</pre>`);
+          }
+        }
+
+        // ---- Retry last turn ----
+        function rebuildLastTurn(session) {
+          let found = null;
+          for (const msg of session.messages || []) {
+            if (msg.role !== "user") continue;
+            const items = Array.isArray(msg.content)
+              ? msg.content
+              : [{ type: "text", text: strVal(msg.content) }];
+            const text = items
+              .filter(item => item?.type === "text")
+              .map(item => item.text || "")
+              .join("\n");
+            const attachments = items
+              .filter(item => item?.type === "image_url" && item.image_url?.url)
+              .map(item => {
+                let mimeType = "image/png";
+                const match = String(item.image_url.url || "").match(/^data:([^;]+);base64,/);
+                if (match) mimeType = match[1];
+                return { data_url: item.image_url.url, mime_type: mimeType, name: item.name || "附件图片" };
+              });
+            found = { message: text, attachments };
+          }
+          lastTurn = found;
+          renderRetryButton();
+        }
+
+        function renderRetryButton() {
+          const button = $("#agent-retry-btn");
+          if (button) button.disabled = !lastTurn || isStreaming;
+        }
+
+        async function retryLastTurn() {
+          if (!currentSessionId || !lastTurn || isStreaming) return;
+          const input = $("#agent-input");
+          if (input) input.value = lastTurn.message || "";
+          pendingAttachments = (lastTurn.attachments || []).map(item => ({ ...item }));
+          renderAttachmentPreview();
+          await sendMessage();
+        }
+
+        // ---- Run status recovery ----
+        async function checkRunStatus() {
+          if (!currentSessionId) return;
+          let status;
+          try {
+            status = await apiJson(`/api/agent/sessions/${currentSessionId}/run`);
+          } catch {
+            return;
+          }
+          const banner = $("#agent-run-banner");
+          if (status.running) {
+            if (!isStreaming && banner) banner.hidden = false;
+            if (!isStreaming) startRunWatch();
+            return;
+          }
+          if (banner && !banner.hidden) {
+            banner.hidden = true;
+            stopRunWatch();
+          }
+        }
+
+        function startRunWatch() {
+          if (runWatchTimer) return;
+          runWatchTimer = setInterval(async () => {
+            if (!currentSessionId) {
+              stopRunWatch();
+              return;
+            }
+            try {
+              const status = await apiJson(`/api/agent/sessions/${currentSessionId}/run`);
+              if (!status.running) {
+                stopRunWatch();
+                const banner = $("#agent-run-banner");
+                if (banner) banner.hidden = true;
+                await selectSession(currentSessionId);
+              }
+            } catch {
+              // transient network error; keep watching
+            }
+          }, 2000);
+        }
+
+        function stopRunWatch() {
+          if (runWatchTimer) {
+            clearInterval(runWatchTimer);
+            runWatchTimer = null;
+          }
+        }
+
+        // ---- Summary editing ----
+        let currentContextFiles = [];
+
+        async function openSummaryDialog() {
+          if (!currentSessionId) return;
+          const session = await apiJson(`/api/agent/sessions/${currentSessionId}`);
+          currentContextFiles = session.context_files || [];
+          const input = $("#agent-summary-input");
+          if (input) input.value = session.context_summary || "";
+          const filesEl = $("#agent-summary-files");
+          if (filesEl) {
+            filesEl.innerHTML = currentContextFiles.length
+              ? currentContextFiles.map(file => `<span class="agent-file-chip">${escapeHtml(file)}</span>`).join("")
+              : '<span style="color: var(--muted); font-size: var(--font-size-tier-1);">暂无相关文件</span>';
+          }
+          const status = $("#agent-summary-status");
+          if (status) status.textContent = "";
+          $("#agent-summary-dialog")?.showModal();
+        }
+
+        async function saveSummary() {
+          if (!currentSessionId) return;
+          const status = $("#agent-summary-status");
+          if (status) status.textContent = "保存中…";
+          try {
+            const session = await apiJson(`/api/agent/sessions/${currentSessionId}/summary`, {
+              method: "PUT",
+              body: JSON.stringify({
+                summary: $("#agent-summary-input")?.value || "",
+                context_files: currentContextFiles,
+              }),
+            });
+            currentContextFiles = session.context_files || [];
+            if (status) status.textContent = "已保存";
+            refreshContextStatus();
+          } catch (error) {
+            if (status) status.textContent = `保存失败：${error.message}`;
+          }
+        }
+
+        // ---- Checkpoints ----
+        async function openCheckpointDialog() {
+          if (!currentSessionId) return;
+          const dialog = $("#agent-checkpoint-dialog");
+          const body = $("#agent-checkpoint-body");
+          if (body) body.innerHTML = "加载中…";
+          dialog?.showModal();
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/checkpoints`);
+            const checkpoints = data.checkpoints || [];
+            if (!body) return;
+            if (!checkpoints.length) {
+              body.innerHTML = '<div style="color: var(--muted); font-size: var(--font-size-tier-2);">当前会话工作目录下还没有检查点。可以让智能体使用 create_checkpoint 创建，或确认目录已纳入 Git。</div>';
+              return;
+            }
+            body.innerHTML = checkpoints.map(checkpoint => `
+              <div class="agent-checkpoint-row">
+                <span class="agent-checkpoint-id" title="${escapeAttr(checkpoint.checkpoint_id)}">${escapeHtml(checkpoint.checkpoint_id)}</span>
+                <span class="agent-checkpoint-meta">${formatBytes(checkpoint.bytes)}</span>
+                <button class="agent-terminal-action" type="button" data-restore-checkpoint="${escapeAttr(checkpoint.checkpoint_id)}">撤销</button>
+              </div>`).join("");
+          } catch (error) {
+            if (body) body.innerHTML = `<div style="color: var(--warm); font-size: var(--font-size-tier-2);">${escapeHtml(error.message)}</div>`;
+          }
+        }
+
+        async function restoreCheckpointAction(checkpointId) {
+          if (!currentSessionId || !checkpointId) return;
+          if (!confirm(`将反向应用检查点 ${checkpointId}，撤销其中包含的全部修改。继续？`)) return;
+          const body = $("#agent-checkpoint-body");
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/checkpoints/${encodeURIComponent(checkpointId)}/restore`, { method: "POST" });
+            const files = (data.files || []).join("、") || "无";
+            if (body) body.innerHTML = `<div style="color: var(--accent); font-size: var(--font-size-tier-2);">已恢复检查点 ${escapeHtml(data.checkpoint_id || checkpointId)}，涉及文件：${escapeHtml(files)}</div>`;
+          } catch (error) {
+            if (body) body.insertAdjacentHTML("beforeend", `<div style="color: var(--warm); font-size: var(--font-size-tier-2); margin-top: 8px;">${escapeHtml(error.message)}</div>`);
+          }
+        }
+
+        function formatBytes(bytes) {
+          const value = Math.max(0, Number(bytes) || 0);
+          if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+          if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+          return `${value} B`;
+        }
+
+        // ---- Model switch ----
+        function requestModelSwitch(model) {
+          if (!currentSessionId || !model) return;
+          const current = $("#agent-model-select")?.value;
+          if (model === current) return;
+          previousModel = current || "";
+          pendingModelSwitch = model;
+          $("#agent-model-switch-dialog")?.showModal();
+        }
+
+        async function confirmModelSwitch(clearHistory) {
+          const model = pendingModelSwitch;
+          pendingModelSwitch = null;
+          $("#agent-model-switch-dialog")?.close();
+          if (!currentSessionId || !model) return;
+          if (clearHistory) {
+            await apiJson(`/api/agent/sessions/${currentSessionId}/clear`, { method: "POST" });
+          }
+          await changeModel(model);
+          if (clearHistory) await selectSession(currentSessionId);
+        }
+
+        // ---- Sandbox + approvals ----
+        async function changeSandbox(mode) {
+          if (!currentSessionId || !mode) return;
+          try {
+            await apiJson(`/api/agent/sessions/${currentSessionId}`, {
+              method: "PUT",
+              body: JSON.stringify({
+                title: $("#agent-title-input")?.value || "",
+                sandbox_mode: mode,
+              }),
+            });
+            const select = $("#agent-sandbox-select");
+            if (select) select.value = mode;
+          } catch (error) {
+            const messages = $("#agent-messages");
+            messages?.insertAdjacentHTML("beforeend",
+              `<div class="agent-error-banner">切换沙箱失败：${escapeHtml(error.message)}</div>`);
+            scrollToBottom();
+          }
+        }
+
+        async function refreshApprovals() {
+          const badge = $("#agent-approvals-badge");
+          if (!badge) return;
+          if (!currentSessionId) {
+            badge.textContent = "0";
+            return;
+          }
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/approvals`);
+            const pending = (data.approvals || []).filter(item => item.status === "pending").length;
+            badge.textContent = String(pending);
+          } catch {
+            badge.textContent = "0";
+          }
+        }
+
+        async function openApprovalsDialog() {
+          if (!currentSessionId) return;
+          $("#agent-approvals-dialog")?.showModal();
+          await renderApprovals();
+        }
+
+        async function renderApprovals() {
+          const body = $("#agent-approvals-body");
+          if (!body) return;
+          const policySelect = $("#agent-approval-policy-select");
+          if (policySelect) policySelect.value = currentSessionApprovalPolicy || "ask_once";
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/approvals`);
+            const approvals = data.approvals || [];
+            refreshApprovals();
+            if (!approvals.length) {
+              body.innerHTML = '<div style="color: var(--muted); font-size: var(--font-size-tier-2);">暂无批准请求。授权方式：' +
+                (currentSessionApprovalPolicy === "allow_all"
+                  ? "允许全部（不再询问）"
+                  : (currentSessionApprovalPolicy === "ask_each" ? "每次询问" : "只问一次（允许首条后不再询问）")) +
+                '</div>';
+              return;
+            }
+            body.innerHTML = approvals.slice().reverse().map(item => {
+              const statusText = item.status === "pending"
+                ? "待批准"
+                : (item.status === "approved" ? "已允许" : "已拒绝");
+              const actions = item.status === "pending"
+                ? `<button class="agent-terminal-action" type="button" data-approval-allow="${escapeAttr(item.id)}">允许</button><button class="agent-terminal-action" type="button" data-approval-deny="${escapeAttr(item.id)}">拒绝</button>`
+                : "";
+              return `
+                <div class="agent-checkpoint-row">
+                  <div style="flex:1; min-width:0; display:grid; gap:3px;">
+                    <span class="agent-checkpoint-id">${escapeHtml(item.tool)}</span>
+                    <span class="agent-approval-summary" title="${escapeAttr(item.summary)}">${escapeHtml(item.summary)}</span>
+                    <span class="agent-checkpoint-meta">${statusText}</span>
+                  </div>
+                  ${actions}
+                </div>`;
+            }).join("");
+          } catch (error) {
+            body.innerHTML = `<div style="color: var(--warm); font-size: var(--font-size-tier-2);">${escapeHtml(error.message)}</div>`;
+          }
+        }
+
+        function maybeShowApprovalPrompt(session) {
+          if (!currentSessionId || approvalPromptDismissed.has(currentSessionId)) return;
+          if ((session.sandbox_mode || "default") !== "default") return;
+          if ((session.approval_policy || "ask_once") !== "ask_once") return;
+          approvalPromptDismissed.add(currentSessionId);
+          const messages = $("#agent-messages");
+          if (!messages) return;
+          const banner = document.createElement("div");
+          banner.className = "agent-approval-prompt";
+          banner.innerHTML = `
+            <span class="agent-approval-prompt-text">本会话尚未授权危险命令。默认只问一次：允许首条请求后，本会话不再询问。</span>
+            <button class="agent-terminal-action" type="button" data-approval-policy="allow_all">允许全部</button>
+            <button class="agent-terminal-action" type="button" data-approval-policy="ask_each">每次询问</button>
+            <button class="agent-terminal-action" type="button" data-approval-prompt-dismiss>保持默认</button>`;
+          messages.prepend(banner);
+        }
+
+        async function changeApprovalPolicy(policy) {
+          if (!currentSessionId || !policy) return;
+          try {
+            const session = await apiJson(`/api/agent/sessions/${currentSessionId}`, {
+              method: "PUT",
+              body: JSON.stringify({
+                title: $("#agent-title-input")?.value || "",
+                approval_policy: policy,
+              }),
+            });
+            currentSessionApprovalPolicy = session.approval_policy || policy;
+            const policySelect = $("#agent-approval-policy-select");
+            if (policySelect) policySelect.value = currentSessionApprovalPolicy;
+          } catch (error) {
+            const messages = $("#agent-messages");
+            messages?.insertAdjacentHTML("beforeend",
+              `<div class="agent-error-banner">修改授权方式失败：${escapeHtml(error.message)}</div>`);
+            scrollToBottom();
+          }
+        }
+
+        async function allowAllApprovals() {
+          if (!currentSessionId) return;
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/approvals/allow-all`, { method: "POST" });
+            currentSessionApprovalPolicy = data.approval_policy || "allow_all";
+            const policySelect = $("#agent-approval-policy-select");
+            if (policySelect) policySelect.value = currentSessionApprovalPolicy;
+            await renderApprovals();
+            refreshApprovals();
+            if (!isStreaming && lastTurn) await retryLastTurn();
+          } catch (error) {
+            $("#agent-approvals-body")?.insertAdjacentHTML("beforeend",
+              `<div style="color: var(--warm); font-size: var(--font-size-tier-2); margin-top: 8px;">${escapeHtml(error.message)}</div>`);
+          }
+        }
+
+        async function allowApproval(approvalId) {
+          if (!currentSessionId || !approvalId) return;
+          try {
+            const data = await apiJson(`/api/agent/sessions/${currentSessionId}/approvals/${encodeURIComponent(approvalId)}/allow`, { method: "POST" });
+            currentSessionApprovalPolicy = data.approval_policy || currentSessionApprovalPolicy;
+            const policySelect = $("#agent-approval-policy-select");
+            if (policySelect) policySelect.value = currentSessionApprovalPolicy;
+            await renderApprovals();
+            if (!isStreaming && lastTurn) await retryLastTurn();
+          } catch (error) {
+            $("#agent-approvals-body")?.insertAdjacentHTML("beforeend",
+              `<div style="color: var(--warm); font-size: var(--font-size-tier-2); margin-top: 8px;">${escapeHtml(error.message)}</div>`);
+          }
+        }
+
+        async function denyApproval(approvalId) {
+          if (!currentSessionId || !approvalId) return;
+          try {
+            await apiJson(`/api/agent/sessions/${currentSessionId}/approvals/${encodeURIComponent(approvalId)}/deny`, { method: "POST" });
+            await renderApprovals();
+          } catch (error) {
+            $("#agent-approvals-body")?.insertAdjacentHTML("beforeend",
+              `<div style="color: var(--warm); font-size: var(--font-size-tier-2); margin-top: 8px;">${escapeHtml(error.message)}</div>`);
+          }
+        }
+
+        // ---- Session management ----
+        async function createSession() {
+          const data = await apiJson("/api/agent/sessions", {
+            method: "POST",
+            body: JSON.stringify({ title: "", model: "", api_preset_id: "" }),
+          });
+          await loadSessions();
+          await selectSession(data.id);
+          return data;
+        }
+
+        async function createProfileSession(profileId) {
+          const data = await apiJson("/api/agent/sessions", {
+            method: "POST",
+            body: JSON.stringify({ profile_id: profileId }),
+          });
+          await loadSessions();
+          await selectSession(data.id);
+          return data;
+        }
+
+        async function deleteSession(sessionId) {
+          if (!confirm("确定删除此会话？")) return;
+          await apiJson(`/api/agent/sessions/${sessionId}`, { method: "DELETE" });
+          if (currentSessionId === sessionId) {
+            currentSessionId = null;
+            renderEmptyState();
+          }
+          await loadSessions();
+        }
+
+        async function clearSession() {
+          if (!currentSessionId) return;
+          if (!confirm("确定清空当前会话的所有消息？")) return;
+          await apiJson(`/api/agent/sessions/${currentSessionId}/clear`, { method: "POST" });
+          await selectSession(currentSessionId);
+        }
+
+        async function renameSession(title) {
+          if (!currentSessionId || !title.trim()) return;
+          await apiJson(`/api/agent/sessions/${currentSessionId}`, {
+            method: "PUT",
+            body: JSON.stringify({ title: title.trim() }),
+          });
+          await loadSessions();
+        }
+
+        async function changeModel(model) {
+          if (!currentSessionId || !model) return;
+          await apiJson(`/api/agent/sessions/${currentSessionId}`, {
+            method: "PUT",
+            body: JSON.stringify({ title: $("#agent-title-input")?.value || "", model }),
+          });
+          refreshContextStatus();
+        }
+
+        async function changePreset(presetId) {
+          if (!currentSessionId) return;
+          const preset = availablePresets.find(item => item.id === presetId);
+          let model = preset?.model || "";
+          if (!model) {
+            try {
+              const data = await apiJson("/api/agent/models");
+              model = data.default || "";
+            } catch {
+              model = $("#agent-model-select")?.value || resolvedDefaultModel || "";
+            }
+          }
+          const updated = await apiJson(`/api/agent/sessions/${currentSessionId}`, {
+            method: "PUT",
+            body: JSON.stringify({
+              title: $("#agent-title-input")?.value || "",
+              api_preset_id: presetId,
+              model,
+            }),
+          });
+          renderChatArea(updated);
+          await loadPresets(updated.api_preset_id || "");
+          await loadModels(updated.model, updated.api_preset_id || "");
+        }
+
+        function renderEmptyState() {
+          $("#agent-chat-area").innerHTML = `
+            <div class="agent-empty" id="agent-empty-state">
+              <button class="agent-sidebar-toggle" type="button" data-agent-sidebar-toggle>菜单</button>
+              <div class="agent-empty-icon">AI</div>
+              <button class="agent-new-btn" id="agent-empty-new-session" style="margin-bottom: 8px;">+ 新建会话</button>
+              <div class="agent-empty-text">或点击左上角菜单查看已有会话</div>
+            </div>`;
+          $("#agent-empty-new-session")?.addEventListener("click", createSession);
+        }
+
+        let resolvedDefaultModel = "";
+        async function loadPresets(currentPresetId) {
+          try {
+            const data = await apiJson("/api/agent/api-presets");
+            availablePresets = data.presets || [];
+          } catch {
+            availablePresets = [];
+          }
+          populatePresetSelect(currentPresetId);
+        }
+
+        function populatePresetSelect(currentPresetId) {
+          const sel = $("#agent-session-preset-select");
+          if (!sel) return;
+          const missingPreset = currentPresetId
+            && !availablePresets.some(preset => preset.id === currentPresetId);
+          const options = ['<option value="">跟随 Agent 设置</option>'];
+          if (missingPreset) {
+            options.push(`<option value="${escapeAttr(currentPresetId)}">预设已删除</option>`);
+          }
+          options.push(...availablePresets.map(preset => {
+            const model = preset.model ? ` · ${preset.model}` : "";
+            return `<option value="${escapeAttr(preset.id)}">${escapeHtml(preset.name || preset.id)}${escapeHtml(model)}</option>`;
+          }));
+          sel.innerHTML = options.join("");
+          sel.value = currentPresetId || "";
+        }
+
+        async function loadModels(currentModel, apiPresetId) {
+          const preset = availablePresets.find(item => item.id === apiPresetId);
+          if (preset) {
+            availableModels = preset.model ? [preset.model] : [];
+            resolvedDefaultModel = preset.model || currentModel || "";
+            populateModelSelect(currentModel);
+            return;
+          }
+          try {
+            const data = await apiJson("/api/agent/models");
+            availableModels = data.models || [];
+            resolvedDefaultModel = data.default || "";
+          } catch { availableModels = []; resolvedDefaultModel = ""; }
+          populateModelSelect(currentModel);
+        }
+
+        function populateModelSelect(currentModel) {
+          const sel = $("#agent-model-select");
+          if (!sel) return;
+          const model = currentModel || sel.value;
+          const all = [...new Set([model, ...availableModels])];
+          sel.innerHTML = all.map(m => `<option value="${escapeAttr(m)}" ${m === model ? 'selected' : ''}>${escapeHtml(m)}</option>`).join("");
+        }
+
+        // ---- Skill picker ----
+        function findSkillTrigger(value, cursor) {
+          const end = Math.max(0, Math.min(Number(cursor) || 0, value.length));
+          const prefix = value.slice(0, end);
+          const start = prefix.lastIndexOf("$");
+          if (start < 0) return null;
+          const previous = value.slice(0, start).slice(-1);
+          if (previous && /[\p{L}\p{N}_-]/u.test(previous)) return null;
+          const query = value.slice(start + 1, end);
+          if (query.includes("\n") || query.includes("\r")) return null;
+          return { start, end, query };
+        }
+
+        function skillMatchScore(skill, query) {
+          const normalize = (value) => String(value || "").normalize("NFKD").toLowerCase();
+          const normalizedQuery = normalize(query).trim();
+          if (!normalizedQuery) return 0;
+          const compactQuery = normalizedQuery.replace(/[^\p{L}\p{N}]/gu, "");
+          if (!compactQuery) return Number.POSITIVE_INFINITY;
+          const compactName = normalize(skill?.name).replace(/[^\p{L}\p{N}]/gu, "");
+          const compactDescription = normalize(skill?.description).replace(/[^\p{L}\p{N}]/gu, "");
+          if (compactName === compactQuery) return 0;
+          if (compactName.startsWith(compactQuery)) return 10 + compactName.length - compactQuery.length;
+          const nameIndex = compactName.indexOf(compactQuery);
+          if (nameIndex >= 0) return 30 + nameIndex;
+          const descriptionIndex = compactDescription.indexOf(compactQuery);
+          if (descriptionIndex >= 0) return 100 + descriptionIndex;
+          const subsequenceScore = (candidate) => {
+            let position = 0;
+            let gaps = 0;
+            for (const character of compactQuery) {
+              const found = candidate.indexOf(character, position);
+              if (found < 0) return Number.POSITIVE_INFINITY;
+              gaps += found - position;
+              position = found + 1;
+            }
+            return gaps;
+          };
+          const nameSubsequence = subsequenceScore(compactName);
+          if (Number.isFinite(nameSubsequence)) return 200 + nameSubsequence;
+          const descriptionSubsequence = subsequenceScore(compactDescription);
+          if (Number.isFinite(descriptionSubsequence)) return 300 + descriptionSubsequence;
+          return Number.POSITIVE_INFINITY;
+        }
+
+        function rankSkills(skills, query) {
+          return (skills || [])
+            .filter((skill) => !skill?.disabled)
+            .map((skill) => ({ skill, score: skillMatchScore(skill, query) }))
+            .filter((entry) => Number.isFinite(entry.score))
+            .sort((left, right) => left.score - right.score || String(left.skill.name).localeCompare(String(right.skill.name), "zh-CN"))
+            .map((entry) => entry.skill);
+        }
+
+        function insertSkillReference(value, trigger, skillName) {
+          const prefix = value.slice(0, trigger.start);
+          const suffix = value.slice(trigger.end);
+          const reference = `$${skillName}`;
+          let separator = "";
+          let cursor = prefix.length + reference.length;
+          if (!suffix) {
+            separator = " ";
+            cursor += 1;
+          } else if (/^[ \t]/.test(suffix)) {
+            cursor += 1;
+          } else {
+            separator = " ";
+            cursor += 1;
+          }
+          return { value: `${prefix}${reference}${separator}${suffix}`, cursor };
+        }
+
+        function isCompletedSkillReference(query, skills) {
+          const value = String(query || "").toLowerCase();
+          return (skills || []).some((skill) => {
+            if (skill?.disabled) return false;
+            const name = String(skill?.name || "").toLowerCase();
+            return name && value.startsWith(name) && /^\s/.test(value.slice(name.length));
+          });
+        }
+
+        function loadSkillChoices() {
+          if (!skillChoicesPromise) {
+            skillChoicesPromise = apiJson("/api/agent/skills")
+              .then((data) => {
+                availableSkills = Array.isArray(data.skills) ? data.skills : [];
+                return availableSkills;
+              })
+              .catch((error) => {
+                availableSkills = null;
+                skillChoicesPromise = null;
+                throw error;
+              });
+          }
+          return skillChoicesPromise;
+        }
+
+        function setSkillPickerExpanded(expanded) {
+          const picker = $("#agent-skill-picker");
+          const input = $("#agent-input");
+          const button = $("#agent-skill-button");
+          if (!picker || !input || !button) return;
+          picker.hidden = !expanded;
+          input.setAttribute("aria-expanded", String(expanded));
+          button.setAttribute("aria-expanded", String(expanded));
+          if (!expanded) {
+            input.removeAttribute("aria-activedescendant");
+            visibleSkills = [];
+          }
+        }
+
+        function renderSkillPicker(status = "") {
+          const options = $("#agent-skill-options");
+          const count = $("#agent-skill-picker .agent-skill-picker-count");
+          if (!options || !count) return;
+          const availableCount = (availableSkills || []).filter((skill) => !skill.disabled).length;
+          count.textContent = availableSkills ? `${visibleSkills.length} / ${availableCount}` : "加载中";
+          if (status) {
+            options.innerHTML = `<div class="agent-skill-empty" role="status">${escapeHtml(status)}</div>`;
+            return;
+          }
+          if (!visibleSkills.length) {
+            options.innerHTML = '<div class="agent-skill-empty" role="status">没有匹配的 Skill</div>';
+            return;
+          }
+          options.innerHTML = visibleSkills.map((skill, index) => `
+            <button class="agent-skill-option ${index === activeSkillIndex ? 'active' : ''}" id="agent-skill-option-${index}" type="button" role="option" aria-selected="${index === activeSkillIndex}" data-skill-index="${index}">
+              <span class="agent-skill-name">$${escapeHtml(skill.name)}</span>
+              <span class="agent-skill-description">${escapeHtml(skill.description || skill.source || '')}</span>
+            </button>
+          `).join("");
+          setActiveSkillIndex(activeSkillIndex);
+        }
+
+        function setActiveSkillIndex(index) {
+          if (!visibleSkills.length) return;
+          activeSkillIndex = (index + visibleSkills.length) % visibleSkills.length;
+          const input = $("#agent-input");
+          $$("#agent-skill-options .agent-skill-option").forEach((option, optionIndex) => {
+            const active = optionIndex === activeSkillIndex;
+            option.classList.toggle("active", active);
+            option.setAttribute("aria-selected", String(active));
+            if (active) {
+              input?.setAttribute("aria-activedescendant", option.id);
+              option.scrollIntoView({ block: "nearest" });
+            }
+          });
+        }
+
+        function chooseSkill(index = activeSkillIndex) {
+          const input = $("#agent-input");
+          const skill = visibleSkills[index];
+          const trigger = input && findSkillTrigger(input.value, input.selectionStart);
+          if (!input || !skill || !trigger) return;
+          const inserted = insertSkillReference(input.value, trigger, skill.name);
+          input.value = inserted.value;
+          input.setSelectionRange(inserted.cursor, inserted.cursor);
+          autoResize(input);
+          setSkillPickerExpanded(false);
+          input.focus();
+        }
+
+        async function refreshSkillPicker() {
+          const input = $("#agent-input");
+          const trigger = input && findSkillTrigger(input.value, input.selectionStart);
+          if (!input || !trigger) {
+            setSkillPickerExpanded(false);
+            return;
+          }
+          setSkillPickerExpanded(true);
+          renderSkillPicker("正在加载 Skills...");
+          try {
+            const skills = await loadSkillChoices();
+            const latestTrigger = findSkillTrigger(input.value, input.selectionStart);
+            if (!latestTrigger) {
+              setSkillPickerExpanded(false);
+              return;
+            }
+            if (isCompletedSkillReference(latestTrigger.query, skills)) {
+              setSkillPickerExpanded(false);
+              return;
+            }
+            visibleSkills = rankSkills(skills, latestTrigger.query);
+            activeSkillIndex = 0;
+            renderSkillPicker();
+          } catch (error) {
+            renderSkillPicker(error.message || "Skill 列表加载失败");
+          }
+        }
+
+        async function openFullSkillList() {
+          const input = $("#agent-input");
+          if (!input) return;
+          input.focus();
+          let skills = availableSkills;
+          try { skills = await loadSkillChoices(); } catch {}
+          const cursor = input.selectionStart ?? input.value.length;
+          const trigger = findSkillTrigger(input.value, cursor);
+          if (trigger && !isCompletedSkillReference(trigger.query, skills)) {
+            input.setRangeText("$", trigger.start, trigger.end, "end");
+          } else {
+            const prefix = input.value.slice(0, cursor);
+            input.setRangeText(`${prefix && !/\s$/.test(prefix) ? " " : ""}$`, cursor, cursor, "end");
+          }
+          autoResize(input);
+          await refreshSkillPicker();
+        }
+
+        function closeSkillPicker() {
+          setSkillPickerExpanded(false);
+        }
+
+        function fileToDataUrl(file) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+            reader.readAsDataURL(file);
+          });
+        }
+
+        async function addImageAttachments(files) {
+          for (const file of Array.from(files || [])) {
+            if (pendingAttachments.length >= 8) break;
+            if (!file.type.startsWith("image/") || file.size > 12 * 1024 * 1024) continue;
+            pendingAttachments.push({
+              name: file.name,
+              mime_type: file.type,
+              data_url: await fileToDataUrl(file),
+            });
+          }
+          renderAttachmentPreview();
+        }
+
+        function renderAttachmentPreview() {
+          const preview = $("#agent-attachment-preview");
+          if (!preview) return;
+          preview.classList.toggle("has-items", pendingAttachments.length > 0);
+          preview.innerHTML = pendingAttachments.map((item, index) => `
+            <div class="agent-attachment-chip">
+              <img src="${escapeAttr(item.data_url)}" alt="${escapeAttr(item.name)}" />
+              <button class="agent-attachment-remove" type="button" data-attachment-index="${index}" aria-label="移除图片">&times;</button>
+            </div>`).join("");
+        }
+
+        // ---- Helpers ----
+        function bindChatEvents() {
+          const input = $("#agent-input");
+          const sendBtn = $("#agent-send-btn");
+          const titleInput = $("#agent-title-input");
+          const skillButton = $("#agent-skill-button");
+          const skillPicker = $("#agent-skill-picker");
+          const attachmentInput = $("#agent-attachment-input");
+          const attachmentPreview = $("#agent-attachment-preview");
+
+          sendBtn.addEventListener("click", sendMessage);
+          input.addEventListener("keydown", (e) => {
+            if (!skillPicker.hidden && visibleSkills.length) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setActiveSkillIndex(activeSkillIndex + 1);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setActiveSkillIndex(activeSkillIndex - 1);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                chooseSkill();
+                return;
+              }
+            }
+            if (e.key === "Escape" && !skillPicker.hidden) {
+              e.preventDefault();
+              closeSkillPicker();
+              return;
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              sendMessage();
+            }
+          });
+          input.addEventListener("input", () => {
+            autoResize(input);
+            refreshSkillPicker();
+          });
+          input.addEventListener("click", refreshSkillPicker);
+          input.addEventListener("blur", () => setTimeout(() => {
+            if (!skillPicker.contains(document.activeElement) && document.activeElement !== skillButton) closeSkillPicker();
+          }, 0));
+          skillButton.addEventListener("click", openFullSkillList);
+          attachmentInput?.addEventListener("change", async (event) => {
+            await addImageAttachments(event.target.files);
+            event.target.value = "";
+          });
+          attachmentPreview?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-attachment-index]");
+            if (!button) return;
+            pendingAttachments.splice(Number(button.dataset.attachmentIndex), 1);
+            renderAttachmentPreview();
+          });
+          skillPicker.addEventListener("pointerdown", (event) => {
+            const option = event.target.closest("[data-skill-index]");
+            if (option) {
+              event.preventDefault();
+              chooseSkill(Number(option.dataset.skillIndex));
+            }
+          });
+          titleInput.addEventListener("change", (e) => renameSession(e.target.value));
+          const modelSelect = $("#agent-model-select");
+          modelSelect?.addEventListener("change", (e) => requestModelSwitch(e.target.value));
+          const presetSelect = $("#agent-session-preset-select");
+          presetSelect?.addEventListener("change", (e) => changePreset(e.target.value));
+          const sandboxSelect = $("#agent-sandbox-select");
+          sandboxSelect?.addEventListener("change", (e) => changeSandbox(e.target.value));
+          $("#agent-compact-btn")?.addEventListener("click", compactCurrentSession);
+          $("#agent-retry-btn")?.addEventListener("click", retryLastTurn);
+          $("#agent-summary-btn")?.addEventListener("click", openSummaryDialog);
+          $("#agent-checkpoint-btn")?.addEventListener("click", openCheckpointDialog);
+          $("#agent-approvals-btn")?.addEventListener("click", openApprovalsDialog);
+          $("#agent-run-refresh-btn")?.addEventListener("click", checkRunStatus);
+          $("#agent-messages")?.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-restore-checkpoint]");
+            if (button) restoreCheckpointAction(button.dataset.restoreCheckpoint);
+          });
+          $("#agent-clear-btn").addEventListener("click", clearSession);
+          renderRetryButton();
+        }
+
+        function autoResize(el) {
+          el.style.height = "auto";
+          el.style.height = Math.min(el.scrollHeight, 180) + "px";
+        }
+
+        function scrollToBottom() {
+          const div = $("#agent-messages");
+          if (div) div.scrollTop = div.scrollHeight;
+        }
+
+        function escapeHtml(s) {
+          if (!s) return "";
+          return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+        }
+        function escapeAttr(s) {
+          return escapeHtml(s).replace(/'/g, "&#39;");
+        }
+        function strVal(v) {
+          if (typeof v === "string") return v;
+          if (v == null) return "";
+          return String(v);
+        }
+        function formatJson(s) {
+          try { return JSON.stringify(JSON.parse(s), null, 2); } catch { return s; }
+        }
+        function renderErrorBannerHtml(message) {
+          const hint = String(message || "").includes("需要人工批准")
+            ? '<div style="margin-top: 4px; color: var(--muted);">可在顶部「批准」中允许该请求，允许后会自动重试上一轮。</div>'
+            : "";
+          return `<div class="agent-error-banner">${escapeHtml(message)}${hint}</div>`;
+        }
+
+        // ---- Init ----
+        function toggleSidebar() {
+          const sidebar = $("#agent-sidebar");
+          const backdrop = $("#agent-sidebar-backdrop");
+          sidebar.classList.toggle("open");
+          backdrop.classList.toggle("open", sidebar.classList.contains("open"));
+        }
+        function closeSidebar() {
+          $("#agent-sidebar").classList.remove("open");
+          $("#agent-sidebar-backdrop").classList.remove("open");
+        }
+
+        window.webClxNativeAgent = Object.freeze({
+          openSession: async (sessionId) => {
+            closeSidebar();
+            return selectSession(sessionId);
+          },
+          createSession: async (profileId) => {
+            closeSidebar();
+            return createProfileSession(profileId);
+          },
+        });
+
+        async function init() {
+          await loadSessions();
+          $("#agent-new-session").addEventListener("click", () => { closeSidebar(); createSession(); });
+          $("#agent-empty-new-session")?.addEventListener("click", createSession);
+          $("#agent-summary-save")?.addEventListener("click", saveSummary);
+          $("#agent-model-switch-confirm")?.addEventListener("click", () => confirmModelSwitch(false));
+          $("#agent-model-switch-clear")?.addEventListener("click", () => confirmModelSwitch(true));
+          $("#agent-model-switch-cancel")?.addEventListener("click", () => {
+            pendingModelSwitch = null;
+            const modelSelect = $("#agent-model-select");
+            if (modelSelect) modelSelect.value = previousModel;
+            previousModel = "";
+            $("#agent-model-switch-dialog")?.close();
+          });
+          document.addEventListener("click", (event) => {
+            const restoreButton = event.target.closest("[data-restore-checkpoint]");
+            if (restoreButton && event.target.closest("#agent-checkpoint-dialog")) {
+              restoreCheckpointAction(restoreButton.dataset.restoreCheckpoint);
+            }
+          });
+          document.addEventListener("click", (event) => {
+            if (!event.target.closest("#agent-approvals-dialog")) return;
+            const allowButton = event.target.closest("[data-approval-allow]");
+            if (allowButton) {
+              allowApproval(allowButton.dataset.approvalAllow);
+              return;
+            }
+            const denyButton = event.target.closest("[data-approval-deny]");
+            if (denyButton) denyApproval(denyButton.dataset.approvalDeny);
+          });
+          $("#agent-approvals-allow-all")?.addEventListener("click", allowAllApprovals);
+          $("#agent-approval-policy-select")?.addEventListener("change", (event) => {
+            changeApprovalPolicy(event.target.value);
+          });
+          document.addEventListener("click", (event) => {
+            const policyButton = event.target.closest("[data-approval-policy]");
+            if (policyButton) {
+              const banner = policyButton.closest(".agent-approval-prompt");
+              changeApprovalPolicy(policyButton.dataset.approvalPolicy);
+              banner?.remove();
+              return;
+            }
+            if (event.target.closest("[data-approval-prompt-dismiss]")) {
+              event.target.closest(".agent-approval-prompt")?.remove();
+            }
+          });
+          document.addEventListener("click", (event) => {
+            const closeButton = event.target.closest("[data-agent-dialog-close]");
+            if (closeButton) {
+              const dialog = document.getElementById(closeButton.dataset.agentDialogClose);
+              dialog?.close();
+            }
+          });
+          document.addEventListener("click", (event) => {
+            if (event.target.closest("[data-agent-sidebar-toggle]")) toggleSidebar();
+          });
+          $("#agent-sidebar-backdrop")?.addEventListener("click", closeSidebar);
+          $("#agent-session-list").addEventListener("click", (e) => {
+            const delBtn = e.target.closest(".session-delete");
+            if (delBtn) {
+              e.stopPropagation();
+              deleteSession(delBtn.dataset.id);
+              return;
+            }
+            const item = e.target.closest(".agent-session-item");
+            if (item) { closeSidebar(); selectSession(item.dataset.id); }
+          });
+        }
+
+        document.addEventListener("DOMContentLoaded", init);
+      })();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "webClx Terminal Message"
+  short_description: "Send tagged messages between webClx terminals"
+  default_prompt: "Use $webclx-terminal-message to send a tagged message to another webClx terminal."

@@ -1,0 +1,3883 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>webClx</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      (() => {
+        try {
+          const mode = window.localStorage.getItem("webclx:theme-mode");
+          let resolved;
+          if (mode === "dark" || mode === "light") {
+            resolved = mode;
+          } else {
+            resolved = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch {}
+      })();
+    </script>
+    <script>
+      document.addEventListener("click", (e) => {
+        const d = e.target.closest(".card-desc");
+        if (!d) return;
+        d.setAttribute(
+          "aria-pressed",
+          d.getAttribute("aria-pressed") === "true" ? "false" : "true",
+        );
+      });
+    </script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20260806b" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260813a" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260802b" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260804b" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260802c" />
+    <script defer src="/assets/i18n.js?v=20260814a"></script>
+    <script defer src="/assets/terminal-settings.js?v=20260812c"></script>
+    <script defer src="/assets/terminal-session-activity.js?v=20260726a"></script>
+    <script defer src="/assets/terminal-session-storage.js?v=20260618a"></script>
+    <script defer src="/assets/terminal-android-select-menu.js?v=20260804b"></script>
+    <script defer src="/assets/workspace-project-icons.js?v=20260729a"></script>
+    <script defer src="/assets/specified-preset-actions.js?v=20260812d"></script>
+    <script defer src="/assets/app-frp-manager.js?v=20260619a"></script>
+    <script defer src="/assets/app-proxy-manager.js?v=20260713c"></script>
+    <script defer src="/assets/app-auth-manager.js?v=20260716a"></script>
+    <script defer src="/assets/app-api-manager.js?v=20260731a"></script>
+    <script defer src="/assets/app-claude-manager.js?v=20260716a"></script>
+    <script defer src="/assets/app-account-clipboard-manager.js?v=20260716b"></script>
+    <script defer src="/assets/app-preset-sync-manager.js?v=20260618e"></script>
+    <script defer src="/assets/app-compile-status-manager.js?v=20260813b"></script>
+    <script defer src="/assets/app-system-panel-manager.js?v=20260713c"></script>
+    <script defer src="/assets/app-settings-formatters.js?v=20260730a"></script>
+    <script defer src="/assets/app-terminal-tools-settings.js?v=20260727c"></script>
+    <script defer src="/assets/app-error-keyword-rules.js?v=20260716a"></script>
+    <script defer src="/assets/app-terminal-commands.js?v=20260706a"></script>
+    <script defer src="/assets/app-config-override.js?v=20260719a"></script>
+    <script defer src="/assets/app-workspace-history-tooltip.js?v=20260707a"></script>
+    <script defer src="/assets/app-workspace-history.js?v=20260801b"></script>
+    <script defer src="/assets/app-version-check.js?v=20260706a"></script>
+    <script defer src="/assets/app-datetime-format.js?v=20260707a"></script>
+    <script defer src="/assets/app-preset-table.js?v=20260718a"></script>
+    <script defer src="/assets/app-terminal-archives.js?v=20260730b"></script>
+    <script defer src="/assets/app-path-utils.js?v=20260707a"></script>
+    <script defer src="/assets/app-session-views.js?v=20260724a"></script>
+    <script defer src="/assets/app-session-controls.js?v=20260718i"></script>
+    <script defer src="/assets/app-home-session-render.js?v=20260801a"></script>
+    <script defer src="/assets/app-preset-ops.js?v=20260723a"></script>
+    <script defer src="/assets/app-frp-proxy-ops.js?v=20260707a"></script>
+    <script defer src="/assets/app-feature-managers-init.js?v=20260802a"></script>
+    <script defer src="/assets/app-auto-continue-tasks.js?v=20260707a"></script>
+    <script defer src="/assets/app-unified-tasks.js?v=20260711a"></script>
+    <script defer src="/assets/app-workspace-browser.js?v=20260726c"></script>
+    <script defer src="/assets/app-designate-preset.js?v=20260727d"></script>
+    <script defer src="/assets/app-session-actions.js?v=20260801a"></script>
+    <script defer src="/assets/app-settings-categories.js?v=20260727b"></script>
+    <script defer src="/assets/app-navigation-tabs.js?v=20260725e"></script>
+    <script defer src="/assets/app-core-event-bindings.js?v=20260806a"></script>
+    <script defer src="/assets/app-frp-proxy-event-bindings.js?v=20260707a"></script>
+    <script defer src="/assets/app-preset-form-event-bindings.js?v=20260730a"></script>
+    <script defer src="/assets/app-settings-load-save.js?v=20260730a"></script>
+    <script defer src="/assets/app-settings-event-bindings.js?v=20260730a"></script>
+    <script defer src="/assets/app-desktop-update-events.js?v=20260710a"></script>
+    <script defer src="/assets/app-agent-settings.js?v=20260711b"></script>
+    <script defer src="/assets/app.js?v=20260806a"></script>
+  </head>
+  <body class="app-shell">
+    <div class="page browser-page">
+      <header class="topbar slim browser-topbar">
+        <div class="tabs page-tabs" role="tablist" aria-label="webClx tabs">
+          <a id="top-nav-terminal" class="tab-button topbar-link-button" href="/terminal" role="tab" aria-selected="false">
+            终端管理
+          </a>
+          <button id="tab-workspace" class="tab-button active" data-tab="workspace" role="tab" aria-selected="true">
+            工作区
+          </button>
+          <button id="tab-workspace-history" class="tab-button" data-tab="workspace-history" role="tab" aria-selected="false">
+            历史工作区
+          </button>
+          <button id="tab-api" class="tab-button" data-tab="api" role="tab" aria-selected="false">
+            Codex_API
+          </button>
+          <button id="tab-claude" class="tab-button" data-tab="claude" role="tab" aria-selected="false">
+            Claude_API
+          </button>
+          <button id="tab-settings" class="tab-button" data-tab="settings" role="tab" aria-selected="false">
+            设置
+          </button>
+          <button id="tab-desktop" class="tab-button" data-tab="desktop" role="tab" aria-selected="false">
+            远程桌面
+          </button>
+          <a class="tab-button topbar-link-button" href="/agent" role="tab" aria-selected="false">
+            Agent
+          </a>
+          <button id="tab-auth" class="tab-button" data-tab="auth" role="tab" aria-selected="false">
+            Codex_OAuth
+          </button>
+          <button id="tab-terminal-archives" class="tab-button" data-tab="terminal-archives" role="tab" aria-selected="false">
+            归档列表
+          </button>
+          <a class="tab-button topbar-link-button" href="/downloads" role="tab" aria-selected="false">
+            编译产物
+          </a>
+        </div>
+
+      </header>
+
+      <main id="workspace-view" class="layout tab-view active">
+        <section class="panel browser-panel">
+          <div class="panel-head workspace-heading-line">
+            <div class="workspace-heading-copy">
+              <p class="section-label">目录浏览</p>
+              <div class="workspace-path-copy">
+                <button id="copy-current-path" class="workspace-current-copy" type="button" title="点击复制当前路径" aria-label="复制当前目录路径">当前目录：</button>
+                <nav id="current-path" class="browser-path browser-breadcrumb mono-text" aria-label="当前目录路径">/</nav>
+              </div>
+            </div>
+          </div>
+
+          <div class="directory-session-strip">
+            <div class="directory-session-actions">
+              <a id="open-terminal-root" class="link-button" href="/terminal" title="直接在当前页面显示的目录新建终端，不跟随下拉框切换">
+                当前目录终端
+              </a>
+              <select id="favorite-path-select" class="favorite-select workspace-favorite-select" aria-label="跳转收藏">
+                <option value="">跳转收藏</option>
+              </select>
+              <select id="directory-session-list" class="terminal-session-select directory-session-select" aria-label="切换终端">
+                <option value="">正在读取当前目录终端会话…</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="workspace-filter-strip">
+            <label class="workspace-hidden-entries-label">
+              <input id="workspace-show-hidden-input" type="checkbox" />
+              显示隐藏文件
+            </label>
+          </div>
+
+          <div class="table-wrap">
+            <table class="entry-table file-browser-table">
+              <thead>
+                <tr>
+                  <th>操作</th>
+                  <th>收藏</th>
+                  <th>图标</th>
+                  <th>名称</th>
+                  <th>大小</th>
+                </tr>
+              </thead>
+              <tbody id="entry-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="panel editor-panel">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">文本编辑</p>
+              <h2 id="current-file">尚未打开文件</h2>
+            </div>
+            <div class="toolbar editor-toolbar">
+              <p id="file-meta" class="meta-text compact-meta">仅支持 UTF-8 文本文件</p>
+              <button
+                id="import-auth-clipboard"
+                class="button secondary"
+                type="button"
+                title="从剪贴板读取账号 JSON，转换为当前 auth.json 格式"
+                disabled
+                hidden
+              >
+                剪贴板导入
+              </button>
+              <button id="save-file" class="button primary" disabled>保存文件</button>
+            </div>
+          </div>
+
+          <div id="file-status" class="inline-status" data-tone="muted">
+            点击左侧文件可在这里查看和修改内容。
+          </div>
+
+          <textarea
+            id="editor"
+            class="editor"
+            spellcheck="false"
+            placeholder="打开 UTF-8 文本文件后即可在线编辑。"
+            disabled
+          ></textarea>
+        </section>
+
+        <section id="sessions-view" class="panel sessions-panel workspace-sessions-panel" aria-labelledby="sessions-heading">
+          <div class="panel-head">
+            <div class="sessions-heading-copy">
+              <p class="section-label">终端管理</p>
+              <div class="sessions-title-line">
+                <h2 id="sessions-heading">全部终端会话</h2>
+                <span id="sessions-status" class="sessions-light-status" data-tone="info" role="status" aria-live="polite" hidden></span>
+              </div>
+            </div>
+            <div class="toolbar">
+              <form id="sessions-search-form" class="session-search-form" role="search">
+                <input
+                  id="sessions-search-input"
+                  class="text-input session-search-input"
+                  type="search"
+                  inputmode="search"
+                  autocomplete="off"
+                  spellcheck="false"
+                  aria-label="搜索终端输出"
+                  placeholder="搜索"
+                />
+                <button id="sessions-search-submit" class="button secondary" type="submit">搜索</button>
+                <button id="sessions-search-clear" class="button secondary" type="button">清除</button>
+              </form>
+              <button id="refresh-sessions" class="button secondary" type="button">刷新终端</button>
+              <button id="create-session" class="button primary" type="button">新建终端</button>
+              <select id="sessions-session-list" class="terminal-session-select directory-session-select" aria-label="选择活动终端">
+                <option value="">正在读取终端会话列表…</option>
+              </select>
+              <a id="open-terminal-session-root" class="link-button" href="/terminal">打开终端</a>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="entry-table sessions-table">
+              <thead>
+                <tr>
+                  <th>进入</th>
+                  <th>改名</th>
+                  <th>结束</th>
+                  <th>终端</th>
+                  <th>目录</th>
+                  <th>标题</th>
+                  <th>匹配</th>
+                </tr>
+              </thead>
+              <tbody id="sessions-list"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <section
+        id="workspace-history-view"
+        class="panel sessions-panel tab-view"
+        role="tabpanel"
+        aria-labelledby="tab-workspace-history"
+      >
+        <div class="panel-head table-card-head">
+          <div class="table-card-title-row">
+            <div>
+              <p class="section-label">历史工作区</p>
+              <h2>按工作目录查看对话</h2>
+            </div>
+            <div id="workspace-history-status" class="inline-status compact-status table-card-status" data-tone="info" role="status" aria-live="polite">正在读取历史工作区…</div>
+          </div>
+          <div class="toolbar workspace-history-toolbar">
+            <select id="workspace-history-path-select" class="terminal-session-select directory-session-select" aria-label="切换历史工作目录">
+              <option value="">正在读取历史工作区…</option>
+            </select>
+            <button id="workspace-history-terminal" class="button secondary" type="button">新建终端</button>
+            <button id="workspace-history-delete" class="button secondary" type="button">删除目录</button>
+            <button id="workspace-history-refresh" class="button secondary" type="button">刷新对话</button>
+            <form id="workspace-history-search-form" class="session-search-form" role="search">
+              <input
+                id="workspace-history-search-input"
+                class="text-input session-search-input"
+                type="search"
+                inputmode="search"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="搜索历史工作区对话"
+                placeholder="搜索"
+              />
+              <button id="workspace-history-search-submit" class="button secondary" type="submit">搜索</button>
+              <button id="workspace-history-search-clear" class="button secondary" type="button">清除</button>
+              <label class="workspace-history-search-scope-label">
+              <input
+                id="workspace-history-search-all"
+                type="checkbox"
+              />
+              所有工作区
+            </label>
+            <label class="workspace-history-search-scope-label">
+              <input
+                id="workspace-history-recent-only"
+                type="checkbox"
+                checked
+              />
+              仅30天
+            </label>
+          </form>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="entry-table workspace-history-table">
+            <thead>
+              <tr>
+                <th>操作</th>
+                <th>终端</th>
+                <th>终端名字</th>
+                <th>session ID</th>
+                <th>大小</th>
+                <th>对话历史</th>
+                <th>最近更新</th>
+              </tr>
+            </thead>
+            <tbody id="workspace-history-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section
+        id="terminal-archives-view"
+        class="panel sessions-panel tab-view"
+        role="tabpanel"
+        aria-labelledby="tab-terminal-archives"
+      >
+        <div class="panel-head table-card-head">
+          <div class="table-card-title-row">
+            <div>
+              <p class="section-label">Codex 会话归档</p>
+              <h2>归档列表</h2>
+            </div>
+            <div id="terminal-archives-status" class="inline-status compact-status table-card-status" data-tone="info" role="status" aria-live="polite">正在读取归档列表…</div>
+          </div>
+          <div class="toolbar">
+            <button id="refresh-terminal-archives" class="button secondary" type="button">刷新归档</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="entry-table terminal-archives-table">
+            <thead>
+              <tr>
+                <th>运行</th>
+                <th>删除</th>
+                <th>备注</th>
+                <th>Resume ID</th>
+                <th>工作目录</th>
+                <th>命令</th>
+                <th>最近使用</th>
+              </tr>
+            </thead>
+            <tbody id="terminal-archives-list"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="auth-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-auth">
+
+        <section class="auth-card auth-list-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">已保存预设</p>
+            </div>
+            <div class="toolbar">
+              <button id="auth-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
+              <button id="auth-clipboard-export" class="button secondary" type="button">导出到剪贴板</button>
+              <button id="auth-test-all-presets" class="button secondary" type="button">测试所有账号</button>
+              <button id="auth-refresh-all-quotas" class="button secondary" type="button">刷新所有账号额度</button>
+            </div>
+          </div>
+
+          <div class="table-wrap auth-table-wrap">
+            <table class="entry-table auth-table">
+              <thead>
+                <tr>
+                  <th>序号</th>
+                  <th>排序</th>
+                  <th>切换</th>
+                  <th>刷新</th>
+                  <th>测试</th>
+                  <th>编辑</th>
+                  <th>状态指示</th>
+                  <th>邮箱</th>
+                  <th>套餐</th>
+                  <th>Team/账号名</th>
+                  <th>Hourly（已用）</th>
+                  <th>Weekly（已用）</th>
+                  <th>上次刷新</th>
+                  <th>刷新距今</th>
+                  <th>保存时间</th>
+                  <th>登录</th>
+                  <th>删除</th>
+                </tr>
+              </thead>
+              <tbody id="auth-preset-list"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <div hidden>
+          <p id="auth-current-file"></p>
+          <p id="auth-current-account"></p>
+          <p id="auth-config-file"></p>
+          <p id="auth-preset-file"></p>
+        </div>
+
+        <div class="auth-layout auth-layout-merged">
+          <div class="auth-sidebar">
+            <section class="auth-card">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">新增预设</p>
+                  <h2>粘贴账号 JSON</h2>
+                </div>
+              </div>
+
+              <div class="toolbar auth-actions">
+                <button id="auth-oauth-start" class="button secondary" type="button">官网登录</button>
+                <a
+                  id="auth-oauth-open-link"
+                  class="button secondary"
+                  href="https://auth.openai.com/codex/device"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  hidden
+                >打开官网</a>
+                <button id="auth-oauth-copy-code" class="button secondary" type="button" hidden>复制验证码</button>
+              </div>
+              <div id="auth-oauth-session-panel" class="settings-card settings-card-tight" hidden>
+                <div class="card-label-help">
+                  <p class="section-label">当前登录会话</p>
+                  <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                    <span class="card-desc-icon">?</span>
+                    <span class="card-desc-text">如果浏览器没有自动打开，请手动点击"打开官网"，输入上面的验证码继续。</span>
+                  </span>
+                </div>
+                <p id="auth-oauth-session-summary" class="settings-value">等待发起…</p>
+                <p class="meta-text mono-text">验证码：<span id="auth-oauth-user-code">-</span></p>
+              </div>
+              <div id="auth-oauth-status" class="inline-status" data-tone="muted" hidden></div>
+
+              <label class="field auth-field">
+                <span class="field-label">预设名称</span>
+                <input
+                  id="auth-preset-name"
+                  class="text-input"
+                  type="text"
+                  placeholder="留空则按账号自动命名"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <details id="auth-config-overrides-details" class="config-overrides-details auth-field">
+                <summary class="config-overrides-summary">
+                  <span class="field-title-help">
+                    <span class="field-label">可选 config.toml 额外覆盖</span>
+                    <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                      <span class="card-desc-icon">?</span>
+                      <span class="card-desc-text">前两行留空时沿用设置页默认；后续行请填键名和值。</span>
+                    </span>
+                  </span>
+                  <span id="auth-config-overrides-summary" class="config-overrides-summary-text">未设置</span>
+                </summary>
+                <div class="config-overrides-panel">
+                  <div id="auth-config-overrides-list" class="config-overrides-list"></div>
+                  <div class="toolbar auth-actions config-overrides-actions">
+                    <button id="auth-add-config-override" class="button secondary" type="button">添加一项</button>
+                  </div>
+                </div>
+              </details>
+
+              <label class="field auth-field">
+                <span class="field-label">账号 JSON</span>
+                <textarea
+                  id="auth-preset-input"
+                  class="auth-preset-editor"
+                  spellcheck="false"
+                  placeholder='可粘贴 CPA 账号数组、导出的账号数组，或当前 auth.json 对象。'
+                ></textarea>
+              </label>
+
+              <div class="toolbar auth-actions">
+                <button id="auth-import-file-button" class="button secondary" type="button">导入 JSON 文件</button>
+                <input
+                  id="auth-import-file"
+                  class="sr-only"
+                  type="file"
+                  accept="application/json,.json"
+                  aria-label="选择 Codex OAuth 账号 JSON 文件"
+                />
+                <button id="auth-clear-input" class="button secondary" type="button">清空</button>
+                <button id="auth-apply-input" class="button secondary" type="button">应用到 auth.json</button>
+                <button id="auth-save-preset" class="button primary" type="button">新增</button>
+                <button id="auth-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
+                <button id="auth-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
+              </div>
+
+              <div id="auth-form-status" class="inline-status" data-tone="muted">
+                保存时会先转换成当前 auth.json 的键结构，再写入预设仓库。
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <section id="api-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-api">
+        <section class="auth-card auth-list-card api-top-list-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">已保存预设</p>
+            </div>
+            <div class="toolbar api-preset-toolbar">
+              <label class="api-preset-group-control">
+                <span>分组</span>
+                <select
+                  id="api-preset-group-mode"
+                  class="text-input api-preset-group-select"
+                  aria-label="API 预设分组方式"
+                >
+                  <option value="base_url">Base URL</option>
+                  <option value="model">大模型</option>
+                </select>
+              </label>
+              <label class="api-preset-search-control">
+                <span class="sr-only">搜索 API 预设</span>
+                <input
+                  id="api-preset-search"
+                  class="text-input api-preset-search-input"
+                  type="search"
+                  placeholder="搜索名字、模型或 URL"
+                  autocomplete="off"
+                />
+              </label>
+              <button
+                id="api-preset-selection-mode"
+                class="button secondary"
+                type="button"
+                aria-pressed="false"
+              >
+                选择
+              </button>
+              <button id="api-add-preset" class="button primary" type="button">新增预设</button>
+              <details class="api-toolbar-more">
+                <summary class="button secondary">更多</summary>
+                <div class="api-toolbar-menu" role="group" aria-label="API 预设批量操作">
+                  <button id="api-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
+                  <button id="api-clipboard-export" class="button secondary" type="button">导出已选</button>
+                  <button id="api-account-import-file-button" class="button secondary" type="button">导入 JSON / 压缩包</button>
+                  <input
+                    id="api-account-import-file"
+                    class="sr-only"
+                    type="file"
+                    multiple
+                    accept="application/json,application/zip,application/x-tar,application/gzip,.json,.zip,.tar,.tar.gz,.tgz,.gz"
+                    aria-label="选择 Codex API 账号 JSON 或压缩包"
+                  />
+                  <button id="api-test-all-presets" class="button secondary" type="button">测试所有账号</button>
+                </div>
+              </details>
+            </div>
+          </div>
+
+          <div class="table-wrap auth-table-wrap api-desktop-table-wrap">
+            <table class="entry-table auth-table">
+              <thead>
+                <tr>
+                  <th>序号</th>
+                  <th>操作</th>
+                  <th>状态指示</th>
+                  <th>名字</th>
+                  <th>Base URL</th>
+                  <th>Wire</th>
+                  <th>协议转换</th>
+                  <th>本机入口</th>
+                  <th>管理URL</th>
+                  <th>凭据</th>
+                  <th>启动环境</th>
+                  <th>启动脚本</th>
+                  <th>使用</th>
+                  <th>保存时间</th>
+                </tr>
+              </thead>
+              <tbody id="api-preset-list"></tbody>
+            </table>
+          </div>
+          <div
+            id="api-preset-mobile-list"
+            class="api-preset-mobile-list"
+            role="list"
+            aria-live="polite"
+          ></div>
+          <div id="api-manager-status" class="inline-status" data-tone="muted" hidden></div>
+        </section>
+
+        <div hidden>
+          <p id="api-current-target"></p>
+          <p id="api-current-file"></p>
+          <p id="api-config-file"></p>
+          <p id="api-preset-file"></p>
+        </div>
+
+        <section id="codex-api-global-defaults" class="auth-card api-global-defaults-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">全局 / 默认选项</p>
+              <h2>Codex 公共配置</h2>
+            </div>
+          </div>
+          <div class="codex-common-config-section">
+            <div class="settings-section-head codex-common-config-head">
+              <div>
+                <h3>当前 config.toml</h3>
+                <p id="codex-common-config-path" class="meta-text mono-text">正在读取…</p>
+              </div>
+              <div class="toolbar codex-common-config-toolbar">
+                <button id="codex-common-config-refresh" class="button secondary" type="button">刷新</button>
+                <button id="codex-common-config-save" class="button primary" type="button">保存当前配置</button>
+              </div>
+            </div>
+            <div class="codex-common-config-options" role="group" aria-label="Codex 当前公共配置">
+              <label class="codex-common-config-option" for="codex-common-approval-never">
+                <input id="codex-common-approval-never" type="checkbox" />
+                <span>
+                  <strong>不弹审批</strong>
+                  <code>approval_policy = "never"</code>
+                </span>
+              </label>
+              <label class="codex-common-config-option" for="codex-common-sandbox-full-access">
+                <input id="codex-common-sandbox-full-access" type="checkbox" />
+                <span>
+                  <strong>完全访问</strong>
+                  <code>sandbox_mode = "danger-full-access"</code>
+                </span>
+              </label>
+            </div>
+            <div
+              id="codex-common-config-status"
+              class="inline-status"
+              data-tone="muted"
+              role="status"
+              aria-live="polite"
+              hidden
+            ></div>
+          </div>
+          <div class="settings-section-head codex-default-config-head">
+            <div>
+              <h3>预设默认值</h3>
+            </div>
+            <div class="toolbar codex-default-config-toolbar">
+              <button id="codex-default-config-add" class="button secondary" type="button">添加一项</button>
+              <button id="codex-default-config-reset" class="button secondary" type="button">恢复内置</button>
+              <button id="codex-default-config-save" class="button primary" type="button">保存默认值</button>
+            </div>
+          </div>
+          <div class="table-wrap codex-default-config-table-wrap">
+            <table class="entry-table codex-default-config-table" aria-label="Codex 全局默认 config">
+              <thead>
+                <tr>
+                  <th scope="col">键名</th>
+                  <th scope="col">默认值</th>
+                  <th scope="col">作用域</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="codex-default-config-list"></tbody>
+            </table>
+          </div>
+          <div
+            id="codex-default-config-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+        </section>
+
+        <div id="api-preset-editor-panel" class="auth-layout api-editor-layout" hidden>
+          <section class="auth-card">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">新增预设</p>
+                <h2>保存 API 凭据与 Base URL</h2>
+              </div>
+            </div>
+
+            <div class="api-preset-basic-grid">
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">行号</span>
+                <input
+                  id="api-preset-row-number"
+                  class="text-input mono-text"
+                  type="number"
+                  min="1"
+                  step="1"
+                  placeholder="编辑时可改"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">预设名称</span>
+                <input
+                  id="api-preset-name"
+                  class="text-input"
+                  type="text"
+                  placeholder="留空则按 Base URL 自动命名"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">凭据</span>
+                <input
+                  id="api-key-input"
+                  class="text-input mono-text"
+                  type="text"
+                  placeholder="sk-..."
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">Base URL</span>
+                <input
+                  id="api-base-url-input"
+                  class="text-input mono-text"
+                  type="text"
+                  placeholder="https://api.openai.com/v1"
+                  list="api-base-url-presets"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <datalist id="api-base-url-presets"></datalist>
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">Wire API</span>
+                <select id="api-wire-api-input" class="text-input mono-text">
+                  <option value="responses">responses</option>
+                </select>
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">模型</span>
+                <input
+                  id="api-model-input"
+                  class="text-input mono-text"
+                  type="text"
+                  placeholder="gpt-5.6-sol / GLM-5.2 / deepseek-chat"
+                  list="api-model-presets"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <datalist id="api-model-presets"></datalist>
+              </label>
+
+              <label class="field auth-field auth-inline-field">
+                <span class="field-label">协议转换</span>
+                <select id="api-responses-proxy-input" class="text-input mono-text">
+                  <option value="direct">不转换（上游已支持 Responses）</option>
+                  <option value="openai_chat">OpenAI Chat → OpenAI Responses</option>
+                  <option value="deepseek_chat">DeepSeek Chat → OpenAI Responses</option>
+                  <option value="minimax_chat">MiniMax Chat → OpenAI Responses</option>
+                  <option value="anthropic_chat">Anthropic Messages → OpenAI Responses</option>
+                </select>
+              </label>
+
+              <label class="field auth-field auth-inline-field auth-inline-toggle-field">
+                <span class="field-label">管理URL</span>
+                <span class="auth-inline-control auth-expandable-control">
+                  <span class="toggle-row inline-toggle-row">
+                    <input
+                      id="api-management-url-same-as-base"
+                      type="checkbox"
+                      checked
+                    />
+                    <span class="toggle-note">管理URL和BASE_URL一致</span>
+                  </span>
+                  <span id="api-management-url-panel" class="auth-inline-expand-panel" hidden>
+                    <input
+                      id="api-management-url-input"
+                      class="text-input mono-text"
+                      type="text"
+                      placeholder="https://platform.openai.com/api-keys"
+                      autocomplete="off"
+                      spellcheck="false"
+                      aria-label="自定义管理URL"
+                    />
+                  </span>
+                </span>
+              </label>
+
+              <label class="field auth-field auth-inline-field auth-inline-toggle-field">
+                <span class="field-label">本机入口</span>
+                <span class="auth-inline-control auth-expandable-control">
+                  <span class="toggle-row inline-toggle-row">
+                    <input
+                      id="api-apply-upstream-proxy-on-switch"
+                      type="checkbox"
+                    />
+                    <span class="toggle-note">切换此预设时使用 /api/upstream/openai/v1 入口</span>
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <details id="api-config-overrides-details" class="config-overrides-details auth-field">
+              <summary class="config-overrides-summary">
+                <span class="field-label">可选 config.toml 额外覆盖</span>
+                <span id="api-config-overrides-summary" class="config-overrides-summary-text">未设置</span>
+              </summary>
+              <div class="config-overrides-panel">
+                <span class="field-help">
+                  前两行留空时沿用全局默认；后续行请填键名和值。
+                </span>
+                <div id="api-config-overrides-list" class="config-overrides-list"></div>
+                <div class="toolbar auth-actions config-overrides-actions">
+                  <button id="api-add-config-override" class="button secondary" type="button">添加一项</button>
+                </div>
+              </div>
+            </details>
+
+            <details id="api-terminal-startup-details" class="config-overrides-details auth-field">
+              <summary class="config-overrides-summary">
+                <span class="field-label">可选终端启动脚本</span>
+                <span class="config-overrides-summary-text">随新终端执行</span>
+              </summary>
+              <div class="config-overrides-panel">
+                <label class="field auth-field">
+                  <span class="field-label">环境变量</span>
+                  <textarea
+                    id="api-terminal-env-input"
+                    class="auth-preset-editor mono-text"
+                    rows="3"
+                    placeholder="CODEX_RESPONSE_STYLE=caveman"
+                    spellcheck="false"
+                  ></textarea>
+                </label>
+                <label class="field auth-field">
+                  <span class="field-label">启动脚本</span>
+                  <textarea
+                    id="api-terminal-startup-script-input"
+                    class="auth-preset-editor mono-text"
+                    rows="4"
+                    placeholder="echo ready"
+                    spellcheck="false"
+                  ></textarea>
+                </label>
+              </div>
+            </details>
+
+            <div class="toolbar auth-actions">
+              <button id="api-account-import-text-button" class="button secondary" type="button">从文本导入</button>
+              <button id="api-clear-input" class="button secondary" type="button">清空</button>
+              <button id="api-save-preset" class="button primary" type="button">新增</button>
+              <button id="api-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
+              <button id="api-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
+            </div>
+
+            <div id="api-account-import-status" class="inline-status" data-tone="muted" hidden></div>
+
+            <div id="api-form-status" class="inline-status" data-tone="muted">
+              应用 API 预设时会同时写入 auth.json，并按全局默认、Wire API 和预设覆盖去校正 config.toml。所有 Codex_API 预设共用同一个 provider ID：`webclx_api`。
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="claude-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-claude">
+        <section class="auth-card auth-list-card api-top-list-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">已保存预设</p>
+            </div>
+            <div class="toolbar">
+              <button id="claude-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
+              <button id="claude-clipboard-export" class="button secondary" type="button">导出到剪贴板</button>
+              <button id="claude-test-all-presets" class="button secondary" type="button">测试所有账号</button>
+            </div>
+          </div>
+
+          <div class="table-wrap auth-table-wrap">
+            <table class="entry-table auth-table">
+              <thead>
+                <tr>
+                  <th>序号</th>
+                  <th>排序</th>
+                  <th>切换</th>
+                  <th>测试</th>
+                  <th>OpenCode</th>
+                  <th>编辑</th>
+                  <th>删除</th>
+                  <th>状态指示</th>
+                  <th>名字</th>
+                  <th>Base URL</th>
+                  <th>管理URL</th>
+                  <th>Token</th>
+                  <th>模型</th>
+                  <th>协议转换</th>
+                  <th>保存时间</th>
+                </tr>
+              </thead>
+              <tbody id="claude-preset-list"></tbody>
+            </table>
+          </div>
+          <div id="claude-manager-status" class="inline-status" data-tone="muted" hidden></div>
+        </section>
+
+        <div hidden>
+          <p id="claude-current-file"></p>
+          <p id="claude-current-target"></p>
+          <p id="claude-preset-file"></p>
+        </div>
+
+        <section id="claude-api-global-defaults" class="auth-card api-global-defaults-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">全局 / 默认选项</p>
+              <h2>Claude settings.json env 默认值</h2>
+            </div>
+            <div class="toolbar">
+              <button id="claude-default-config-add" class="button secondary" type="button">添加一项</button>
+              <button id="claude-default-config-reset" class="button secondary" type="button">恢复内置</button>
+              <button id="claude-default-config-save" class="button primary" type="button">保存默认值</button>
+            </div>
+          </div>
+          <div class="table-wrap codex-default-config-table-wrap">
+            <table class="entry-table codex-default-config-table" aria-label="Claude 全局默认 env">
+              <thead>
+                <tr>
+                  <th scope="col">环境变量</th>
+                  <th scope="col">默认值</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="claude-default-config-list"></tbody>
+            </table>
+          </div>
+          <div
+            id="claude-default-config-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+        </section>
+
+        <div class="auth-layout api-editor-layout">
+          <section class="auth-card claude-editor-card">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">新增预设</p>
+                <h2>保存 Claude Code 配置</h2>
+              </div>
+            </div>
+
+            <label class="field auth-field">
+              <span class="field-label">名字</span>
+              <input
+                id="claude-provider-name-input"
+                class="text-input"
+                type="text"
+                placeholder="留空则按 Base URL 自动生成"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+
+            <label class="field auth-field">
+              <span class="field-label">Auth Token</span>
+              <input
+                id="claude-auth-token-input"
+                class="text-input mono-text"
+                type="text"
+                placeholder="sk-ant-..."
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+
+            <label class="field auth-field">
+              <span class="field-label">管理URL</span>
+              <input
+                id="claude-management-url-input"
+                class="text-input mono-text"
+                type="text"
+                placeholder="https://console.anthropic.com/settings/keys"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+
+            <label class="field auth-field">
+              <span class="field-label">Base URL</span>
+              <input
+                id="claude-base-url-input"
+                class="text-input mono-text"
+                type="text"
+                placeholder="https://api.anthropic.com"
+                list="claude-base-url-presets"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <datalist id="claude-base-url-presets"></datalist>
+            </label>
+
+            <div class="claude-model-groups">
+              <div id="claude-official-model-settings" class="claude-model-group">
+                <div class="claude-model-group-head">
+                  <label class="claude-model-group-choice" for="claude-model-mode-official">
+                    <input
+                      id="claude-model-mode-official"
+                      class="claude-model-mode-radio"
+                      type="radio"
+                      name="claude-model-mode"
+                      value="official"
+                      checked
+                    />
+                    <span class="section-label">官方模型设置</span>
+                  </label>
+                  <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                    <span class="card-desc-icon">?</span>
+                    <span class="card-desc-text">Haiku、Sonnet、Opus 默认模型都属于官方模型设置。留空保持默认；如需填写，要确保 Base URL 提供和官方模型名字一样的模型。输入框支持下拉选择预设，也可以直接改。</span>
+                  </span>
+                </div>
+
+                <label class="field auth-field">
+                  <span class="field-label">Haiku 默认模型</span>
+                  <input
+                    id="claude-default-haiku-model-input"
+                    class="text-input mono-text"
+                    type="text"
+                    list="claude-shared-model-options"
+                    placeholder="留空保持默认"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+
+                <label class="field auth-field">
+                  <span class="field-label">Sonnet 默认模型</span>
+                  <input
+                    id="claude-default-sonnet-model-input"
+                    class="text-input mono-text"
+                    type="text"
+                    list="claude-shared-model-options"
+                    placeholder="留空保持默认"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+
+                <label class="field auth-field">
+                  <span class="field-label">Opus 默认模型</span>
+                  <input
+                    id="claude-default-opus-model-input"
+                    class="text-input mono-text"
+                    type="text"
+                    list="claude-shared-model-options"
+                    placeholder="留空保持默认"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+
+              <div id="claude-third-party-model-settings" class="claude-model-group">
+                <div class="claude-model-group-head">
+                  <label class="claude-model-group-choice" for="claude-model-mode-third-party">
+                    <input
+                      id="claude-model-mode-third-party"
+                      class="claude-model-mode-radio"
+                      type="radio"
+                      name="claude-model-mode"
+                      value="third-party"
+                    />
+                    <span class="section-label">第三方模型设置</span>
+                  </label>
+                  <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                    <span class="card-desc-icon">?</span>
+                    <span class="card-desc-text">通过单选框与官方模型设置二选一。输入框支持下拉选择预设，也可以直接改，只有当前选中的这一组会启用并保存。</span>
+                  </span>
+                </div>
+
+                <label class="field auth-field">
+                  <span class="field-label">第三方模型</span>
+                  <input
+                    id="claude-third-party-model-input"
+                    class="text-input mono-text"
+                    type="text"
+                    list="claude-shared-model-options"
+                    placeholder="glm-5.1"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <details id="claude-config-overrides-details" class="config-overrides-details auth-field">
+              <summary class="config-overrides-summary">
+                <span class="field-label">可选 settings.json env 额外选项</span>
+                <span id="claude-config-overrides-summary" class="config-overrides-summary-text">未设置</span>
+              </summary>
+              <div class="config-overrides-panel">
+                <span class="field-help">
+                  默认不添加任何附加项。这里会写入 `~/.claude/settings.json` 的 `env` 对象；请显式填写键名和键值。
+                </span>
+                <div id="claude-config-overrides-list" class="config-overrides-list"></div>
+                <div class="toolbar auth-actions config-overrides-actions">
+                  <button id="claude-add-config-override" class="button secondary" type="button">添加一项</button>
+                </div>
+              </div>
+            </details>
+
+            <datalist id="claude-shared-model-options">
+              <option value="claude-sonnet-4-6"></option>
+              <option value="claude-opus-4-6"></option>
+              <option value="claude-opus-4-6-thinking"></option>
+              <option value="GLM-5.1"></option>
+              <option value="GLM-4.7"></option>
+              <option value="MiniMax-M2.7"></option>
+            </datalist>
+
+            <label class="field auth-field claude-use-local-proxy-row">
+              <span class="field-label">协议转换</span>
+              <select id="claude-access-mode-input" class="text-input mono-text">
+                <option value="direct">不转换（直连 Anthropic Messages）</option>
+                <option value="anthropic_relay">Anthropic 无转换中转</option>
+                <option value="openai_chat">OpenAI Chat → Anthropic Messages</option>
+                <option value="openai_responses">OpenAI Responses → Anthropic Messages</option>
+              </select>
+            </label>
+
+            <div class="toolbar auth-actions">
+              <button id="claude-clear-input" class="button secondary" type="button">清空</button>
+              <button id="claude-save-preset" class="button primary" type="button">新增</button>
+              <button id="claude-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
+              <button id="claude-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
+            </div>
+
+            <div id="claude-form-status" class="inline-status" data-tone="muted">
+              官方模型设置与第三方模型设置通过单选框二选一。应用 Claude 预设时会更新 ~/.claude/settings.json 的 env 配置、模型字段、协议转换和额外选项。
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section id="settings-view" class="panel settings-panel tab-view" role="tabpanel" aria-labelledby="tab-settings">
+        <div class="tabs settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类">
+          <button
+            id="settings-tab-tools"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-tools"
+            data-settings-category="tools"
+          >
+            工作流
+          </button>
+          <button
+            id="settings-tab-system"
+            class="tab-button settings-category-button active"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="settings-panel-system"
+            data-settings-category="system"
+          >
+            系统
+          </button>
+          <button
+            id="settings-tab-terminal"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-terminal"
+            data-settings-category="terminal"
+          >
+            终端
+          </button>
+          <button
+            id="settings-category-input"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-soft-keyboard settings-panel-shortcuts"
+            data-settings-category="input"
+          >
+            终端输入
+          </button>
+          <button
+            id="settings-tab-appearance"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-appearance"
+            data-settings-category="appearance"
+          >
+            外观
+          </button>
+          <button
+            id="settings-tab-auto-continue-tasks"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-auto-continue-tasks"
+            data-settings-category="tasks"
+          >
+            任务
+          </button>
+          <button
+            id="settings-tab-compile"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-compile"
+            data-settings-category="build"
+          >
+            构建
+          </button>
+          <button
+            id="settings-category-ai"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-model settings-panel-agent settings-panel-config-files"
+            data-settings-category="ai"
+          >
+            AI
+          </button>
+          <button
+            id="settings-category-network"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-proxy settings-panel-frpc settings-panel-frps"
+            data-settings-category="network"
+          >
+            网络
+          </button>
+          <button
+            id="settings-category-maintenance"
+            class="tab-button settings-category-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel-preset-sync settings-panel-update"
+            data-settings-category="maintenance"
+          >
+            维护
+          </button>
+        </div>
+        <div
+          id="settings-subtabs"
+          class="tabs settings-subtabs"
+          role="tablist"
+          aria-label="设置子分类"
+          hidden
+        ></div>
+
+        <section
+          id="settings-panel-system"
+          class="settings-subpanel active"
+          role="tabpanel"
+          aria-labelledby="settings-tab-system"
+          data-settings-panel="system"
+        >
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">服务控制与账号</p>
+              </div>
+              <div class="toolbar">
+                <button id="system-restart-btn" class="button secondary danger" type="button">重启服务</button>
+                <button id="system-logout-btn" class="button secondary danger" type="button">退出登录</button>
+              </div>
+            </div>
+            <label class="field field-inline-tight">
+              <span class="field-label">登录会话保持天数（1–365，默认 30）</span>
+              <input
+                id="session-ttl-days-input"
+                class="text-input"
+                type="number"
+                min="1"
+                max="365"
+                step="1"
+                placeholder="30"
+              />
+            </label>
+          </div>
+
+          <div class="system-overview-inline" aria-label="系统当前配置">
+            <span class="overview-item"><span class="overview-key">当前生效</span><span id="settings-current-dir" class="settings-value mono-text">加载中…</span></span>
+            <span class="overview-item"><span class="overview-key">当前用户</span><span id="settings-current-user" class="settings-value mono-text">加载中…</span></span>
+            <span class="overview-item"><span class="overview-key">用户环境</span><span id="settings-user-home" class="settings-value mono-text">加载中…</span></span>
+            <span class="overview-item"><span class="overview-key">设置文件</span><span id="settings-config-file" class="settings-value mono-text">加载中…</span></span>
+          </div>
+
+          <label class="field field-toggle">
+            <span class="field-label">服务端口被占用时自动顺延</span>
+            <span class="toggle-row">
+              <input id="server-port-auto-increment-input" type="checkbox" checked />
+              <span class="toggle-note">开启后优先监听 0.0.0.0:11111；如果端口被占用，会自动尝试 11112、11113 等后续端口。</span>
+            </span>
+          </label>
+
+          <label class="field field-inline-tight">
+            <span class="field-label">编译最大并发数（1–32，默认 5）</span>
+            <input
+              id="compile-max-concurrency-input"
+              class="text-input"
+              type="number"
+              min="1"
+              max="32"
+              step="1"
+              placeholder="5"
+            />
+          </label>
+
+          <label class="field">
+            <span class="field-label">新的默认工作目录</span>
+            <input
+              id="workspace-dir-input"
+              class="text-input"
+              type="text"
+              placeholder="/home"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span class="field-help">可填写任意存在且可访问的绝对目录；这里只决定文件浏览范围和新终端的初始目录，不会修改任何用户 HOME 或 `~`。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">新终端用户身份</span>
+            <select id="terminal-user-select" class="text-input mono-text"></select>
+            <span class="field-help">新建终端会用这个 Linux 用户身份启动登录 shell；已存在的终端会话保持原来的用户。</span>
+          </label>
+
+        </section>
+
+        <section
+          id="settings-panel-terminal"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-terminal"
+          data-settings-panel="terminal"
+          hidden
+        >
+          <label class="field">
+            <span class="field-label">终端改名预设</span>
+            <textarea
+              id="terminal-rename-presets-input"
+              class="settings-textarea mono-text terminal-default-env-input"
+              rows="3"
+              placeholder="完结&#10;复用对话"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+            <span class="field-help">每行一个预设名；终端页点击"改名"后会显示为按钮，点击会追加 `_预设名`。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">终端运行程序显示位置</span>
+            <select id="terminal-activity-agent-display-select" class="text-input">
+              <option value="hidden">不显示</option>
+              <option value="prefix">作为前缀</option>
+              <option value="suffix">作为后缀</option>
+            </select>
+            <span class="field-help">用于会话下拉框和活动终端名称；开启后会显示当前检测到的运行程序，例如 Codex 或 Claude。</span>
+          </label>
+
+          <div class="field settings-inline-control">
+            <label class="checkbox-label" for="terminal-completion-bell-enabled-input">
+              <input id="terminal-completion-bell-enabled-input" type="checkbox" />
+              Codex 完成时播放铃声
+            </label>
+            <button id="terminal-completion-bell-test" class="button secondary" type="button">测试铃声</button>
+            <span class="field-help">关闭后不会在 Codex 显示"Worked for ..."完成时自动播放；测试按钮始终可用。</span>
+          </div>
+
+          <label class="field">
+            <span class="field-label">终端最大行数</span>
+            <input
+              id="terminal-scrollback-lines-input"
+              class="text-input"
+              type="number"
+              min="100"
+              max="100000"
+              step="100"
+              placeholder="5000"
+              inputmode="numeric"
+            />
+            <span class="field-help">控制浏览器终端保留的历史行数；修改后会立即应用到已打开和新建的终端。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">终端错误状态检查末尾行数</span>
+            <input
+              id="terminal-error-line-limit-input"
+              class="text-input"
+              type="number"
+              min="1"
+              max="1000"
+              step="1"
+              placeholder="12"
+              inputmode="numeric"
+            />
+            <span class="field-help">活动终端列表只检查每个终端末尾这些行；命中错误关键字时状态显示为"错误"。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">自动继续最小间隔（秒）</span>
+            <input
+              id="terminal-auto-continue-interval-input"
+              class="text-input"
+              type="number"
+              min="1"
+              max="86400"
+              step="1"
+              placeholder="60"
+              inputmode="numeric"
+            />
+            <span class="field-help">任何两次自动发送"继续"之间至少等待这些秒；默认 60 秒。手动点击"继续"不受此限制，但会重新开始自动发送冷却。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">自动继续退避步长</span>
+            <input
+              id="terminal-auto-continue-backoff-factor-input"
+              class="text-input"
+              type="number"
+              min="1"
+              max="10"
+              step="0.1"
+              placeholder="1.5"
+              inputmode="decimal"
+            />
+            <span class="field-help">同一错误连续重试时，每次等待时间按此步长递增（如 1.5 表示第 N 次等待 = 间隔 × 步长^(N-1)），不超过下方配置的上限；默认 1.5，设为 1 则关闭退避。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">自动继续退避上限（分钟）</span>
+            <input
+              id="terminal-auto-continue-backoff-max-minutes-input"
+              class="text-input"
+              type="number"
+              min="1"
+              max="1440"
+              step="1"
+              placeholder="20"
+              inputmode="numeric"
+            />
+            <span class="field-help">同一错误连续重试的等待上限；默认 20 分钟。若基础间隔更长，则仍以基础间隔为准。</span>
+          </label>
+
+          <label class="field field-toggle">
+            <span class="field-label">手动中断后停止自动继续</span>
+            <span class="toggle-row">
+              <input
+                id="terminal-auto-continue-respect-manual-interrupt-input"
+                type="checkbox"
+                checked
+              />
+              <span class="toggle-note">开启后，检测到 Codex 的手动中断提示或 &lt;turn_aborted&gt; 时结束当前错误生命周期，不再自动发送"继续"。</span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">自动继续时间格式</span>
+            <textarea
+              id="terminal-auto-continue-time-patterns-input"
+              class="settings-textarea mono-text terminal-default-env-input"
+              rows="4"
+              placeholder="限额将在 {time} 重置&#10;reset at {time}&#10;resets at {time}"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+            <span class="field-help">每行一个格式，必须包含 {time}；命中后终端页会等到解析出的时间再发送"继续"。</span>
+          </label>
+
+          <div class="field">
+            <span class="field-label">终端错误关键字</span>
+            <span class="field-help">收到什么内容（关键字，大小写不敏感）→ 如何处理。未列出的关键字默认"继续"。</span>
+            <div class="table-wrap error-keyword-table-wrap">
+              <table class="entry-table terminal-error-keyword-table">
+                <thead>
+                  <tr>
+                    <th>关键字</th>
+                    <th>动作</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="terminal-error-keyword-rules-body"></tbody>
+              </table>
+            </div>
+            <div class="error-keyword-actions-bar">
+              <button
+                type="button"
+                class="button secondary"
+                id="terminal-error-keyword-add-btn"
+              >添加规则</button>
+              <span class="field-help">内置规则会在保存后自动补齐。</span>
+            </div>
+          </div>
+
+        </section>
+
+        <section
+          id="settings-panel-compile"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-compile"
+          data-settings-panel="compile"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide compile-overview-head">
+              <div class="compile-overview-title card-title-help">
+                <p class="section-label">通用 Build API</p>
+                <h2>构建部署队列与历史任务</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">项目可通过 /api/build/compile 或 /api/build/deploy 入队；请求被接收后会向来源终端发送 toast，合并执行完成后再回写终端消息。</span>
+                </span>
+              </div>
+              <div class="compile-overview-actions">
+                <div id="compile-status-message" class="inline-status compile-overview-status" data-tone="muted">尚未读取编译队列状态。</div>
+                <button id="compile-status-refresh" class="button secondary" type="button">刷新状态</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">编译命令超时</p>
+                <h2>单个编译/部署命令的最长运行时间</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">超过该秒数的命令会被强制终止，并向来源终端发送严重告警回调，避免卡死的编译/部署占用队列、让后续请求永远收不到回调。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">超时秒数（范围 60–3600，默认 600 即 10 分钟）</span>
+              <input
+                id="compile-command-timeout-input"
+                class="text-input"
+                type="number"
+                min="60"
+                max="3600"
+                step="60"
+                placeholder="600"
+              />
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">编译环境变量</p>
+                <h2>编译/部署命令运行时的额外环境变量</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">这里的 KEY=VALUE 会在编译 worker 执行编译命令和部署脚本之前注入并覆盖 worker 默认值，常用于指定 PATH、CARGO_HOME、RUSTUP_HOME 等指向特定的 cargo/rustup 环境。每行一个 KEY=VALUE。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">编译环境变量（每行一个 KEY=VALUE）</span>
+              <textarea
+                id="compile-environment-input"
+                class="settings-textarea mono-text"
+                rows="5"
+                placeholder="PATH=/home/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin&#10;CARGO_HOME=/home/root/.cargo&#10;RUSTUP_HOME=/home/root/.rustup"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
+              <span class="field-help">变量在编译命令和部署脚本执行前注入，优先于系统默认。键名只允许字母、数字、下划线，且以字母或下划线开头。</span>
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="settings-section-head">
+              <div class="card-label-help">
+                <p class="section-label">待合并请求</p>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">这些请求尚未被 worker 取走；默认会尽快开始，只有显式设置 debounce 或已有 worker 忙碌时才会短暂停留。</span>
+                </span>
+              </div>
+            </div>
+            <div class="table-wrap compile-table-wrap">
+              <table class="entry-table compile-task-table">
+                <thead>
+                  <tr>
+                    <th>请求</th>
+                    <th>类型/项目</th>
+                    <th>来源终端</th>
+                    <th>等待</th>
+                    <th>命令</th>
+                    <th>安装/审计</th>
+                    <th>备注</th>
+                    <th>复制</th>
+                  </tr>
+                </thead>
+                <tbody id="compile-pending-list">
+                  <tr><td colspan="8" class="meta-text">尚未读取。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="settings-section-head">
+              <div class="card-label-help">
+                <p class="section-label">当前进行中</p>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">worker 已经开始合并运行、但尚未写出最终 status 的构建/部署工作会出现在这里。</span>
+                </span>
+              </div>
+            </div>
+            <div class="table-wrap compile-table-wrap">
+              <table class="entry-table compile-running-table">
+                <thead>
+                  <tr>
+                    <th>运行</th>
+                    <th>请求数</th>
+                    <th>项目</th>
+                    <th>来源终端</th>
+                    <th>进度</th>
+                    <th>开始时间</th>
+                    <th>日志</th>
+                    <th>复制</th>
+                  </tr>
+                </thead>
+                <tbody id="compile-running-list">
+                  <tr><td colspan="8" class="meta-text">尚未读取。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="settings-section-head">
+              <div class="card-label-help">
+                <p class="section-label">运行历史</p>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">仅展示已结束的运行，进行中的运行请查看上方“当前进行中”。每轮合并运行可能包含多个项目或多个来源终端请求。</span>
+                </span>
+              </div>
+              <button id="compile-history-clear" class="button secondary danger" type="button">清空历史</button>
+            </div>
+            <div class="table-wrap compile-table-wrap compile-run-table-wrap">
+              <table class="entry-table compile-run-table">
+                <thead>
+                  <tr>
+                    <th>运行</th>
+                    <th>状态</th>
+                    <th>请求数</th>
+                    <th>项目</th>
+                    <th>来源终端</th>
+                    <th>时间</th>
+                    <th>日志</th>
+                    <th>复制</th>
+                  </tr>
+                </thead>
+                <tbody id="compile-run-list">
+                  <tr><td colspan="8" class="meta-text">尚未读取。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-auto-continue-tasks"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-auto-continue-tasks"
+          data-settings-panel="auto-continue-tasks"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">无人值守</p>
+                <h2>无人值守自动续跑</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">仅当当前时间落在以下时段内时，才自动处理终端的限额错误：解析上游智谱（bigmodel.cn）额度重置时间，并在重置时间 1 分钟后自动创建定时任务发送"继续"。时段外不自动处理，避免在你面前反复重试。留空表示永不自动续跑。支持跨零点，例如 22:00-08:00。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-title-help">
+                <span class="field-label">无人值守时段（HH:MM-HH:MM）</span>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">仅对上游 base_url 包含 bigmodel.cn（智谱）的 Codex_API 预设生效；复用套餐查询对话框的智谱网址过滤算法。命中限额错误时，会用上游 429 返回的真实重置时间在重置后 1 分钟自动续跑。</span>
+                </span>
+              </span>
+              <input
+                id="terminal-auto-continue-active-window-input"
+                class="text-input"
+                type="text"
+                placeholder="22:00-08:00（留空 = 关闭）"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">回避时段</p>
+                <h2>定时任务高价回避</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">设置一个回避时间范围。当定时任务的触发时间落在此范围内时，任务不会立即执行，而是自动顺延到该范围结束后再触发。留空表示不启用回避。支持跨零点，例如 14:00-18:00。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-title-help">
+                <span class="field-label">高价回避时段（HH:MM-HH:MM）</span>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">对所有定时任务（自动消息、定时粘贴、定时命令）生效。任务到期时若落在回避时段内，将自动顺延到时段结束。例如设置 14:00-18:00，则 15:30 到期的任务会顺延到 18:00 执行。</span>
+                </span>
+              </span>
+              <input
+                id="terminal-scheduled-input-avoid-window-input"
+                class="text-input"
+                type="text"
+                placeholder="14:00-18:00（留空 = 关闭）"
+                autocomplete="off"
+                spellcheck="false"
+              />
+            </label>
+          </div>
+
+          <div id="unified-task-form-card" class="settings-card settings-card-wide settings-card-tight" hidden>
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">新建定时任务</p>
+                <h2>创建定时任务</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">终端任务按指定时间发送内容；预设 API 测试任务按每天、每周或固定间隔循环检查指定预设。</span>
+                </span>
+              </div>
+            </div>
+            <div id="unified-task-create-status" class="inline-status" data-tone="muted"></div>
+            <div class="unified-task-form">
+              <label class="field">
+                <span class="field-label">任务类型</span>
+                <select id="unified-task-type" class="text-input">
+                  <option value="paste">粘贴消息</option>
+                  <option value="command">执行命令</option>
+                  <option value="continue">发送继续</option>
+                  <option value="preset-test">预设 API 测试</option>
+                </select>
+              </label>
+              <label class="field unified-terminal-task-field">
+                <span class="field-label">发送目标</span>
+                <select id="unified-task-target-mode" class="text-input">
+                  <option value="existing">发送到现有终端</option>
+                  <option value="new">新建终端</option>
+                </select>
+              </label>
+              <label class="field unified-terminal-task-field" id="unified-task-terminal-field">
+                <span class="field-label">目标终端</span>
+                <select id="unified-task-terminal" class="text-input">
+                  <option value="">加载中...</option>
+                </select>
+              </label>
+              <div class="field hidden unified-terminal-task-field" id="unified-task-workdir-field">
+                <span class="field-label">工作目录</span>
+                <div class="unified-task-workdir-row">
+                  <input
+                    id="unified-task-workdir"
+                    class="text-input"
+                    type="text"
+                    list="unified-task-workdir-suggestions"
+                    placeholder="输入或选择工作目录"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <datalist id="unified-task-workdir-suggestions"></datalist>
+                  <button
+                    id="unified-task-workdir-browse"
+                    class="button secondary"
+                    type="button"
+                    title="浏览选择路径"
+                  >...</button>
+                </div>
+              </div>
+              <label class="field unified-terminal-task-field" id="unified-task-terminal-schedule-field">
+                <span class="field-label">发送时间</span>
+                <div class="unified-task-schedule-row">
+                  <select id="unified-task-schedule-mode" class="text-input">
+                    <option value="delay">延迟</option>
+                    <option value="datetime">指定时间</option>
+                  </select>
+                  <input id="unified-task-delay-value" class="text-input" type="number" min="1" step="1" value="5" placeholder="延迟数值" />
+                  <select id="unified-task-delay-unit" class="text-input">
+                    <option value="seconds">秒</option>
+                    <option value="minutes" selected>分钟</option>
+                    <option value="hours">小时</option>
+                  </select>
+                  <input id="unified-task-datetime" class="text-input hidden" type="datetime-local" />
+                </div>
+              </label>
+              <label class="field field-full unified-terminal-task-field" id="unified-task-text-field">
+                <span class="field-label">消息内容</span>
+                <input id="unified-task-text" class="text-input" type="text" placeholder="输入要定时发送的内容..." autocomplete="off" spellcheck="false" />
+              </label>
+              <div class="field field-full unified-task-send-enter-row unified-terminal-task-field" id="unified-task-send-enter-field">
+                <label class="toggle-row">
+                  <input id="unified-task-send-enter" type="checkbox" checked />
+                  <span class="field-label">自动回车提交</span>
+                </label>
+              </div>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">任务名称</span>
+                <input id="unified-task-preset-name" class="text-input" type="text" placeholder="如：每日检查主 API" autocomplete="off" />
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">预设类型</span>
+                <select id="unified-task-preset-kind" class="text-input">
+                  <option value="api">API 预设 (Codex)</option>
+                  <option value="claude">Claude 预设</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">目标预设</span>
+                <select id="unified-task-preset-id" class="text-input">
+                  <option value="">加载中...</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">调度周期</span>
+                <select id="unified-task-preset-schedule-type" class="text-input">
+                  <option value="daily">每天</option>
+                  <option value="weekly">每周</option>
+                  <option value="interval">固定间隔</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field" id="unified-task-preset-time-field">
+                <span class="field-label">执行时间</span>
+                <input id="unified-task-preset-time" class="text-input" type="time" value="09:00" />
+              </label>
+              <div class="field hidden unified-preset-test-field" id="unified-task-preset-weekday-field">
+                <span class="field-label">星期（可多选）</span>
+                <div class="weekday-checkbox-group" id="unified-task-preset-weekdays">
+                  <label class="weekday-chip"><input type="checkbox" value="1" /><span>一</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="2" /><span>二</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="3" /><span>三</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="4" /><span>四</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="5" /><span>五</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="6" /><span>六</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="0" /><span>日</span></label>
+                </div>
+              </div>
+              <label class="field hidden unified-preset-test-field" id="unified-task-preset-interval-field">
+                <span class="field-label">间隔（分钟）</span>
+                <input id="unified-task-preset-interval" class="text-input" type="number" min="1" step="1" value="60" placeholder="60 表示每小时" />
+              </label>
+              <div class="field field-full unified-task-send-enter-row hidden unified-preset-test-field">
+                <label class="toggle-row">
+                  <input id="unified-task-preset-enabled" type="checkbox" checked />
+                  <span class="field-label">启用循环测试</span>
+                </label>
+              </div>
+              <div class="toolbar unified-task-actions">
+                <button id="unified-task-create-btn" class="button" type="button">创建任务</button>
+                <button id="unified-task-clear-btn" class="button secondary" type="button">清空</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">定时任务</p>
+                <h2>统一任务管理</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">终端发送、自动继续和预设 API 循环测试都在此创建、编辑、启停和查看结果。</span>
+                </span>
+              </div>
+              <div class="toolbar">
+                <button id="unified-task-new-btn" class="button" type="button">新建任务</button>
+                <button id="unified-task-refresh" class="button secondary" type="button">刷新</button>
+              </div>
+            </div>
+            <div id="unified-task-list-status" class="inline-status" data-tone="muted">尚未读取。</div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="table-wrap compile-table-wrap">
+              <table class="entry-table compile-task-table unified-task-table">
+                <thead>
+                  <tr>
+                    <th>任务类型</th>
+                    <th>来源</th>
+                    <th>目标</th>
+                    <th>执行时间</th>
+                    <th>剩余</th>
+                    <th>内容 / 结果</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="unified-task-list">
+                  <tr><td colspan="8" class="meta-text">尚未读取。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">历史</p>
+                <h2>已过期/已清理的自动继续任务</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">过期的 crontab 一次性任务会在读取时自动从 crontab 清理并归档到这里，方便回看；最多保留 200 条。</span>
+                </span>
+              </div>
+              <div class="toolbar">
+                <button id="auto-continue-history-toggle" class="button secondary" type="button" aria-expanded="false" aria-controls="auto-continue-history-table-wrap">查看历史</button>
+                <button id="auto-continue-history-clear" class="button secondary" type="button">清空历史</button>
+              </div>
+            </div>
+            <div id="auto-continue-history-table-wrap" class="table-wrap compile-table-wrap" hidden>
+              <table class="entry-table compile-task-table">
+                <thead>
+                  <tr>
+                    <th>来源终端</th>
+                    <th>session ID</th>
+                    <th>tmux 会话</th>
+                    <th>cron 时间</th>
+                    <th>过期归档时间</th>
+                  </tr>
+                </thead>
+                <tbody id="auto-continue-history-list">
+                  <tr><td colspan="5" class="meta-text">尚未读取。</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </section>
+
+        <section
+          id="settings-panel-soft-keyboard"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-soft-keyboard"
+          data-settings-panel="soft-keyboard"
+          hidden
+        >
+          <label class="field field-toggle">
+            <span class="field-label">桌面浏览器显示终端软键盘</span>
+            <span class="toggle-row">
+              <input id="desktop-terminal-soft-keyboard-input" type="checkbox" checked />
+              <span class="toggle-note">默认开启。终端页会在桌面浏览器显示两行特殊按键；关闭后仅移动端仍按现有规则自动显示。</span>
+            </span>
+          </label>
+
+          <label class="field field-toggle">
+            <span class="field-label">自动展开FAB</span>
+            <span class="toggle-row">
+              <input id="terminal-fab-auto-expand-input" type="checkbox" />
+              <span class="toggle-note">默认开启。开启后，终端页右下角浮动按钮（FAB）菜单会自动展开；关闭则只显示折叠按钮。</span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">终端软键盘大小（倍数）</span>
+            <input
+              id="terminal-soft-keyboard-scale-input"
+              class="text-input"
+              type="number"
+              min="0.90"
+              max="1.30"
+              step="0.01"
+              placeholder="1.08"
+              inputmode="decimal"
+            />
+            <span class="field-help">控制终端页虚拟软键盘按钮的整体大小；默认 1.08，比旧版略大。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">触摸复制长按时间（毫秒）</span>
+            <input
+              id="terminal-touch-selection-long-press-input"
+              class="text-input"
+              type="number"
+              min="2000"
+              max="10000"
+              step="100"
+              placeholder="2000"
+              inputmode="numeric"
+            />
+            <span class="field-help">启用终端触摸选择后，至少长按 2000 毫秒才会开始复制选择；默认 2000。</span>
+          </label>
+
+          <div class="settings-card settings-card-wide settings-card-tight terminal-quick-command-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">斜杠命令</p>
+                <h2>软键盘命令下拉框</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">每行格式：键 | 名称 | 动作 | 命令 | 快捷键。可放 /compact、屏幕提取id并恢复、高级复制、恢复会话、继续等软键盘命令。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">斜杠命令</span>
+              <textarea
+                id="terminal-slash-commands-input"
+                class="settings-textarea mono-text terminal-default-env-input"
+                rows="5"
+                placeholder="extract_resume | 屏幕提取id并恢复 | extract_resume | | Ctrl+Shift+R&#10;extract_current_session | 高级复制 | extract_current_session | |&#10;resume_current_session | 恢复会话 | resume_current_agent_session | |&#10;continue | 继续 | insert_text | 继续 |&#10;current_resume_id | session ID | copy_current_resume_id | |&#10;enter | Enter | send_sequence | enter |&#10;compact | /compact | send_slash_command | /compact |"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
+              <span class="field-help">这些命令会显示在软键盘 /斜杠 下拉框中；send_slash_command 会发送并回车，insert_text 只插入文本。</span>
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight terminal-quick-command-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">功能命令</p>
+                <h2>软键盘功能下拉框</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">每行格式：键 | 名称 | 动作 | 命令 | 快捷键。动作可用 copy_terminal_view_in_new_window、send_slash_command、insert_text、send_sequence、extract_resume。系统键盘与触摸复制已移至全能命令菜单内的勾选框，无需在此配置。</span>
+                </span>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">功能命令</span>
+              <textarea
+                id="terminal-function-commands-input"
+                class="settings-textarea mono-text terminal-default-env-input"
+                rows="7"
+                placeholder="copy_window | 新窗口复制 | copy_terminal_view_in_new_window | |&#10;agy | agy | send_text | agy |"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
+              <span class="field-help">快捷键示例：Ctrl+Shift+R。系统键盘/触摸复制的开关已移至全能命令菜单内的勾选框。</span>
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight terminal-command-collections-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">命令合集</p>
+                <h2>终端命令合集按钮</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">这些命令会出现在终端软键盘的「维护命令」下拉菜单中，按合集分组。每条命令的动作用 send_text（发送并回车）或 insert_text（仅插入不回车）。</span>
+                </span>
+              </div>
+              <div class="toolbar">
+                <button id="terminal-command-collection-add" class="button secondary" type="button">添加合集</button>
+              </div>
+            </div>
+            <div id="terminal-command-collections-editor" class="terminal-command-collections-editor"></div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight terminal-quick-command-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">终端快捷命令</p>
+                <h2>新终端启动按钮</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">这些命令会出现在终端软键盘上；新建终端后也可以按对应按钮启动。</span>
+                </span>
+              </div>
+              <div class="toolbar">
+                <button id="terminal-quick-command-add" class="button secondary" type="button">添加快捷命令</button>
+              </div>
+            </div>
+
+            <label class="field terminal-quick-default-field">
+              <span class="field-label">默认启动按钮（3 秒未选择）</span>
+              <select id="terminal-quick-start-default-select" class="text-input mono-text">
+                <option value="">不自动启动</option>
+              </select>
+              <span class="field-help">也可以在下方表格"默认"列直接选择；留空则新终端不会倒计时自动启动。</span>
+            </label>
+
+            <label class="field terminal-default-env-field">
+              <span class="field-label">新终端默认环境变量</span>
+              <textarea
+                id="terminal-default-env-input"
+                class="settings-textarea mono-text terminal-default-env-input"
+                rows="5"
+                placeholder="OPENAI_BASE_URL=https://api.example.com&#10;ANTHROPIC_BASE_URL=https://api.example.com"
+                autocomplete="off"
+                spellcheck="false"
+              ></textarea>
+              <span class="field-help">每行一个 KEY=VALUE；会注入新建终端的登录 shell。HOME、SHELL、USER 等身份变量由系统用户身份决定。</span>
+            </label>
+
+            <div class="table-wrap terminal-quick-command-table-wrap">
+              <table class="entry-table terminal-quick-command-table">
+                <thead>
+                  <tr>
+                    <th>默认</th>
+                    <th>编辑</th>
+                    <th>按钮</th>
+                    <th>名称</th>
+                    <th>命令</th>
+                    <th>删除</th>
+                  </tr>
+                </thead>
+                <tbody id="terminal-quick-commands-list">
+                  <tr>
+                    <td colspan="6" class="settings-value muted-text">加载中…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <form id="terminal-quick-command-form" class="terminal-quick-command-editor">
+              <input id="terminal-quick-command-edit-index" type="hidden" value="" />
+              <div class="terminal-quick-command-editor-head">
+                <p class="section-label">编辑快捷命令</p>
+                <p id="terminal-quick-command-editing-label" class="meta-text compact-meta">未选择</p>
+              </div>
+              <div class="terminal-quick-command-editor-grid">
+                <label class="field">
+                  <span class="field-label">按钮</span>
+                  <input id="terminal-quick-command-key-input" class="text-input mono-text" type="text" placeholder="1" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">名称</span>
+                  <input id="terminal-quick-command-label-input" class="text-input mono-text" type="text" placeholder="codex" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">命令</span>
+                  <input id="terminal-quick-command-command-input" class="text-input mono-text" type="text" placeholder="codex" autocomplete="off" spellcheck="false" />
+                </label>
+              </div>
+              <div class="toolbar terminal-quick-command-editor-actions">
+                <button id="terminal-quick-command-save" class="button primary" type="submit">保存到列表</button>
+                <button id="terminal-quick-command-cancel" class="button secondary" type="button">取消编辑</button>
+              </div>
+            </form>
+            <span class="field-help">命令会原样输入当前终端并回车执行。按钮值建议使用单个数字或字母，避免和普通输入冲突。</span>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-shortcuts"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-shortcuts"
+          data-settings-panel="shortcuts"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight terminal-shortcuts-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">终端快捷键</p>
+                <h2>自定义软键盘命令快捷键</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">快捷键格式示例：Ctrl+Alt+R。留空则不绑定键盘快捷键。</span>
+                </span>
+              </div>
+              <div class="toolbar">
+                <button id="terminal-shortcuts-reset" class="button secondary" type="button">恢复默认快捷键</button>
+              </div>
+            </div>
+
+            <div class="table-wrap terminal-shortcuts-table-wrap">
+              <table class="entry-table terminal-shortcuts-table">
+                <thead>
+                  <tr>
+                    <th>选择</th>
+                    <th>菜单</th>
+                    <th>命令</th>
+                    <th>动作</th>
+                    <th>快捷键</th>
+                  </tr>
+                </thead>
+                <tbody id="terminal-shortcuts-list">
+                  <tr>
+                    <td colspan="5" class="settings-value muted-text">加载中…</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <span class="field-help">勾选多功能按钮（/斜杠、功能）才会显示该组下的子命令快捷键；不勾选时不渲染对应子表行。每个子命令仍可单独设置快捷键；命令内容仍可在"软键盘"Tab 的斜杠命令和功能命令里高级编辑。</span>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-tools"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-tools"
+          data-settings-panel="tools"
+          hidden
+        >
+          <div class="terminal-tool-settings-head">
+            <div>
+              <p class="section-label">动作树</p>
+              <h2>工作流搭建</h2>
+            </div>
+            <div class="toolbar">
+              <button id="terminal-tool-add-folder" class="button secondary" type="button">新建目录</button>
+              <button id="terminal-tool-add-action" class="button primary" type="button">新建工作流</button>
+              <button id="terminal-tool-export" class="button secondary" type="button">导出</button>
+              <button id="terminal-tool-import" class="button secondary" type="button">导入</button>
+              <input id="terminal-tool-import-file" type="file" accept="application/json,.json" hidden />
+            </div>
+          </div>
+          <div class="table-wrap terminal-tool-table-wrap">
+            <table class="entry-table terminal-tool-table">
+              <thead>
+                <tr>
+                  <th>类型</th>
+                  <th>名称</th>
+                  <th>根键</th>
+                  <th>上级目录</th>
+                  <th>排序</th>
+                  <th>动作</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="terminal-tool-entries-body">
+                <tr><td colspan="7" class="settings-value muted-text">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <dialog id="terminal-tool-editor-dialog" class="auth-import-dialog terminal-tool-editor-dialog">
+          <form id="terminal-tool-editor-form" class="auth-import-form" method="dialog">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">工作流条目</p>
+                <h2 id="terminal-tool-editor-title">新建功能</h2>
+              </div>
+              <button id="terminal-tool-editor-close" class="mini-button" type="button" title="关闭" aria-label="关闭">×</button>
+            </div>
+            <input id="terminal-tool-editor-id" type="hidden" />
+            <input id="terminal-tool-editor-kind" type="hidden" />
+            <div class="terminal-tool-editor-grid">
+              <label class="field">
+                <span class="field-label">名称</span>
+                <input id="terminal-tool-editor-label" class="text-input" type="text" maxlength="64" autocomplete="off" required />
+              </label>
+              <label class="field">
+                <span class="field-label">根键</span>
+                <select id="terminal-tool-editor-root" class="text-input"></select>
+              </label>
+              <label class="field">
+                <span class="field-label">上级目录</span>
+                <select id="terminal-tool-editor-parent" class="text-input"></select>
+              </label>
+              <label class="field">
+                <span class="field-label">排序</span>
+                <input id="terminal-tool-editor-sort" class="text-input" type="number" min="0" max="10000" step="1" value="100" />
+              </label>
+            </div>
+            <div id="terminal-tool-actions-section" class="terminal-tool-actions-section">
+              <div class="terminal-tool-actions-head">
+                <span class="field-label">执行动作</span>
+                <button id="terminal-tool-action-add" class="button secondary" type="button">添加动作</button>
+              </div>
+              <div id="terminal-tool-actions-list" class="terminal-tool-actions-list"></div>
+            </div>
+            <div id="terminal-tool-editor-status" class="inline-status" data-tone="muted" role="status" hidden></div>
+            <div class="toolbar terminal-tool-editor-actions">
+              <button id="terminal-tool-editor-save" class="button primary" type="submit">应用到列表</button>
+              <button id="terminal-tool-editor-cancel" class="button secondary" type="button">取消</button>
+            </div>
+          </form>
+        </dialog>
+
+        <section
+          id="settings-panel-appearance"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-appearance"
+          data-settings-panel="appearance"
+          hidden
+        >
+          <div class="appearance-group">
+            <label class="field">
+              <span class="field-label">主题</span>
+              <select id="theme-mode-select" class="text-input select-input">
+                <option value="system">跟随系统</option>
+                <option value="light">白天模式</option>
+                <option value="dark">黑夜模式</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="appearance-group">
+            <label class="field">
+              <span class="field-label">工作区浏览图标路径</span>
+              <input
+                id="workspace-browser-icon-path-input"
+                class="text-input mono-text"
+                type="text"
+                placeholder="icon.ico"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <span class="field-help">相对每个项目根目录；用于工作区目录列表的“图标”列。</span>
+            </label>
+            <label class="field">
+              <span class="field-label">活动终端图标路径</span>
+              <input
+                id="terminal-workspace-icon-path-input"
+                class="text-input mono-text"
+                type="text"
+                placeholder="static/favicon.svg"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <span class="field-help">相对项目根目录；终端在子目录时向上使用最近匹配的项目图标。</span>
+            </label>
+          </div>
+
+          <div class="appearance-group font-settings-entry">
+            <div>
+              <span class="field-label">字体设置</span>
+              <span id="font-settings-summary" class="field-help">四档界面字号</span>
+            </div>
+            <button id="font-settings-open" class="button secondary" type="button" aria-haspopup="dialog" aria-controls="font-settings-dialog">
+              <span aria-hidden="true">Aa</span>
+              <span>字体设置</span>
+            </button>
+          </div>
+
+          <dialog id="font-settings-dialog" class="font-settings-dialog" aria-labelledby="font-settings-dialog-title">
+            <form class="font-settings-dialog-form" method="dialog">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">界面显示</p>
+                  <h2 id="font-settings-dialog-title">字体设置</h2>
+                </div>
+                <button id="font-settings-close" class="mini-button" type="button" title="关闭" aria-label="关闭">×</button>
+              </div>
+              <div class="font-settings-grid">
+                <label class="field">
+                  <span class="field-label">层级 1 / 注释微字</span>
+                  <input id="font-size-tier-1-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.64" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">层级 2 / 辅助小字</span>
+                  <input id="font-size-tier-2-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.68" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">层级 3 / 常规正文</span>
+                  <input id="font-size-tier-3-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.72" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">层级 4 / 导航上限</span>
+                  <input id="font-size-tier-4-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.74" autocomplete="off" spellcheck="false" />
+                </label>
+              </div>
+              <span class="field-help">单位 rem；层级 1 ≤ 2 ≤ 3 ≤ 4，层级 4 是导航上限。</span>
+              <div class="toolbar dialog-actions">
+                <button class="button primary" type="submit">完成</button>
+              </div>
+            </form>
+          </dialog>
+
+          <div class="appearance-group">
+            <label class="field field-toggle">
+              <span class="field-label">显示完整路径</span>
+              <span class="toggle-row">
+                <input id="show-full-path-input" type="checkbox" checked />
+                <span class="toggle-note">开启后工作区面包屑显示完整绝对路径。</span>
+              </span>
+            </label>
+
+            <label class="field field-toggle">
+              <span class="field-label">显示点开头的隐藏文件</span>
+              <span class="toggle-row">
+                <input id="show-dot-entries-input" type="checkbox" checked />
+                <span class="toggle-note">目录列表中显示以点开头的隐藏条目。</span>
+              </span>
+            </label>
+
+            <label class="field field-toggle">
+              <span class="field-label">工作区终端下拉框显示全部目录终端会话</span>
+              <span class="toggle-row">
+                <input id="show-all-workspace-sessions-input" type="checkbox" />
+                <span class="toggle-note">首页下拉框列出整个工作目录下的全部终端会话。</span>
+              </span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">终端悬浮滚动按钮高度（vh）</span>
+              <input
+                id="terminal-floating-button-offset-input"
+                class="text-input"
+                type="number"
+                min="12"
+                max="60"
+                step="0.1"
+                placeholder="33"
+                inputmode="decimal"
+              />
+              <span class="field-help">默认 33，约页面高度三分之一。</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">终端侧边按钮颜色</span>
+              <input
+                id="terminal-fab-action-color-input"
+                class="terminal-fab-color-input"
+                type="color"
+                value="#f59e0b"
+              />
+              <span class="field-help">应用于跳顶部、跳底部等侧边操作；默认橙色。</span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">终端侧边按钮透明度</span>
+              <span class="terminal-fab-opacity-control">
+                <input
+                  id="terminal-fab-action-opacity-input"
+                  type="range"
+                  min="0.1"
+                  max="1"
+                  step="0.05"
+                  value="0.5"
+                />
+                <output id="terminal-fab-action-opacity-output" for="terminal-fab-action-opacity-input">50%</output>
+              </span>
+              <span class="field-help">默认 50%；拖动时即时预览，保存后应用到终端页。</span>
+            </label>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-model"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-model"
+          data-settings-panel="model"
+          hidden
+        >
+          <label class="field">
+            <span class="field-label">Claude 模型下拉候选</span>
+            <textarea
+              id="claude-model-options-input"
+              class="settings-textarea mono-text"
+              spellcheck="false"
+              placeholder="一行一个模型名，Claude 页面的 Haiku / Sonnet / Opus / 第三方模型输入框共用这一份下拉候选。"
+            ></textarea>
+            <span class="field-help">一行一个模型名。保存后 Claude 页面的多个模型输入框都会复用同一份下拉列表。</span>
+          </label>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <div class="settings-section-head">
+              <div class="card-label-help">
+                <p class="section-label">Codex_API 本机入口自动匹配</p>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">保存 Codex_API 预设时，Base URL 命中已选提供商会自动勾选"本机入口"，并可配合转换模式把上游协议转换为 Codex 需要的 Responses。</span>
+                </span>
+              </div>
+            </div>
+            <div class="settings-toggle-list">
+              <label class="toggle-row" title="https://open.bigmodel.cn/api/coding/paas/v4&#10;http://127.0.0.1:11111/api/codex-proxy/zhipu/v1">
+                <input
+                  type="checkbox"
+                  data-codex-api-auto-proxy-provider="zhipu"
+                  checked
+                />
+                <span class="toggle-note">智谱 / BigModel</span>
+              </label>
+              <label class="toggle-row" title="https://api.deepseek.com">
+                <input
+                  type="checkbox"
+                  data-codex-api-auto-proxy-provider="deepseek"
+                  checked
+                />
+                <span class="toggle-note">DeepSeek</span>
+              </label>
+              <label class="toggle-row" title="https://api.minimaxi.com/v1">
+                <input
+                  type="checkbox"
+                  data-codex-api-auto-proxy-provider="minimax"
+                  checked
+                />
+                <span class="toggle-note">MiniMax</span>
+              </label>
+              <label class="toggle-row" title="URL 含 /anthropic 的中转站（仅在 model 形如 claude-* 时启用）">
+                <input
+                  type="checkbox"
+                  data-codex-api-auto-proxy-provider="anthropic_chat"
+                  checked
+                />
+                <span class="toggle-note">Anthropic 中转站</span>
+              </label>
+            </div>
+          </div>
+
+        </section>
+
+        <section
+          id="settings-panel-config-files"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-config-files"
+          data-settings-panel="config-files"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight config-file-card">
+            <div class="panel-head wide">
+              <div class="card-title-help">
+                <p class="section-label">Codex / Claude 配置</p>
+                <h2>直接编辑当前终端用户的配置文件</h2>
+                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">文件路径来自系统 TAB 中的新终端用户身份；切换用户身份并保存后，这里会读取新用户 HOME 下的配置。</span>
+                </span>
+              </div>
+              <div class="toolbar compact-toolbar">
+                <button id="settings-config-file-refresh" class="button secondary" type="button">刷新</button>
+                <button id="settings-config-file-save" class="button primary" type="button">保存文件</button>
+              </div>
+            </div>
+
+            <div class="config-file-control-row">
+              <label class="field config-file-select-field">
+                <span class="field-label">选择配置</span>
+                <select id="settings-config-file-select" class="text-input mono-text"></select>
+              </label>
+              <div class="config-file-path-panel">
+                <span class="field-label">当前文件</span>
+                <span id="settings-config-file-path" class="settings-value mono-text">未选择</span>
+                <span id="settings-config-file-meta" class="field-help">未读取</span>
+              </div>
+            </div>
+
+            <textarea
+              id="settings-config-file-editor"
+              class="settings-textarea mono-text terminal-agents-doc-editor config-file-editor"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="选择一个配置文件后开始编辑"
+            ></textarea>
+            <div id="settings-config-file-status" class="inline-status" data-tone="muted">
+              选择 Codex 或 Claude 配置文件后可直接编辑保存。
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-frpc"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-frpc"
+          data-settings-panel="frpc"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight frpc-card">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">FRPC 客户端</p>
+                <h2>已管理客户端</h2>
+              </div>
+              <div class="toolbar compact-toolbar">
+                <button id="frp-role-refresh-btn" class="button secondary">刷新</button>
+                <button id="frp-system-refresh-btn" class="button secondary">检测系统 frpc</button>
+              </div>
+            </div>
+            <div class="settings-summary-grid frpc-summary-grid">
+              <div class="settings-summary-card">
+                <p class="section-label">下载平台</p>
+                <p id="frp-role-platform" class="settings-value mono-text">加载中…</p>
+              </div>
+              <div class="settings-summary-card">
+                <p class="section-label">当前配置</p>
+                <p id="frp-role-current-summary" class="settings-value mono-text">未选择</p>
+              </div>
+            </div>
+            <div class="table-wrapper frp-role-table-wrapper mt-12">
+              <table class="settings-table frp-role-table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>来源</th>
+                    <th>frps</th>
+                    <th>节点</th>
+                    <th>运行路径</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="frp-client-role-table-body">
+                  <tr><td colspan="7" class="meta-text">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="frp-role-status-message" class="inline-status mt-8" data-tone="muted"></div>
+
+            <div class="frp-create-panel">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">新建来源</p>
+                  <h2>添加 frpc 客户端</h2>
+                </div>
+                <div class="toolbar compact-toolbar">
+                  <button id="frp-role-new-frpc-btn" class="button secondary" type="button">客户端配置</button>
+                </div>
+              </div>
+              <div class="frpc-form-grid frp-source-grid">
+                <label class="field">
+                  <span class="field-label">来源</span>
+                  <select id="frp-source-mode-input" class="text-input">
+                    <option value="">请选择来源</option>
+                    <option value="manual">手动新建</option>
+                    <option value="system">系统检测 / 接管</option>
+                  </select>
+                </label>
+              </div>
+              <div id="frp-source-manual-panel" hidden>
+                <div class="frpc-form-grid frp-source-grid">
+                  <label class="field" hidden>
+                    <span class="field-label">类型</span>
+                    <select id="frp-source-component-input" class="text-input">
+                      <option value="frpc">客户端 frpc</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">frps 地址</span>
+                    <input id="frp-source-public-addr-input" class="text-input mono-text" type="text" placeholder="frps 公网地址" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">远端端口</span>
+                    <input id="frp-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">auth.token</span>
+                    <input id="frp-source-auth-token-input" class="text-input mono-text" type="password" placeholder="可留空" autocomplete="off" spellcheck="false" />
+                  </label>
+                </div>
+                <div class="toolbar compact-toolbar mt-10">
+                  <button id="frp-source-test-btn" class="button secondary" type="button">测试端口</button>
+                  <button id="frp-source-add-btn" class="button primary" type="button">添加到管理</button>
+                </div>
+              </div>
+              <div id="frp-source-system-panel" hidden>
+                <div class="frpc-form-grid frp-source-grid">
+                  <label class="field">
+                    <span class="field-label">系统来源</span>
+                    <select id="frp-source-system-select" class="text-input mono-text">
+                      <option value="">选择检测到的 frpc</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="toolbar compact-toolbar mt-10">
+                  <button id="frp-source-adopt-selected-btn" class="button primary" type="button">添加选中来源</button>
+                </div>
+                <div class="table-wrapper frp-role-table-wrapper mt-12">
+                  <table class="settings-table frp-system-table">
+                    <thead>
+                      <tr>
+                        <th>类型</th>
+                        <th>来源</th>
+                        <th>PID</th>
+                        <th>二进制</th>
+                        <th>配置文件</th>
+                        <th>命令</th>
+                        <th>接管</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="frp-system-table-body">
+                      <tr><td colspan="8" class="meta-text">点击"检测系统 frpc"扫描 PATH 和当前进程。</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div id="frp-source-status" class="inline-status mt-8" data-tone="muted"></div>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-frps"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-frps"
+          data-settings-panel="frps"
+          hidden
+        >
+          <div class="settings-card settings-card-wide settings-card-tight frpc-card">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">FRP 服务器</p>
+                <h2>已管理服务器</h2>
+              </div>
+              <div class="toolbar compact-toolbar">
+                <button id="frp-server-role-refresh-btn" class="button secondary" type="button">刷新</button>
+                <button id="frp-server-system-refresh-btn" class="button secondary" type="button">检测系统 frps</button>
+              </div>
+            </div>
+            <div class="settings-summary-grid frpc-summary-grid">
+              <div class="settings-summary-card">
+                <p class="section-label">下载平台</p>
+                <p id="frp-server-role-platform" class="settings-value mono-text">加载中…</p>
+              </div>
+              <div class="settings-summary-card">
+                <p class="section-label">当前配置</p>
+                <p id="frp-server-current-summary" class="settings-value mono-text">未选择</p>
+              </div>
+            </div>
+            <div class="table-wrapper frp-role-table-wrapper mt-12">
+              <table class="settings-table frp-role-table">
+                <thead>
+                  <tr>
+                    <th>名称</th>
+                    <th>来源</th>
+                    <th>监听端口</th>
+                    <th>公网地址</th>
+                    <th>运行路径</th>
+                    <th>状态</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="frp-server-role-table-body">
+                  <tr><td colspan="7" class="meta-text">加载中…</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="frp-server-role-status-message" class="inline-status mt-8" data-tone="muted"></div>
+
+            <div class="frp-create-panel">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">新建来源</p>
+                  <h2>添加 frps 服务器</h2>
+                </div>
+                <div class="toolbar compact-toolbar">
+                  <button id="frp-role-new-frps-btn" class="button secondary" type="button">服务器配置</button>
+                </div>
+              </div>
+              <div class="frpc-form-grid frp-source-grid">
+                <label class="field">
+                  <span class="field-label">来源</span>
+                  <select id="frp-server-source-mode-input" class="text-input">
+                    <option value="">请选择来源</option>
+                    <option value="manual">手动新建</option>
+                    <option value="system">系统检测 / 接管</option>
+                  </select>
+                </label>
+              </div>
+              <div id="frp-server-source-manual-panel" hidden>
+                <div class="frpc-form-grid frp-source-grid">
+                  <label class="field">
+                    <span class="field-label">公网地址</span>
+                    <input id="frp-server-source-public-addr-input" class="text-input mono-text" type="text" placeholder="公网 IP 或域名" autocomplete="off" spellcheck="false" />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">公网端口</span>
+                    <input id="frp-server-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="7000" />
+                  </label>
+                </div>
+                <div class="toolbar compact-toolbar mt-10">
+                  <button id="frp-server-source-test-btn" class="button secondary" type="button">测试端口</button>
+                  <button id="frp-server-source-add-btn" class="button primary" type="button">添加到管理</button>
+                </div>
+              </div>
+              <div id="frp-server-source-system-panel" hidden>
+                <div class="frpc-form-grid frp-source-grid">
+                  <label class="field">
+                    <span class="field-label">系统来源</span>
+                    <select id="frp-server-source-system-select" class="text-input mono-text">
+                      <option value="">选择检测到的 frps</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">公网地址</span>
+                    <input id="frp-server-system-public-addr-input" class="text-input mono-text" type="text" placeholder="接管 frps 时必填" autocomplete="off" spellcheck="false" />
+                  </label>
+                </div>
+                <div class="toolbar compact-toolbar mt-10">
+                  <button id="frp-server-source-adopt-selected-btn" class="button primary" type="button">添加选中来源</button>
+                </div>
+                <div class="table-wrapper frp-role-table-wrapper mt-12">
+                  <table class="settings-table frp-system-table">
+                    <thead>
+                      <tr>
+                        <th>类型</th>
+                        <th>来源</th>
+                        <th>PID</th>
+                        <th>二进制</th>
+                        <th>配置文件</th>
+                        <th>命令</th>
+                        <th>接管</th>
+                        <th>操作</th>
+                      </tr>
+                    </thead>
+                    <tbody id="frp-server-system-table-body">
+                      <tr><td colspan="8" class="meta-text">点击"检测系统 frps"扫描 PATH 和当前进程。</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div id="frp-server-source-status" class="inline-status mt-8" data-tone="muted"></div>
+            </div>
+          </div>
+        </section>
+
+          <dialog id="frp-role-editor" class="frp-role-dialog">
+            <form class="frp-role-dialog-form" method="dialog">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">配置管理</p>
+                  <h2 id="frp-role-editor-title">FRP 角色</h2>
+                </div>
+                <div class="toolbar compact-toolbar">
+                  <button id="frp-role-download-btn" class="button secondary" type="button">下载二进制</button>
+                  <button id="frp-role-start-btn" class="button primary" type="button">启动</button>
+                  <button id="frp-role-stop-btn" class="button secondary" type="button">停止</button>
+                  <button id="frp-role-restart-btn" class="button secondary" type="button">重启</button>
+                  <button id="frp-role-delete-btn" class="button secondary danger" type="button">删除</button>
+                  <button id="frp-role-close-btn" class="button secondary" type="button">关闭</button>
+                </div>
+              </div>
+              <div class="frpc-form-grid">
+                <label class="field">
+                  <span class="field-label">角色 ID</span>
+                  <input id="frp-role-id-input" class="text-input mono-text" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">角色名称</span>
+                  <input id="frp-role-name-input" class="text-input mono-text" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">类型</span>
+                  <select id="frp-role-component-input" class="text-input">
+                    <option value="frpc">frpc</option>
+                    <option value="frps">frps</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">二进制来源</span>
+                  <select id="frp-role-binary-source-input" class="text-input">
+                    <option value="auto">自动</option>
+                    <option value="bundled">自带/下载</option>
+                    <option value="system">系统 PATH</option>
+                    <option value="custom">指定路径</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">二进制路径</span>
+                  <input id="frp-role-binary-input" class="text-input mono-text" type="text" placeholder="留空自动查找或下载到角色目录" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">外部配置文件</span>
+                  <input id="frp-role-external-config-input" class="text-input mono-text" type="text" placeholder="接管现有 frp 时填写原 -c 配置路径" autocomplete="off" spellcheck="false" />
+                </label>
+              </div>
+              <div id="frp-role-frpc-fields">
+                <div class="frpc-form-grid">
+                <label class="field">
+                  <span class="field-label">frps 地址</span>
+                  <input id="frp-role-frpc-server-addr-input" class="text-input mono-text" type="text" placeholder="frps.example.com" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">frps 端口</span>
+                  <input id="frp-role-frpc-server-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="7000" />
+                </label>
+                <label class="field">
+                  <span class="field-label">Token</span>
+                  <input id="frp-role-frpc-token-input" class="text-input mono-text" type="password" placeholder="可留空" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="toggle-row">
+                  <input id="frp-role-frpc-tls-input" type="checkbox" />
+                  <span class="toggle-note">启用 transport.tls</span>
+                </label>
+                </div>
+                <div class="frp-proxy-management">
+                  <div class="frp-role-section-head">
+                    <div>
+                      <p class="section-label">节点管理</p>
+                      <h3>frpc 代理节点</h3>
+                    </div>
+                    <div class="toolbar compact-toolbar">
+                      <button id="frp-role-frpc-proxy-add-btn" class="button secondary" type="button">新增节点</button>
+                      <button id="frp-role-frpc-proxy-edit-selected-btn" class="button secondary" type="button" disabled>编辑选中</button>
+                      <button id="frp-role-frpc-proxy-duplicate-selected-btn" class="button secondary" type="button" disabled>复制选中</button>
+                      <button id="frp-role-frpc-proxy-delete-selected-btn" class="button secondary danger" type="button" disabled>删除选中</button>
+                    </div>
+                  </div>
+                  <div class="table-wrapper frp-role-table-wrapper">
+                    <table class="settings-table frp-proxy-table">
+                      <thead>
+                        <tr>
+                          <th>
+                            <input id="frp-role-frpc-proxy-select-all" type="checkbox" aria-label="选择全部 frpc 节点" />
+                          </th>
+                          <th>节点</th>
+                          <th>类型</th>
+                          <th>本地地址</th>
+                          <th>本地端口</th>
+                          <th>远端端口</th>
+                          <th>域名</th>
+                        </tr>
+                      </thead>
+                      <tbody id="frp-role-frpc-proxy-table-body">
+                        <tr><td colspan="7" class="meta-text">暂无节点。</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="frp-proxy-table-footer">
+                    <span id="frp-role-frpc-proxy-selected-count" class="meta-text">已选 0 个节点</span>
+                    <span id="frp-role-frpc-proxy-status" class="inline-status compact-status" data-tone="muted"></span>
+                  </div>
+                  <div id="frp-role-frpc-proxy-editor" class="frp-proxy-editor" hidden>
+                    <div class="frpc-form-grid">
+                      <label class="field">
+                        <span class="field-label">代理名称</span>
+                        <input id="frp-role-frpc-proxy-name-input" class="text-input mono-text" type="text" value="webclx" autocomplete="off" spellcheck="false" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">类型</span>
+                        <select id="frp-role-frpc-proxy-type-input" class="text-input">
+                          <option value="tcp">TCP</option>
+                          <option value="http">HTTP</option>
+                          <option value="https">HTTPS</option>
+                        </select>
+                      </label>
+                      <label class="field">
+                        <span class="field-label">本地地址</span>
+                        <input id="frp-role-frpc-local-ip-input" class="text-input mono-text" type="text" value="127.0.0.1" autocomplete="off" spellcheck="false" />
+                      </label>
+                      <label class="field">
+                        <span class="field-label">本地端口</span>
+                        <input id="frp-role-frpc-local-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                      </label>
+                      <label id="frp-role-frpc-remote-port-field" class="field">
+                        <span class="field-label">远端端口</span>
+                        <input id="frp-role-frpc-remote-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                      </label>
+                      <label id="frp-role-frpc-custom-domains-field" class="field" hidden>
+                        <span class="field-label">域名</span>
+                        <input id="frp-role-frpc-custom-domains-input" class="text-input mono-text" type="text" placeholder="a.example.com,b.example.com" autocomplete="off" spellcheck="false" />
+                      </label>
+                    </div>
+                    <div class="toolbar compact-toolbar mt-10">
+                      <button id="frp-role-frpc-proxy-save-btn" class="button primary" type="button">保存节点</button>
+                      <button id="frp-role-frpc-proxy-cancel-btn" class="button secondary" type="button">取消</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div id="frp-role-frps-fields" class="frpc-form-grid" hidden>
+                <label class="field">
+                  <span class="field-label">公网地址</span>
+                  <input id="frp-role-frps-public-addr-input" class="text-input mono-text" type="text" placeholder="公网 IP 或域名" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">绑定地址</span>
+                  <input id="frp-role-frps-bind-addr-input" class="text-input mono-text" type="text" value="0.0.0.0" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">绑定端口</span>
+                  <input id="frp-role-frps-bind-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="7000" />
+                </label>
+                <label class="field">
+                  <span class="field-label">Token</span>
+                  <input id="frp-role-frps-token-input" class="text-input mono-text" type="password" placeholder="可留空" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">管理地址</span>
+                  <input id="frp-role-frps-web-addr-input" class="text-input mono-text" type="text" value="127.0.0.1" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">管理端口</span>
+                  <input id="frp-role-frps-web-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="17500" />
+                </label>
+                <label class="field">
+                  <span class="field-label">管理用户</span>
+                  <input id="frp-role-frps-dashboard-user-input" class="text-input mono-text" type="text" autocomplete="off" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span class="field-label">管理密码</span>
+                  <input id="frp-role-frps-dashboard-password-input" class="text-input mono-text" type="password" autocomplete="off" spellcheck="false" />
+                </label>
+              </div>
+              <label class="field frpc-extra-field">
+                <span class="field-label">额外 TOML</span>
+                <textarea id="frp-role-extra-toml-input" class="text-input mono-text" rows="4"></textarea>
+              </label>
+              <div class="toolbar">
+                <button id="frp-role-save-btn" class="button secondary" type="button">保存角色</button>
+                <button id="frp-role-save-start-btn" class="button primary" type="button">保存并启动</button>
+                <button id="frp-role-reset-btn" class="button secondary" type="button">重置</button>
+              </div>
+              <div id="frp-role-editor-status" class="inline-status mt-8" data-tone="muted"></div>
+              <details class="settings-details mt-12">
+                <summary>查看日志</summary>
+                <div id="frp-role-log-tail" class="settings-value mono-text settings-code-block">暂无日志</div>
+              </details>
+            </form>
+          </dialog>
+
+        <section
+          id="settings-panel-preset-sync"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-preset-sync"
+          data-settings-panel="preset-sync"
+          hidden
+        >
+          <div class="settings-hero-card">
+            <div class="card-title-help">
+              <p class="section-label">远程预设配置</p>
+              <h2>从同项目 webClx 实例获取全部预设</h2>
+              <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                  <span class="card-desc-icon">?</span>
+                  <span class="card-desc-text">用于恢复或同步 Codex_OAuth、Codex_API、Claude_API、代理预设和上游代理开关。预览只显示数量，不会在页面展示密钥。</span>
+                </span>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <label class="field">
+              <span class="field-label">远程 webClx 地址</span>
+              <input
+                id="preset-sync-remote-url"
+                class="text-input mono-text"
+                type="text"
+                list="preset-sync-remote-url-history"
+                placeholder="http://192.168.3.2:11111"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <datalist id="preset-sync-remote-url-history"></datalist>
+              <span class="field-help">填写远程实例根地址即可；也可以直接填写 /api/settings/preset-config 接口地址。</span>
+            </label>
+            <div class="toolbar preset-sync-actions">
+              <button id="preset-sync-preview-btn" class="button secondary" type="button">读取远程预设</button>
+              <button id="preset-sync-import-btn" class="button primary" type="button" disabled>导入并覆盖本机预设</button>
+            </div>
+          </div>
+
+          <div class="settings-summary-grid preset-sync-summary-grid">
+            <div class="settings-summary-card">
+              <label class="preset-sync-section-toggle">
+                <input id="preset-sync-auth-enabled" type="checkbox" checked />
+                <span class="section-label">Codex_OAuth</span>
+              </label>
+              <p id="preset-sync-auth-count" class="settings-value mono-text">-</p>
+            </div>
+            <div class="settings-summary-card">
+              <label class="preset-sync-section-toggle">
+                <input id="preset-sync-api-enabled" type="checkbox" checked />
+                <span class="section-label">Codex_API</span>
+              </label>
+              <p id="preset-sync-api-count" class="settings-value mono-text">-</p>
+            </div>
+            <div class="settings-summary-card">
+              <label class="preset-sync-section-toggle">
+                <input id="preset-sync-claude-enabled" type="checkbox" checked />
+                <span class="section-label">Claude_API</span>
+              </label>
+              <p id="preset-sync-claude-count" class="settings-value mono-text">-</p>
+            </div>
+            <div class="settings-summary-card">
+              <label class="preset-sync-section-toggle">
+                <input id="preset-sync-proxy-enabled" type="checkbox" />
+                <span class="section-label">代理预设/上游代理</span>
+              </label>
+              <p id="preset-sync-proxy-count" class="settings-value mono-text">-</p>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight">
+            <p class="section-label">上游代理状态</p>
+            <div id="preset-sync-proxy-state" class="settings-value mono-text settings-code-block">未读取</div>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-update"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-update"
+          data-settings-panel="update"
+          hidden
+        >
+          <div class="settings-hero-card">
+            <div>
+              <p class="section-label">版本更新</p>
+              <h2>检查并更新 webClx 版本</h2>
+              <p class="meta-text">当前版本: <span id="update-current-version">加载中…</span></p>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">本机服务</p>
+                <h2>对外提供更新下载</h2>
+              </div>
+            </div>
+            <p class="meta-text">
+              本服务已开启更新下载端点，其他 webClx 实例可从本机更新：
+              <span id="update-local-download-url" class="mono-text break-all">加载中…</span>
+            </p>
+            <div class="toolbar mt-10">
+              <button id="update-copy-url-btn" class="button secondary" type="button">复制更新地址</button>
+            </div>
+            <p id="update-copy-url-status" class="inline-status mt-6" data-tone="muted"></p>
+          </div>
+
+          <div class="system-section-divider"></div>
+
+          <div class="settings-card settings-card-wide">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">远程更新</p>
+                <h2>从远程地址更新</h2>
+              </div>
+            </div>
+            <label class="field">
+              <span class="field-label">远程版本检查 URL</span>
+              <input
+                id="update-remote-check-url"
+                class="text-input mono-text"
+                type="text"
+                placeholder="http://server/update.json"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <span class="field-help">提供包含 version 和 url 字段的 JSON，用于检查更新。格式: {"version": "1.0.532", "url": "http://server/webclx"}</span>
+            </label>
+            <div class="toolbar mt-10">
+              <button id="update-check-remote-btn" class="button secondary" type="button">检查更新</button>
+            </div>
+            <p id="update-check-status" class="inline-status mt-6" data-tone="muted"></p>
+
+            <div id="update-available-panel" class="settings-summary-grid mt-16" hidden>
+              <div class="settings-summary-card">
+                <p class="section-label">最新版本</p>
+                <p id="update-latest-version" class="settings-value mono-text">-</p>
+              </div>
+              <div class="settings-summary-card">
+                <p class="section-label">下载地址</p>
+                <p id="update-download-url" class="settings-value mono-text break-all">-</p>
+              </div>
+            </div>
+
+            <div class="toolbar mt-16">
+              <button id="update-download-btn" class="button primary" type="button" disabled>开始更新</button>
+            </div>
+            <p id="update-progress" class="inline-status mt-6" data-tone="muted"></p>
+          </div>
+        </section>
+
+        <section
+          id="settings-panel-proxy"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-proxy"
+          data-settings-panel="proxy"
+          hidden
+        >
+          <div class="settings-summary-grid">
+            <div class="settings-summary-card">
+              <p class="section-label">当前程序代理</p>
+              <p id="proxy-active-summary" class="settings-value mono-text mb-6">加载中…</p>
+              <div class="toolbar mt-10">
+                <button id="proxy-clear-active-btn" class="button secondary">清除程序代理</button>
+              </div>
+            </div>
+            <div class="settings-summary-card">
+              <p class="section-label">作用范围</p>
+              <p id="proxy-scope-summary" class="settings-value">加载中…</p>
+            </div>
+            <div class="settings-summary-card">
+              <p class="section-label">系统变量处理</p>
+              <p id="proxy-host-env-summary" class="settings-value">加载中…</p>
+            </div>
+          </div>
+
+          <div class="system-section-divider"></div>
+
+          <div class="settings-split-layout proxy-workbench-layout">
+            <div class="settings-card settings-card-tight">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">预设列表</p>
+                  <h2>选择并应用</h2>
+                </div>
+              </div>
+              <div class="table-wrap proxy-presets-table-wrap">
+                <table class="entry-table proxy-presets-table">
+                  <thead>
+                    <tr>
+                      <th>序号</th>
+                      <th>排序</th>
+                      <th>当前</th>
+                      <th>名称</th>
+                      <th>类型</th>
+                      <th>服务器</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody id="proxy-presets-list">
+                    <tr>
+                      <td colspan="7" class="settings-value muted-text">加载中…</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="proxy-form-card">
+              <div class="panel-head wide">
+                <div>
+                  <h2 id="proxy-form-title">新增代理预设</h2>
+                </div>
+              </div>
+              <input type="hidden" id="proxy-editing-id" value="" />
+
+              <label class="field">
+                <span class="field-label">预设名称</span>
+                <input
+                  id="proxy-name-input"
+                  class="text-input"
+                  type="text"
+                  placeholder="如：办公室代理"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">代理类型</span>
+                <select id="proxy-type-input" class="text-input">
+                  <option value="http">HTTP</option>
+                  <option value="https">HTTPS</option>
+                  <option value="socks5">SOCKS5</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span class="field-label">服务器地址（host:port）</span>
+                <input
+                  id="proxy-server-input"
+                  class="text-input mono-text"
+                  type="text"
+                  placeholder="192.168.3.2:7890"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">代理用户名（可选）</span>
+                <input
+                  id="proxy-username-input"
+                  class="text-input"
+                  type="text"
+                  autocomplete="off"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-form-type="other"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">代理密码（可选）</span>
+                <input
+                  id="proxy-password-input"
+                  class="text-input"
+                  type="password"
+                  placeholder="编辑时留空表示保留已保存密码"
+                  autocomplete="new-password"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-form-type="other"
+                  spellcheck="false"
+                />
+              </label>
+
+              <div class="field">
+                <span class="field-label">测试方式</span>
+                <div class="proxy-test-mode-group" role="radiogroup" aria-label="代理测试方式">
+                  <label class="proxy-test-mode-option">
+                    <input
+                      class="proxy-test-mode-input"
+                      type="radio"
+                      name="proxy-test-mode"
+                      value="http"
+                      checked
+                    />
+                    <span class="proxy-test-mode-card">
+                      <span class="proxy-test-mode-title">HTTP 访问</span>
+                      <span class="proxy-test-mode-desc">像浏览器一样请求 URL，适合验证网页连通性。</span>
+                    </span>
+                  </label>
+                  <label class="proxy-test-mode-option">
+                    <input
+                      class="proxy-test-mode-input"
+                      type="radio"
+                      name="proxy-test-mode"
+                      value="codex_exec"
+                    />
+                    <span class="proxy-test-mode-card">
+                      <span class="proxy-test-mode-title">Codex Exec</span>
+                      <span class="proxy-test-mode-desc">真正运行 `codex exec`，更接近实际 Codex 可用性。</span>
+                    </span>
+                  </label>
+                </div>
+                <p id="proxy-test-mode-hint" class="meta-text compact-meta">HTTP 访问会通过代理直接请求目标 URL，适合检查网页连通性。</p>
+              </div>
+
+              <label id="proxy-test-url-field" class="field">
+                <span class="field-label">测试地址（可选多个）</span>
+                <div class="proxy-test-url-presets">
+                  <label class="proxy-test-url-option">
+                    <input type="checkbox" class="proxy-test-url-check" value="https://www.google.com" />
+                    <span>google.com</span>
+                  </label>
+                  <label class="proxy-test-url-option">
+                    <input type="checkbox" class="proxy-test-url-check" value="https://www.chatgpt.com" checked />
+                    <span>chatgpt.com</span>
+                  </label>
+                  <label class="proxy-test-url-option">
+                    <input type="checkbox" class="proxy-test-url-check" value="https://httpbin.org/ip" />
+                    <span>httpbin.org</span>
+                  </label>
+                </div>
+                <input
+                  id="proxy-test-url-input"
+                  class="text-input mono-text"
+                  type="text"
+                  placeholder="或输入自定义地址，不带协议时默认按 https:// 处理"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <label id="proxy-codex-prompt-field" class="field" hidden>
+                <span class="field-label">Codex 提示词</span>
+                <input
+                  id="proxy-codex-prompt-input"
+                  class="text-input mono-text"
+                  type="text"
+                  value="hi"
+                  placeholder="hi"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <span class="meta-text compact-meta">这里会实际运行 `codex exec`，成功标准是命令能拿到最后一条助手回复。</span>
+              </label>
+
+              <div class="toolbar">
+                <button id="proxy-test-btn" class="button secondary">测试连接</button>
+                <button id="proxy-save-btn" class="button primary">保存预设</button>
+                <button id="proxy-clear-btn" class="button secondary">清空</button>
+              </div>
+
+              <div id="proxy-test-result" class="inline-status mono-text" data-tone="muted" hidden></div>
+            </div>
+          </div>
+
+          <details class="settings-details mt-12">
+            <summary>查看程序代理环境变量</summary>
+            <div id="proxy-effective-env" class="settings-value mono-text settings-code-block">加载中…</div>
+          </details>
+
+          <div class="system-section-divider"></div>
+
+          <div class="settings-summary-grid">
+            <div class="settings-summary-card">
+              <p class="section-label">当前程序代理</p>
+              <p id="system-app-proxy-active" class="settings-value mono-text mb-6">加载中…</p>
+              <div id="system-app-proxy-env" class="settings-value mono-text settings-code-block">加载中…</div>
+            </div>
+            <div class="settings-summary-card">
+              <p class="section-label">webclx 当前进程</p>
+              <p id="system-process-proxy-summary" class="settings-value">加载中…</p>
+            </div>
+            <div class="settings-summary-card">
+              <p class="section-label">service 启动配置</p>
+              <p id="system-file-proxy-summary" class="settings-value">加载中…</p>
+            </div>
+            <div class="settings-summary-card">
+              <p class="section-label">当前用户 shell 启动环境</p>
+              <p id="system-user-shell-proxy-summary" class="settings-value">加载中…</p>
+              <div id="system-user-shell-proxy-env" class="settings-value mono-text settings-code-block">加载中…</div>
+            </div>
+          </div>
+
+          <div class="settings-card settings-card-wide settings-card-tight system-proxy-write-card mt-12">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">服务代理写入</p>
+                <h2>编辑 /etc/default/webclx</h2>
+              </div>
+            </div>
+            <p id="system-system-proxy-file-path" class="settings-value mono-text settings-muted-line">加载中…</p>
+            <div class="table-wrap proxy-env-edit-table-wrap">
+              <table class="entry-table proxy-env-edit-table">
+                <tbody>
+                  <tr>
+                    <th scope="row">HTTP_PROXY</th>
+                    <td>
+                      <input id="system-proxy-http-input" class="text-input mono-text" type="text" placeholder="http://127.0.0.1:7890" aria-label="HTTP_PROXY" autocomplete="off" spellcheck="false" />
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">HTTPS_PROXY</th>
+                    <td>
+                      <input id="system-proxy-https-input" class="text-input mono-text" type="text" placeholder="http://127.0.0.1:7890" aria-label="HTTPS_PROXY" autocomplete="off" spellcheck="false" />
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">ALL_PROXY</th>
+                    <td>
+                      <input id="system-proxy-all-input" class="text-input mono-text" type="text" placeholder="socks5://127.0.0.1:7890" aria-label="ALL_PROXY" autocomplete="off" spellcheck="false" />
+                    </td>
+                  </tr>
+                  <tr>
+                    <th scope="row">NO_PROXY</th>
+                    <td>
+                      <input id="system-proxy-no-input" class="text-input mono-text" type="text" placeholder="localhost,127.0.0.1,.local" aria-label="NO_PROXY" autocomplete="off" spellcheck="false" />
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="toolbar">
+              <button id="system-copy-from-app-proxy-btn" class="button secondary">从程序代理复制</button>
+              <button id="system-save-proxy-btn" class="button secondary">写入服务代理</button>
+              <button id="system-clear-proxy-btn" class="button secondary">清除服务代理</button>
+            </div>
+          </div>
+          <div id="system-proxy-status" class="inline-status mt-8" data-tone="muted"></div>
+        </section>
+
+        <section
+          id="settings-panel-agent"
+          class="settings-subpanel"
+          role="tabpanel"
+          aria-labelledby="settings-tab-agent"
+          data-settings-panel="agent"
+        >
+          <div class="settings-card settings-card-wide">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">Agent 模型与提示词</p>
+              </div>
+              <div class="toolbar">
+                <a href="/agent" class="button secondary" target="_blank">打开 Agent</a>
+              </div>
+            </div>
+            <label class="field field-inline-tight">
+              <span class="field-label">API 预设</span>
+              <select id="agent-api-preset-select" class="text-input">
+                <option value="">当前应用</option>
+              </select>
+              <span class="field-hint">选择 Agent 直接使用的 Codex_API 预设；"当前应用"跟随设置页当前激活的预设。</span>
+            </label>
+            <div id="agent-effective-preset-info" class="agent-effective-info" hidden>
+              <span class="agent-effective-label">当前实际：</span>
+              <span id="agent-effective-preset-name" class="mono-text"></span>
+              <span id="agent-effective-provider" class="agent-effective-provider"></span>
+              <span class="agent-effective-divider">·</span>
+              <span class="agent-effective-model-label">模型：</span>
+              <span id="agent-effective-model" class="mono-text"></span>
+            </div>
+            <label class="field field-inline-tight">
+              <span class="field-label">默认模型</span>
+              <input
+                id="agent-default-model-input"
+                class="text-input"
+                type="text"
+                placeholder="gpt-4o"
+              />
+              <span class="field-hint">留空则使用 gpt-4o。</span>
+            </label>
+            <label class="field">
+              <span class="field-label">系统提示词覆盖（可选）</span>
+              <textarea
+                id="agent-system-prompt-input"
+                class="text-input"
+                rows="3"
+                placeholder="留空使用内置默认系统提示词。"
+              ></textarea>
+            </label>
+          </div>
+
+          <div class="settings-card settings-card-wide">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">额外 Skill 目录</p>
+              </div>
+              <div class="toolbar">
+                <input
+                  id="agent-skill-dir-input"
+                  class="text-input"
+                  type="text"
+                  placeholder="/home/codes/myProject/.codex/skills"
+                  style="width: 320px;"
+                />
+                <button id="agent-add-skill-dir-btn" class="button secondary" type="button">添加</button>
+              </div>
+            </div>
+            <p class="field-hint">加载项目目录下的 skill。绝对路径，必须已存在。这些目录中的 skill 会与用户全局 skill 合并。</p>
+            <div id="agent-skill-dirs-list" class="settings-value-list"></div>
+          </div>
+
+          <div class="settings-card settings-card-wide">
+            <div class="panel-head">
+              <div>
+                <p class="section-label">Skill 管理</p>
+              </div>
+              <div class="toolbar">
+                <button id="agent-refresh-skills-btn" class="button secondary" type="button">刷新列表</button>
+                <input
+                  id="agent-skill-search-input"
+                  class="text-input"
+                  type="text"
+                  placeholder="搜索 skill..."
+                  style="width: 200px;"
+                />
+              </div>
+            </div>
+            <p class="field-hint">默认加载全部已识别 skill。切换屏蔽开关可在不删除文件的情况下对 Agent 隐藏指定 skill。</p>
+            <div id="agent-skills-list">
+              <div class="inline-status" data-tone="muted">加载中...</div>
+            </div>
+          </div>
+        </section>
+
+        <div class="toolbar settings-actions">
+          <button id="reset-settings" class="button secondary">恢复内置默认</button>
+          <button id="remote-copy-settings" class="button secondary">远程拷贝</button>
+          <button id="save-settings" class="button primary">保存设置</button>
+        </div>
+
+        <div id="settings-status" class="inline-status" data-tone="muted">
+          修改后会影响文件浏览、主题、代理行为与新打开的网页终端；字体和主题会先在当前页面即时预览。
+        </div>
+      </section>
+
+      <section id="desktop-view" class="panel desktop-panel tab-view" role="tabpanel" aria-labelledby="tab-desktop">
+        <div class="panel-head wide">
+          <div class="desktop-address-bar">
+            <p class="section-label">远程桌面</p>
+            <div class="desktop-url-field">
+              <input
+                id="desktop-url-input"
+                class="text-input mono-text desktop-url-input"
+                type="text"
+                list="desktop-url-history"
+                value="https://192.168.3.2:14083/"
+                autocomplete="off"
+                spellcheck="false"
+              />
+              <datalist id="desktop-url-history"></datalist>
+              <button id="desktop-apply-url" class="button" type="button" title="应用地址并重新加载">应用</button>
+              <a id="desktop-open-button" class="button" href="#" target="_blank" rel="noopener noreferrer">新窗口打开</a>
+              <button id="desktop-reload" class="button secondary" type="button" title="重新加载远程桌面">重新加载</button>
+            </div>
+          </div>
+        </div>
+        <div class="desktop-frame-wrap">
+          <iframe
+            id="desktop-frame"
+            class="desktop-frame"
+            src="https://192.168.3.2:14083/"
+            title="远程桌面"
+            loading="lazy"
+            allow="clipboard-read; clipboard-write; fullscreen"
+            referrerpolicy="no-referrer"
+          ></iframe>
+          <div id="desktop-fallback" class="desktop-fallback" hidden>
+            <p class="desktop-fallback-title">远程桌面尚未加载出来。</p>
+            <p>该地址（<span id="desktop-fallback-url" class="mono-text"></span>）使用的是自签名证书，浏览器默认拒绝在网页内嵌渲染未信任的 HTTPS 站点。</p>
+            <p>请先在新窗口打开该地址，手动信任证书后再回到本页面：</p>
+            <ol class="desktop-fallback-steps">
+              <li>点击下面的「在新窗口打开」；</li>
+              <li>在浏览器证书警告页点「高级 / Advanced」→「继续前往 / Proceed」；</li>
+              <li>回到本页，点「我已信任，重新加载」。</li>
+            </ol>
+            <div class="desktop-fallback-actions">
+              <a id="desktop-fallback-open" class="button" href="#" target="_blank" rel="noopener noreferrer">在新窗口打开</a>
+              <button id="desktop-reload-after-trust" class="button" type="button">我已信任，重新加载</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <dialog id="terminal-rename-dialog" class="terminal-rename-dialog" aria-labelledby="terminal-rename-dialog-title">
+        <form id="session-rename-form" class="terminal-rename-dialog-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">终端管理</p>
+              <h2 id="terminal-rename-dialog-title">修改终端名称</h2>
+            </div>
+          </div>
+          <input
+            id="session-rename-input"
+            class="text-input"
+            type="text"
+            inputmode="text"
+            autocomplete="off"
+            spellcheck="false"
+            aria-label="新的终端名称"
+            aria-describedby="terminal-rename-dialog-status"
+            placeholder="输入新的终端名称"
+          />
+          <div
+            id="terminal-rename-dialog-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button class="button primary" type="submit">保存名称</button>
+            <button id="session-rename-cancel" class="button secondary" type="button">取消</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="workspace-history-preset-dialog"
+        class="terminal-rename-dialog workspace-history-preset-dialog"
+        aria-labelledby="workspace-history-preset-dialog-title"
+      >
+        <form
+          id="workspace-history-preset-form"
+          class="terminal-rename-dialog-form workspace-history-preset-form"
+          method="dialog"
+        >
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">Codex API 预设</p>
+              <h2 id="workspace-history-preset-dialog-title">指定大模型</h2>
+            </div>
+          </div>
+          <fieldset
+            id="workspace-history-preset-list"
+            class="workspace-history-preset-list"
+            aria-label="选择启动预设"
+          ></fieldset>
+          <div
+            id="workspace-history-preset-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button id="workspace-history-preset-cancel" class="button secondary" type="button">取消</button>
+            <button id="workspace-history-preset-submit" class="button primary" type="submit">以此预设 fork</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="workspace-designate-preset-dialog"
+        class="terminal-rename-dialog workspace-history-preset-dialog"
+        aria-labelledby="workspace-designate-preset-dialog-title"
+      >
+        <form
+          id="workspace-designate-preset-form"
+          class="terminal-rename-dialog-form workspace-history-preset-form"
+          method="dialog"
+        >
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">指定大模型预设</p>
+              <h2 id="workspace-designate-preset-dialog-title">指定预设启动</h2>
+            </div>
+          </div>
+          <div
+            id="workspace-designate-preset-mode"
+            class="remote-copy-options"
+            role="radiogroup"
+            aria-label="选择 Agent 类型"
+          >
+            <label class="workspace-designate-preset-mode-option">
+              <input
+                type="radio"
+                name="workspace-designate-preset-agent"
+                value="codex"
+                checked
+              />
+              <span>Codex API 预设</span>
+            </label>
+            <label class="workspace-designate-preset-mode-option">
+              <input
+                type="radio"
+                name="workspace-designate-preset-agent"
+                value="claude"
+              />
+              <span>Claude API 预设</span>
+            </label>
+          </div>
+          <fieldset
+            id="workspace-designate-preset-list"
+            class="workspace-history-preset-list"
+            aria-label="选择启动预设"
+          ></fieldset>
+          <div
+            id="workspace-designate-preset-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button id="workspace-designate-preset-cancel" class="button secondary" type="button">取消</button>
+            <button id="workspace-designate-preset-submit" class="button primary" type="submit">指定并启动</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="auth-import-dialog" class="auth-import-dialog">
+        <form id="auth-import-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">Auth 导入</p>
+              <h2>粘贴账号 JSON</h2>
+            </div>
+          </div>
+
+          <p class="meta-text compact-meta">把账号 JSON 粘贴到下面，系统会转换为当前 auth.json 格式。</p>
+
+          <textarea
+            id="auth-import-text"
+            class="dialog-textarea"
+            spellcheck="false"
+            placeholder='可直接粘贴 [{"id":"...","tokens":{"access_token":"...","id_token":"...","refresh_token":"..."}}] 这类内容'
+          ></textarea>
+
+          <div class="toolbar dialog-actions">
+            <button id="auth-import-cancel" class="button secondary" type="button">取消</button>
+            <button id="auth-import-submit" class="button primary" type="submit">转换到编辑器</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="api-account-import-dialog" class="auth-import-dialog">
+        <form id="api-account-import-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">API 账号导入</p>
+              <h2>粘贴账号 JSON</h2>
+            </div>
+          </div>
+
+          <p class="meta-text compact-meta">把 sub2api 导出或 OAuth access token 账号 JSON 粘贴到下面，系统会创建 Codex_API 预设，通过本机入口代理。</p>
+
+          <textarea
+            id="api-account-import-text"
+            class="dialog-textarea"
+            spellcheck="false"
+            placeholder='可直接粘贴 sub2api 导出或 {"access_token":"...","account_id":"..."} 格式'
+          ></textarea>
+
+          <div id="api-account-import-dialog-status" class="inline-status" data-tone="muted"></div>
+
+          <div class="toolbar dialog-actions">
+            <button id="api-account-import-cancel" class="button secondary" type="button">取消</button>
+            <button id="api-account-import-submit" class="button primary" type="submit">导入</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="remote-copy-dialog" class="remote-copy-dialog">
+        <form id="remote-copy-form" class="remote-copy-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">远程拷贝</p>
+              <h2>从其他实例拷贝配置</h2>
+            </div>
+          </div>
+
+          <label class="field">
+            <span class="field-label">远程地址</span>
+            <input
+              id="remote-copy-url"
+              class="text-input mono-text"
+              type="text"
+              placeholder="http://192.168.1.100:11111"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <span class="field-help">输入远程 webClx 实例的地址（需要能访问到 /api/settings）</span>
+          </label>
+
+          <div class="remote-copy-options">
+            <label class="field">
+              <span class="field-label">拷贝模式</span>
+              <select id="remote-copy-mode" class="text-input">
+                <option value="tab">拷贝当前TAB（全部字段）</option>
+                <option value="all">拷贝全部配置</option>
+              </select>
+            </label>
+          </div>
+
+          <div id="remote-copy-status" class="inline-status mt-8" data-tone="muted"></div>
+
+          <div class="toolbar dialog-actions">
+            <button id="remote-copy-cancel" class="button secondary" type="button">取消</button>
+            <button id="remote-copy-submit" class="button primary" type="submit">确认拷贝</button>
+          </div>
+        </form>
+      </dialog>
+    </div>
+    <div
+      id="terminal-android-select-menu"
+      class="terminal-android-select-menu"
+      role="menu"
+      aria-label="选择命令"
+      hidden
+    ></div>
+    <div id=webclx-toast-container class=webclx-toast-container aria-live=polite></div>
+  </body>
+</html>

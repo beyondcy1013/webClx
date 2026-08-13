@@ -1,0 +1,4 @@
+interface:
+  display_name: "Terminal Message"
+  short_description: "Send prompts to webClx terminals"
+  default_prompt: "Use $terminal-message to send a prompt to another webClx terminal."

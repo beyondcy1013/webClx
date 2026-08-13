@@ -1,0 +1,156 @@
+use crate::schema::*;
+
+pub(crate) const FAVORITE_PATH_FIELDS: &[ApiField] = &[
+    field(
+        "path",
+        "string",
+        true,
+        false,
+        "Absolute favorite path under /home.",
+        Some("/home/codes/webClx"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "kind",
+        "string",
+        true,
+        false,
+        "Whether the favorite points to a file or directory.",
+        Some("dir"),
+        FAVORITE_PATH_KIND_VALUES,
+        EMPTY_FIELDS,
+    ),
+];
+
+pub(crate) const WORKSPACE_HISTORY_FIELDS: &[ApiField] = &[
+    field(
+        "path",
+        "string",
+        true,
+        false,
+        "Absolute workspace-history path.",
+        Some("/home/codes/webClx"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "last_opened_at",
+        "integer",
+        true,
+        false,
+        "Last opened timestamp in milliseconds since the Unix epoch.",
+        Some("1712640000123"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+];
+
+pub(crate) const SYSTEM_USER_OPTION_FIELDS: &[ApiField] = &[
+    field(
+        "name",
+        "string",
+        true,
+        false,
+        "Linux user name.",
+        Some("root"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "uid",
+        "integer",
+        true,
+        false,
+        "Linux user id.",
+        Some("0"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "gid",
+        "integer",
+        true,
+        false,
+        "Linux primary group id.",
+        Some("0"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "home",
+        "string",
+        true,
+        false,
+        "Linux user home directory.",
+        Some("/home/root"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "shell",
+        "string",
+        true,
+        false,
+        "Linux user login shell.",
+        Some("/bin/bash"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+];
+
+pub(crate) const TERMINAL_QUICK_COMMAND_FIELDS: &[ApiField] = &[
+    field(
+        "key",
+        "string",
+        true,
+        false,
+        "Button/key text that selects this quick command in a new terminal.",
+        Some("1"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "label",
+        "string",
+        true,
+        false,
+        "Display label for the quick command button and prompt.",
+        Some("codex"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "command",
+        "string",
+        true,
+        false,
+        "Full command line to type into the terminal and execute.",
+        Some("codex"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+];
+
+pub(crate) const TERMINAL_DEFAULT_ENV_VAR_FIELDS: &[ApiField] = &[
+    field(
+        "key",
+        "string",
+        true,
+        false,
+        "Environment variable name injected into new terminal sessions.",
+        Some("OPENAI_BASE_URL"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+    field(
+        "value",
+        "string",
+        true,
+        false,
+        "Environment variable value injected into new terminal sessions.",
+        Some("https://api.example.com"),
+        EMPTY_TEXTS,
+        EMPTY_FIELDS,
+    ),
+];

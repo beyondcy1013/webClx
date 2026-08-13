@@ -1,0 +1,4 @@
+interface:
+  display_name: "webClx 产物发布"
+  short_description: "发布版本化构建产物到webClx下载中心，并确保每个项目只保留最新3个版本"
+  default_prompt: "Use $webclx-artifact-publisher to publish a verified versioned artifact and verify the project retains no more than its latest three artifacts."

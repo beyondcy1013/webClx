@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>登录</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      (() => {
+        try {
+          const mode = window.localStorage.getItem("webclx:theme-mode");
+          let resolved;
+          if (mode === "dark" || mode === "light") {
+            resolved = mode;
+          } else {
+            resolved = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+          }
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20260727b" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260715a" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260727b" />
+    <script defer src="/assets/i18n.js?v=20260814a"></script>
+  </head>
+  <body class="login-page">
+    <main class="login-card">
+      <div class="login-brand">
+        <span class="login-logo">webClx</span>
+      </div>
+      <form id="login-form" class="login-form" autocomplete="on">
+        <label class="login-field">
+          <span class="login-label">账号</span>
+          <input
+            type="text"
+            id="login-username"
+            name="username"
+            class="login-input"
+            autocomplete="username"
+            autocapitalize="off"
+            autocorrect="off"
+            spellcheck="false"
+            required
+          />
+        </label>
+        <label class="login-field">
+          <span class="login-label">密码</span>
+          <input
+            type="password"
+            id="login-password"
+            name="password"
+            class="login-input"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+        <p id="login-error" class="login-error" hidden></p>
+        <button type="submit" id="login-submit" class="login-submit">登录</button>
+      </form>
+    </main>
+    <script defer src="/assets/login.js?v=20260814a"></script>
+  </body>
+</html>

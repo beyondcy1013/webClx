@@ -1,0 +1,4 @@
+interface:
+  display_name: "webClx Codex/API Terminal Ops"
+  short_description: "webClx API presets and terminal workflow"
+  default_prompt: "Use $webclx-codex-api-terminal-ops to diagnose this webClx Codex/API or terminal issue."

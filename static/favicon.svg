@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="webClx icon">
+  <defs>
+    <linearGradient id="warm" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f4b06b" />
+      <stop offset="0.52" stop-color="#e57e3d" />
+      <stop offset="1" stop-color="#bb4418" />
+    </linearGradient>
+  </defs>
+  <rect x="6" y="6" width="52" height="52" rx="16" fill="url(#warm)" />
+  <rect x="8.5" y="8.5" width="47" height="47" rx="13.5" fill="none" stroke="rgba(255,245,232,0.35)" />
+  <circle cx="20" cy="18" r="3" fill="#fff5e8" fill-opacity="0.88" />
+  <path
+    d="M22 23 L34 32 L22 41"
+    fill="none"
+    stroke="#fff5e8"
+    stroke-width="5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M39 41 H47"
+    fill="none"
+    stroke="#fff5e8"
+    stroke-width="5"
+    stroke-linecap="round"
+  />
+</svg>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "webClx Rebuild"
+  short_description: "Rebuild and deploy webClx service"
+  default_prompt: "重新编译更新webClx服务"
