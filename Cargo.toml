@@ -20,7 +20,7 @@ argon2 = "0.5"
 auth_core = { path = "crates/auth_core" }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 base64 = "0.22"
-hmac = "0.12"
+hmac = "0.13"
 hex = "0.4"
 codex_proxy_core = { path = "crates/codex_proxy_core" }
 flate2 = "1.0"
