@@ -110,15 +110,18 @@ function createReleaseFixture({
 
 test("verified source release extracts into a clean ordinary directory", () => {
   const { fixture, archive } = createReleaseFixture();
-  const result = run("bash", [prepareScript.pathname, archive]);
+  const releaseCache = mkdtempSync(join(tmpdir(), "webclx-release-cache-"));
+  const result = run("bash", [prepareScript.pathname, archive], {
+    env: { ...process.env, WEBCLX_RELEASE_CACHE_DIR: releaseCache },
+  });
   try {
     assert.equal(result.status, 0, result.stderr);
     const projectDir = result.stdout.trim();
-    assert.match(projectDir, /^\/home\/cache\/webclx-release\/source-release\./);
+    assert.equal(projectDir.startsWith(`${releaseCache}/source-release.`), true);
     assert.equal(readFileSync(join(projectDir, "SOURCE_RELEASE"), "utf8").includes("1.8.9"), true);
     assert.notEqual(run("git", ["-C", projectDir, "rev-parse", "--is-inside-work-tree"]).status, 0);
-    rmSync(projectDir.replace(/\/webClx-1\.8\.9$/, ""), { recursive: true, force: true });
   } finally {
+    rmSync(releaseCache, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
   }
 });
