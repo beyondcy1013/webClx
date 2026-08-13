@@ -327,6 +327,7 @@ async fn send_literal_keys(session: &str, text: &str, enter: bool) -> Result<(),
 }
 
 async fn paste_buffer(session: &str, input: &str) -> Result<(), String> {
+    let (input, submit) = split_background_stdin(input);
     let buffer = format!("webclx-agent-input-{}", generate_id());
     let mut child = Command::new("tmux")
         .args(["load-buffer", "-b", buffer.as_str(), "-"])
@@ -349,7 +350,20 @@ async fn paste_buffer(session: &str, input: &str) -> Result<(), String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     run_tmux(["paste-buffer", "-d", "-b", buffer.as_str(), "-t", session]).await?;
+    if submit {
+        run_tmux(["send-keys", "-t", session, "Enter"]).await?;
+    }
     Ok(())
+}
+
+fn split_background_stdin(input: &str) -> (&str, bool) {
+    if let Some(input) = input.strip_suffix("\r\n") {
+        (input, true)
+    } else if let Some(input) = input.strip_suffix('\n') {
+        (input, true)
+    } else {
+        (input, false)
+    }
 }
 
 async fn run_tmux<const N: usize>(args: [&str; N]) -> Result<String, String> {
@@ -404,6 +418,14 @@ mod tests {
         ));
         assert_eq!(output.len(), MAX_BACKGROUND_OUTPUT_BYTES);
         assert!(output.ends_with("latest"));
+    }
+
+    #[test]
+    fn background_stdin_uses_trailing_newline_as_explicit_submit() {
+        assert_eq!(split_background_stdin("hello\n"), ("hello", true));
+        assert_eq!(split_background_stdin("hello\r\n"), ("hello", true));
+        assert_eq!(split_background_stdin("hello"), ("hello", false));
+        assert_eq!(split_background_stdin("first\nsecond\n"), ("first\nsecond", true));
     }
 
     #[tokio::test]
