@@ -327,7 +327,6 @@ async fn send_literal_keys(session: &str, text: &str, enter: bool) -> Result<(),
 }
 
 async fn paste_buffer(session: &str, input: &str) -> Result<(), String> {
-    let (input, submit) = split_background_stdin(input);
     let buffer = format!("webclx-agent-input-{}", generate_id());
     let mut child = Command::new("tmux")
         .args(["load-buffer", "-b", buffer.as_str(), "-"])
@@ -350,20 +349,7 @@ async fn paste_buffer(session: &str, input: &str) -> Result<(), String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     run_tmux(["paste-buffer", "-d", "-b", buffer.as_str(), "-t", session]).await?;
-    if submit {
-        run_tmux(["send-keys", "-t", session, "Enter"]).await?;
-    }
     Ok(())
-}
-
-fn split_background_stdin(input: &str) -> (&str, bool) {
-    if let Some(input) = input.strip_suffix("\r\n") {
-        (input, true)
-    } else if let Some(input) = input.strip_suffix('\n') {
-        (input, true)
-    } else {
-        (input, false)
-    }
 }
 
 async fn run_tmux<const N: usize>(args: [&str; N]) -> Result<String, String> {
@@ -420,21 +406,13 @@ mod tests {
         assert!(output.ends_with("latest"));
     }
 
-    #[test]
-    fn background_stdin_uses_trailing_newline_as_explicit_submit() {
-        assert_eq!(split_background_stdin("hello\n"), ("hello", true));
-        assert_eq!(split_background_stdin("hello\r\n"), ("hello", true));
-        assert_eq!(split_background_stdin("hello"), ("hello", false));
-        assert_eq!(split_background_stdin("first\nsecond\n"), ("first\nsecond", true));
-    }
-
     #[tokio::test]
     async fn background_command_accepts_stdin_and_keeps_final_output() {
         let manager = test_manager();
         let started = manager
             .start(
                 "agent-test",
-                "printf ready; read line; printf ':received:%s' \"$line\"",
+                "printf '\\122\\105\\101\\104\\131\\137\\106\\117\\122\\137\\123\\124\\104\\111\\116'; read line; printf ':received:%s' \"$line\"",
                 Path::new("/tmp"),
                 Some(24),
                 Some(100),
@@ -443,7 +421,8 @@ mod tests {
             .expect("start background command");
         assert_eq!(started.rows, 24);
         assert_eq!(started.cols, 100);
-        wait_for_status(&manager, &started.id, |record| record.stdout.contains("ready")).await;
+        wait_for_status(&manager, &started.id, |record| record.stdout.contains("READY_FOR_STDIN"))
+            .await;
         manager
             .write_stdin("agent-test", &started.id, "hello\n")
             .await
@@ -451,7 +430,8 @@ mod tests {
         let completed =
             wait_for_status(&manager, &started.id, |record| record.status == "completed").await;
         assert_eq!(completed.exit_code, Some(0));
-        assert!(completed.stdout.contains("ready:received:hello"));
+        assert!(completed.stdout.contains("READY_FOR_STDIN"));
+        assert!(completed.stdout.contains(":received:hello"));
         let _ = run_tmux(["kill-session", "-t", completed.tmux_session.as_str()]).await;
     }
 
@@ -477,6 +457,7 @@ mod tests {
         // A cold CI runner can take several seconds to schedule the tmux-backed
         // process even though the command is healthy. Keep condition polling,
         // but allow enough time to distinguish slow startup from a deadlock.
+        let mut last_record = None;
         for _ in 0..300 {
             let record = manager
                 .get("agent-test", command_id)
@@ -485,8 +466,9 @@ mod tests {
             if predicate(&record) {
                 return record;
             }
+            last_record = Some(record);
             sleep(Duration::from_millis(50)).await;
         }
-        panic!("background command did not reach the expected state");
+        panic!("background command did not reach the expected state: {last_record:#?}");
     }
 }
