@@ -20,10 +20,6 @@ const terminalManagerRs = readFileSync(
   fileURLToPath(new URL("../src/terminal/manager.rs", import.meta.url)),
   "utf8",
 );
-const codexTaskScript = readFileSync(
-  "/home/root/.codex/skills/webclx-codex-task/scripts/webclx_codex_task.py",
-  "utf8",
-);
 
 const verifyPollMs = Number(
   terminalRs.match(/TERMINAL_MESSAGE_VERIFY_POLL_MS:\s*u64\s*=\s*(\d+)/)?.[1],
@@ -37,10 +33,6 @@ assert.match(
   /thread::sleep\(terminal_message_paste_settle_delay\(&data,\s*bracketed_paste\)\)/,
   "verified bracketed paste must settle before the first submit key",
 );
-assert.match(codexTaskScript, /"bracketed_paste": True/);
-assert.match(codexTaskScript, /"verify_submission": True/);
-assert.match(codexTaskScript, /"delivery_id":/);
-assert.match(codexTaskScript, /submitted[\s\S]*RuntimeError/);
 
 function dryRun(script, ...extraArgs) {
   const result = spawnSync(
