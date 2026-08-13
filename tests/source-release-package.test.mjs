@@ -67,6 +67,13 @@ function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
 }
 
+function runPrepare(archive, options = {}) {
+  return run("bash", [prepareScript.pathname, archive], {
+    env: { ...process.env, WEBCLX_RELEASE_CACHE_DIR: tmpdir() },
+    ...options,
+  });
+}
+
 function createReleaseFixture({
   linkedEntry = false,
   unlistedStaticEntry = false,
@@ -111,7 +118,7 @@ function createReleaseFixture({
 test("verified source release extracts into a clean ordinary directory", () => {
   const { fixture, archive } = createReleaseFixture();
   const releaseCache = mkdtempSync(join(tmpdir(), "webclx-release-cache-"));
-  const result = run("bash", [prepareScript.pathname, archive], {
+  const result = runPrepare(archive, {
     env: { ...process.env, WEBCLX_RELEASE_CACHE_DIR: releaseCache },
   });
   try {
@@ -129,13 +136,13 @@ test("verified source release extracts into a clean ordinary directory", () => {
 test("source release preparation rejects checksum mismatches and links", () => {
   const checksumFixture = createReleaseFixture();
   writeFileSync(`${checksumFixture.archive}.sha256`, `${"0".repeat(64)}  stale.tar.gz\n`);
-  const checksumResult = run("bash", [prepareScript.pathname, checksumFixture.archive]);
+  const checksumResult = runPrepare(checksumFixture.archive);
   assert.notEqual(checksumResult.status, 0);
   assert.match(checksumResult.stderr, /checksum mismatch/);
   rmSync(checksumFixture.fixture, { recursive: true, force: true });
 
   const linkFixture = createReleaseFixture({ linkedEntry: true });
-  const linkResult = run("bash", [prepareScript.pathname, linkFixture.archive]);
+  const linkResult = runPrepare(linkFixture.archive);
   assert.notEqual(linkResult.status, 0);
   assert.match(linkResult.stderr, /links or unsupported archive entry types/);
   rmSync(linkFixture.fixture, { recursive: true, force: true });
@@ -143,7 +150,7 @@ test("source release preparation rejects checksum mismatches and links", () => {
 
 test("source release preparation requires a complete static manifest", () => {
   const fixture = createReleaseFixture({ unlistedStaticEntry: true });
-  const result = run("bash", [prepareScript.pathname, fixture.archive]);
+  const result = runPrepare(fixture.archive);
   try {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /static asset manifest/);
@@ -158,7 +165,7 @@ test("source release preparation rejects malformed provenance", () => {
     "version=1.8.9\ncommit=0123456789ab\ncreated_utc=2026-08-14T00:00:00Z\nunexpected=accepted\n",
   ]) {
     const fixture = createReleaseFixture({ sourceRelease });
-    const result = run("bash", [prepareScript.pathname, fixture.archive]);
+    const result = runPrepare(fixture.archive);
     try {
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /provenance/);
