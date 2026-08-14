@@ -239,14 +239,11 @@ impl BackgroundCommandManager {
                     record.pid = status.pid;
                     record.rows = status.rows;
                     record.cols = status.cols;
-                    if status.dead {
-                        record.exit_code = status.exit_code;
-                        record.status = if status.exit_code == Some(0) {
-                            "completed"
-                        } else {
-                            "failed"
-                        }
-                        .to_string();
+                    if let Some((exit_code, completed_status)) =
+                        completed_background_status(status.dead, status.exit_code)
+                    {
+                        record.exit_code = Some(exit_code);
+                        record.status = completed_status.to_string();
                     }
                     if let Ok(output) = capture_pane(&record.tmux_session).await {
                         record.output_truncated |= replace_bounded(&mut record.stdout, output);
@@ -290,6 +287,20 @@ struct PaneStatus {
     pid: Option<u32>,
     cols: u16,
     rows: u16,
+}
+
+fn completed_background_status(dead: bool, exit_code: Option<i32>) -> Option<(i32, &'static str)> {
+    if !dead {
+        return None;
+    }
+    exit_code.map(|exit_code| {
+        let status = if exit_code == 0 {
+            "completed"
+        } else {
+            "failed"
+        };
+        (exit_code, status)
+    })
 }
 
 async fn pane_status(session: &str) -> Result<PaneStatus, String> {
@@ -404,6 +415,14 @@ mod tests {
         ));
         assert_eq!(output.len(), MAX_BACKGROUND_OUTPUT_BYTES);
         assert!(output.ends_with("latest"));
+    }
+
+    #[test]
+    fn background_completion_waits_for_a_concrete_exit_code() {
+        assert_eq!(completed_background_status(false, None), None);
+        assert_eq!(completed_background_status(true, None), None);
+        assert_eq!(completed_background_status(true, Some(0)), Some((0, "completed")));
+        assert_eq!(completed_background_status(true, Some(7)), Some((7, "failed")));
     }
 
     #[tokio::test]
