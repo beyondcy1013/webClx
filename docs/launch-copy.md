@@ -49,7 +49,7 @@ Revenue offers:
 | DEV Community / Hashnode | Draft ready | Owner account | Search traffic and self-host installs |
 | Indie Hackers | Draft ready | Owner account | Pricing and problem interviews |
 | Reddit | Draft ready, adapt per subreddit | Read current rules and participate from owner account | Technical feedback |
-| Show HN | Hold | A directly usable demo with no email gate | Engineering feedback |
+| Show HN | Ready for owner submission | Interactive synthetic demo works without signup or email | Engineering feedback |
 | Product Hunt | Hold | 60-90 second real video and 3-5 real trial outcomes | Product launch |
 | AlternativeTo | Hold | Stable product page, support identity, and durable service status | Long-tail discovery |
 | Awesome Selfhosted | Not eligible before 2026-12-14 | First public release at least four months old | Directory discovery |
@@ -185,16 +185,37 @@ setups.
 Demo and source:
 https://beyondcy1013.github.io/webClx/?utm_source=reddit&utm_medium=community&utm_campaign=public-preview
 
-## Show HN draft - do not publish yet
+## Show HN draft
 
 ### Title
 
 Show HN: webClx - continue native Codex, Claude, and DeepSeek terminals from a phone
 
-The body should use the DEV technical explanation but must link to a directly
-usable sandbox. A screenshot and waitlist are not enough for Show HN. Publish
-only after a disposable instance can be used without sharing an administrator
-account and without requiring an email before first interaction.
+### Body
+
+I built webClx because I wanted coding-agent work to survive leaving my desk
+without replacing the Agent's native terminal with another chat interface.
+
+It keeps Codex, Claude, DeepSeek Harness, and shell sessions alive with tmux and
+makes the same workspace available in a desktop or mobile browser. A bundled
+terminal messaging Skill can send a task to another Harness for read-only
+review and route the reply back while one terminal remains the writer.
+
+You can try the complete desktop-to-phone and cross-Harness workflow without an
+account or email here:
+
+https://beyondcy1013.github.io/webClx/demo.html?utm_source=hackernews&utm_medium=community&utm_campaign=show-hn
+
+The demo is deliberately browser-only and synthetic: it does not connect to a
+server or contain customer data. The real project is AGPL-3.0-or-later and
+self-hosted. Because it controls files and terminals, remote deployments need
+TLS and network controls rather than an exposed management port.
+
+Source: https://github.com/beyondcy1013/webClx
+
+I would particularly value criticism from people using SSH/tmux or coding
+Agents remotely: which part of this workflow is useful, and which part is still
+worse than your current setup?
 
 ## Product Hunt assets - do not publish yet
 
