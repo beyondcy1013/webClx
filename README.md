@@ -4,6 +4,7 @@
 
 [下载 v1.8.11](https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11) ·
 [加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
+[体验交互演示](https://beyondcy1013.github.io/webClx/demo.html) ·
 [产品页](https://beyondcy1013.github.io/webClx/) ·
 [商业支持与授权](COMMERCIAL.md) ·
 [讨论区](https://github.com/beyondcy1013/webClx/discussions)
