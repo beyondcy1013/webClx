@@ -4,8 +4,13 @@
 
 [下载 v1.8.11](https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11) ·
 [加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
+[产品页](https://beyondcy1013.github.io/webClx/) ·
 [商业支持与授权](COMMERCIAL.md) ·
 [讨论区](https://github.com/beyondcy1013/webClx/discussions)
+
+![webClx 合成演示：在电脑编程终端开始任务并从手机继续](site/assets/webclx-remote-workflow.png)
+
+上图为纯合成演示，不含客户数据、凭据或内部项目路径。
 
 webClx 是面向 Codex、Claude、DeepSeek Harness 与普通 Shell 的自托管工作控制面。它保留各执行器的原生终端和上下文，同时统一提供工作区、会话、预设、任务转交、编译部署与移动端访问。
 
