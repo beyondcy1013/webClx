@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="description" content="webClx keeps native Codex, Claude, DeepSeek Harness, and shell terminals persistent and usable from a browser or phone.">
-  <meta property="og:title" content="webClx — Continue coding from your phone">
-  <meta property="og:description" content="A self-hosted browser workspace for persistent coding-agent terminals, cross-Harness handoff, and remote mobile access.">
+  <meta name="description" content="Monitor, approve, or steer the same live Codex, Claude, DeepSeek Harness, or shell terminal from a phone, then return to it at your desk.">
+  <meta property="og:title" content="webClx — Keep the same live coding-agent terminal">
+  <meta property="og:description" content="A self-hosted browser workspace for away-from-desk oversight, persistent native terminals, and cross-Harness review.">
   <meta property="og:image" content="https://beyondcy1013.github.io/webClx/assets/webclx-remote-workflow.png">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://beyondcy1013.github.io/webClx/">
   <meta name="twitter:card" content="summary_large_image">
-  <title>webClx — Continue coding from your phone</title>
+  <title>webClx — Keep the same live coding-agent terminal</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2210%22 fill=%22%230b1517%22/><path d=%22M16 21l10 11-10 11M30 43h18%22 fill=%22none%22 stroke=%22%234bd1af%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -31,8 +31,8 @@
       <div class="hero-copy">
         <p class="eyebrow" data-en="Self-hosted · AGPL-3.0 · Developer preview" data-zh="自托管 · AGPL-3.0 · 开发者预览">Self-hosted · AGPL-3.0 · Developer preview</p>
         <h1 data-en="webClx" data-zh="webClx">webClx</h1>
-        <p class="lead" data-en="Start a coding task at your desk. Resume the same native terminal from your phone." data-zh="在电脑上开始编程任务，用手机继续同一个原生终端。">Start a coding task at your desk. Resume the same native terminal from your phone.</p>
-        <p class="support" data-en="Persistent Codex, Claude, DeepSeek Harness, and shell sessions in one browser workspace, with reliable task handoff and read-only review." data-zh="在一个浏览器工作区中保持 Codex、Claude、DeepSeek Harness 与 Shell 会话，并可靠转交任务和只读复核。">Persistent Codex, Claude, DeepSeek Harness, and shell sessions in one browser workspace, with reliable task handoff and read-only review.</p>
+        <p class="lead" data-en="Monitor, approve, or steer the same live CLI from your phone." data-zh="离开电脑后，用手机查看进度、批准操作或发送简短指令。">Monitor, approve, or steer the same live CLI from your phone.</p>
+        <p class="support" data-en="Keep native Codex, Claude, DeepSeek Harness, and shell sessions running. Return to the same live session at your desk, or hand work to another Harness for read-only review." data-zh="让原生 Codex、Claude、DeepSeek Harness 与 Shell 会话持续运行；回到电脑时继续同一个实时会话，也可把任务交给另一 Harness 只读复核。">Keep native Codex, Claude, DeepSeek Harness, and shell sessions running. Return to the same live session at your desk, or hand work to another Harness for read-only review.</p>
         <div class="actions">
           <a class="button primary" href="https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml&utm_source=github-pages&utm_medium=website&utm_campaign=hosted-trial" data-en="Request 7-day trial" data-zh="申请 7 天试用">Request 7-day trial</a>
           <a class="button secondary" href="demo.html" data-en="Try interactive demo" data-zh="体验交互演示">Try interactive demo</a>
@@ -47,8 +47,8 @@
     </section>
 
     <section class="proof" aria-label="Product facts">
-      <div><strong data-en="Native terminals" data-zh="原生终端">Native terminals</strong><span data-en="Keep each Harness and its context." data-zh="保留每个 Harness 及其上下文。">Keep each Harness and its context.</span></div>
-      <div><strong data-en="Mobile continuation" data-zh="手机续接">Mobile continuation</strong><span data-en="Monitor builds, logs, and long tasks away from your desk." data-zh="离开电脑后继续查看构建、日志和长任务。">Monitor builds, logs, and long tasks away from your desk.</span></div>
+      <div><strong data-en="Same live CLI" data-zh="同一实时终端">Same live CLI</strong><span data-en="Return to the same live session instead of creating a second chat history." data-zh="回到同一个实时会话，不再创建第二份聊天历史。">Return to the same live session instead of creating a second chat history.</span></div>
+      <div><strong data-en="Away-from-desk control" data-zh="离桌控制">Away-from-desk control</strong><span data-en="Check progress, approve or interrupt work, and send short steering prompts." data-zh="查看进度、批准或中断操作，并发送简短指令。">Check progress, approve or interrupt work, and send short steering prompts.</span></div>
       <div><strong data-en="Your infrastructure" data-zh="你的基础设施">Your infrastructure</strong><span data-en="Self-host code, workspaces, and model configuration." data-zh="代码、工作区和模型配置由你自托管。">Self-host code, workspaces, and model configuration.</span></div>
     </section>
 
@@ -57,7 +57,7 @@
       <ol class="steps">
         <li><span>01</span><h3 data-en="Keep work running" data-zh="让任务持续运行">Keep work running</h3><p data-en="tmux-backed sessions survive browser closure and device changes." data-zh="基于 tmux 的会话在浏览器关闭和设备切换后继续存在。">tmux-backed sessions survive browser closure and device changes.</p></li>
         <li><span>02</span><h3 data-en="Hand off with evidence" data-zh="可确认地转交">Hand off with evidence</h3><p data-en="The bundled Skill delivers tasks and review requests between Codex, Claude, and DeepSeek Harness terminals." data-zh="内置 Skill 在 Codex、Claude 与 DeepSeek Harness 终端之间投递任务和 review 请求。">The bundled Skill delivers tasks and review requests between Codex, Claude, and DeepSeek Harness terminals.</p></li>
-        <li><span>03</span><h3 data-en="Continue from mobile" data-zh="从手机继续">Continue from mobile</h3><p data-en="Open the same workspace, terminal history, build status, and replies from a mobile browser." data-zh="在手机浏览器打开同一工作区、终端历史、构建状态与回复。">Open the same workspace, terminal history, build status, and replies from a mobile browser.</p></li>
+        <li><span>03</span><h3 data-en="Step away, then return" data-zh="离开后再回来">Step away, then return</h3><p data-en="Use a mobile browser for oversight and short decisions. Return to the same live session and full keyboard when deeper work is needed." data-zh="用手机浏览器查看状态并做简短决策；需要深入操作时，回到同一个实时会话和完整键盘。">Use a mobile browser for oversight and short decisions. Return to the same live session and full keyboard when deeper work is needed.</p></li>
       </ol>
     </section>
 

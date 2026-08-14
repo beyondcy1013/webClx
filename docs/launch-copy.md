@@ -18,10 +18,10 @@ Do not lead with "multi-agent orchestration." Lead with the expensive moment:
 a developer leaves the desk while a build, deployment, or coding Agent still
 needs attention.
 
-Primary promise:
+Primary promise, updated from public issue evidence collected on 2026-08-14:
 
-> Start a coding task at your desk. Resume the same native terminal from your
-> phone.
+> Monitor, approve, or steer the same live CLI from your phone. Return to the
+> same live session at your desk.
 
 Supporting proof:
 
@@ -30,6 +30,13 @@ Supporting proof:
 - the bundled Skill hands work to another Harness for read-only review;
 - self-hosted users keep code, workspaces, and model configuration on their own
   infrastructure.
+
+Do not position the phone as the primary coding surface. Public requests in
+Codex, Claude Code, Command Code, Freebuff, mux-pod, and other projects
+repeatedly describe the phone as an oversight surface for progress, approvals,
+interrupts, and short steering while the workstation remains primary. The
+strongest differentiator is the same tmux-backed live CLI plus cross-Harness
+handoff, not generic "AI coding on mobile."
 
 Revenue offers:
 
@@ -85,9 +92,11 @@ instead
 
 ### Body
 
-Most mobile interfaces for coding Agents start by replacing the Agent's native
-terminal with a smaller chat UI. That creates a second context, a second set of
-commands, and another place where long-running work can disappear.
+The realistic phone workflow is not writing an application on a touch keyboard.
+It is checking whether a long task is stuck, approving or interrupting an
+action, sending a short correction, and returning to the same live CLI later.
+Many mobile interfaces instead create a smaller second chat UI, another
+context, and another place where long-running work can disappear.
 
 I built webClx around the opposite choice: keep the native Codex, Claude,
 DeepSeek Harness, and shell terminals alive with tmux, then make those sessions
@@ -193,8 +202,9 @@ Show HN: webClx - continue native Codex, Claude, and DeepSeek terminals from a p
 
 ### Body
 
-I built webClx because I wanted coding-agent work to survive leaving my desk
-without replacing the Agent's native terminal with another chat interface.
+I built webClx because I wanted to monitor and steer coding-agent work after
+leaving my desk, then return to the same live CLI without replacing the
+Agent's native terminal with another chat history.
 
 It keeps Codex, Claude, DeepSeek Harness, and shell sessions alive with tmux and
 makes the same workspace available in a desktop or mobile browser. A bundled

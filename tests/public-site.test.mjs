@@ -44,6 +44,14 @@ test('public site is bilingual and labels hosted access as invite-only', () => {
   assert.match(script, /localStorage\.setItem/);
 });
 
+test('public positioning leads with the verified away-from-desk workflow', () => {
+  assert.match(html, /Monitor, approve, or steer the same live CLI from your phone/);
+  assert.match(html, /查看进度、批准操作或发送简短指令/);
+  assert.match(html, /Return to the same live session/);
+  assert.match(html, /回到同一个实时会话/);
+  assert.doesNotMatch(html, /code comfortably on your phone|replace your desktop/i);
+});
+
 test('public site uses the synthetic demonstration and avoids internal paths', () => {
   assert.match(html, /assets\/webclx-remote-workflow\.png/);
   assert.doesNotMatch(html, /\/home\/(codes|root|bin)|fpsq\.xyz:11112|api[_-]?key|password/i);
