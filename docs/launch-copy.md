@@ -64,6 +64,24 @@ Revenue offers:
 Do not mechanically cross-post on the same day. Publish one technical article,
 answer every substantive comment, record objections, then adapt the next post.
 
+### Awesome Claude Code submission (manual Web UI only)
+
+The repository's contribution rules explicitly prohibit CLI/API submissions and
+require a human to use the issue form. Do not automate this step. The project
+meets the age/active-development gate; submit only after personally reviewing
+the list and agreeing with its Code of Conduct.
+
+- Form: https://github.com/hesreallyhim/awesome-claude-code/issues/new?template=recommend-resource.yml
+- Display name: `webClx`
+- Category: `Remote Control, Notifications & Voice I/O`
+- Link: `https://github.com/beyondcy1013/webClx`
+- Author name: `beyondcy1013`
+- Author link: `https://github.com/beyondcy1013`
+- Description: `A self-hosted browser workspace that keeps native Claude Code sessions live in tmux across desktop and mobile browsers. It includes a terminal messaging Skill for handing a task to Codex or DeepSeek Harness for read-only review while the original session remains the writer.`
+
+The description is deliberately factual and does not promise hosted availability,
+automatic discovery of every external session, or phone-first coding.
+
 ## Tracking links
 
 - DEV:
