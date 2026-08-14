@@ -53,6 +53,7 @@ Revenue offers:
 | Channel | Status now | Publish condition | Objective |
 | --- | --- | --- | --- |
 | GitHub Discussions | Ready | Product page and Release live | Recruit technical trial users |
+| Awesome Claude Code (jqueryscript list) | Submitted | Maintainer review of issue #591 | Reach Claude Code users looking for mobile/remote clients |
 | DEV Community / Hashnode | Draft ready | Owner account | Search traffic and self-host installs |
 | Indie Hackers | Draft ready | Owner account | Pricing and problem interviews |
 | Reddit | Draft ready, adapt per subreddit | Read current rules and participate from owner account | Technical feedback |
@@ -81,6 +82,9 @@ the list and agreeing with its Code of Conduct.
 
 The description is deliberately factual and does not promise hosted availability,
 automatic discovery of every external session, or phone-first coding.
+
+The compatible open-submission directory also has a live recommendation issue:
+https://github.com/jqueryscript/awesome-claude-code/issues/591
 
 ## Tracking links
 
