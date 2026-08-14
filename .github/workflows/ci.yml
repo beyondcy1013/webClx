@@ -53,6 +53,7 @@ jobs:
           tests/terminal-message-delivery.test.mjs
           tests/hosted-trial-instance.test.mjs
           tests/hosted-trial-qa-lifecycle.test.mjs
+          tests/hosted-trial-data-guard.test.mjs
           tests/public-site.test.mjs
           tests/i18n-runtime.test.mjs
           tests/compile-api-compatibility.test.mjs

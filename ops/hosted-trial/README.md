@@ -53,9 +53,34 @@ access failed, systemd limits were active, a synthetic workspace was frozen
 and exported, and final deletion left no unit, user, port, firewall rule,
 runtime directory, or export. The existing `webclx.service` remained active.
 
+### Capacity and encrypted backups
+
+Use `scripts/hosted-trial-data-guard.sh` for disposable `qa-` instances. The
+tool reads the lifecycle manifest without sourcing it, reports workspace and
+artifact usage separately, and stops the service before making both data
+directories read-only when a byte limit is exceeded. This is an application
+capacity guard, not a native filesystem quota: the current US XFS root is
+mounted without quota support.
+
+`backup` rejects symbolic links and encrypts only `workspace/` to an explicit
+customer GPG fingerprint. It writes a mode-0600 `.tar.gz.gpg` file and SHA-256
+sidecar through temporary files. `restore` verifies the checksum, decrypts to
+a private temporary directory, rejects paths outside `workspace/`, links, and
+special files, and extracts only into an explicit empty restore directory. A
+restore never targets the live instance directory.
+
+On 2026-08-14 this data guard was exercised on the US trial candidate with a
+new disposable `qa-us-01` instance and one-time GPG key. The encrypted file did
+not expose the synthetic workspace plaintext, the restored workspace matched
+byte-for-byte and contained no artifacts, a zero-MiB limit stopped the QA
+service and removed all write bits, and cleanup left no QA user, unit, port,
+firewall rule, runtime data, backup, restore tree, or temporary key. The main
+`webclx.service` remained active.
+
 This evidence does not open hosted trials. Customer DNS/TLS, public login
-flows, per-customer disk quotas, encrypted backup/restore, and business/legal
-details remain separate release gates.
+flows, scheduled enforcement and retention, native hard quotas or equivalent
+continuous containment, and business/legal details remain separate release
+gates.
 
 ## Host log limits
 
