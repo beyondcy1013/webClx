@@ -9,6 +9,8 @@ const demoHtml = readFileSync(new URL('../site/demo.html', import.meta.url), 'ut
 const demoCss = readFileSync(new URL('../site/demo.css', import.meta.url), 'utf8');
 const demoScript = readFileSync(new URL('../site/demo.js', import.meta.url), 'utf8');
 const workflow = readFileSync(new URL('../.github/workflows/pages.yml', import.meta.url), 'utf8');
+const robots = readFileSync(new URL('../site/robots.txt', import.meta.url), 'utf8');
+const sitemap = readFileSync(new URL('../site/sitemap.xml', import.meta.url), 'utf8');
 
 test('public site exposes download, trial, security, and commercial paths', () => {
   assert.match(html, /releases\/tag\/v1\.8\.11/);
@@ -61,6 +63,16 @@ test('public site defines responsive and reduced-motion behavior', () => {
   assert.match(css, /@media\(max-width:620px\)/);
   assert.match(css, /prefers-reduced-motion:reduce/);
   assert.match(css, /min-height:calc\(100dvh/);
+});
+
+test('public site exposes crawler and canonical sharing metadata', () => {
+  assert.match(html, /<link rel="canonical" href="https:\/\/beyondcy1013\.github\.io\/webClx\/">/);
+  assert.match(html, /application\/ld\+json/);
+  assert.match(robots, /User-agent: \*/);
+  assert.match(robots, /Sitemap: https:\/\/beyondcy1013\.github\.io\/webClx\/sitemap\.xml/);
+  assert.match(sitemap, /https:\/\/beyondcy1013\.github\.io\/webClx\//);
+  assert.match(sitemap, /https:\/\/beyondcy1013\.github\.io\/webClx\/demo\.html/);
+  assert.match(sitemap, /https:\/\/github\.com\/beyondcy1013\/webClx\/releases\/tag\/v1\.8\.11/);
 });
 
 test('GitHub Pages workflow deploys only the public site directory', () => {
