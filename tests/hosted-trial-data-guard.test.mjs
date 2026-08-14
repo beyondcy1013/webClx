@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   appendFileSync,
@@ -112,6 +113,24 @@ test('backup refuses workspace symbolic links before invoking encryption', () =>
     assert.equal(result.status, 1);
     assert.match(result.stderr, /symbolic link/i);
     assert.equal(existsSync(item.backupRoot), false);
+  } finally {
+    rmSync(item.root, { recursive: true, force: true });
+  }
+});
+
+test('backup refuses a symbolic-link backup directory', () => {
+  const item = fixture();
+  const outside = join(item.root, 'outside');
+  mkdirSync(outside);
+  symlinkSync(outside, item.backupRoot);
+  try {
+    const result = spawnSync('bash', [
+      script, 'backup', '--customer-id', 'qa-demo-01', '--root-dir', join(item.root, 'instances'),
+      '--backup-dir', item.backupRoot, '--recipient', 'fixture', '--apply',
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /backup directory|symbolic link/i);
+    assert.deepEqual(readdirSync(outside), []);
   } finally {
     rmSync(item.root, { recursive: true, force: true });
   }

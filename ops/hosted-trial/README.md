@@ -77,10 +77,38 @@ service and removed all write bits, and cleanup left no QA user, unit, port,
 firewall rule, runtime data, backup, restore tree, or temporary key. The main
 `webclx.service` remained active.
 
+### Scheduled maintenance
+
+`scripts/hosted-trial-maintenance.sh` reads one mode-0600 or mode-0400 config
+per QA customer from `/etc/webclx/trials`. It never sources config as shell
+code. Unknown fields, duplicate fields, filename/customer mismatches, symbolic
+links, non-exact GPG fingerprints, and invalid limits fail closed. Start from
+`customer-maintenance.conf.example`, replace every placeholder, and keep the
+customer keyring outside home directories so the hardened systemd service can
+read it.
+
+The hourly timer always checks capacity. After the configured UTC backup hour,
+it creates at most one encrypted backup per UTC date and keeps only the newest
+configured number of complete ciphertext/checksum pairs. Unrelated or
+incomplete files are never removed by retention cleanup.
+
+The maintenance scripts and units were installed on the US candidate on
+2026-08-14. The timer remains disabled because there is no real customer key
+configuration. A disposable instance was run through the installed scheduler
+twice; capacity was checked twice, exactly one encrypted backup was produced,
+and final cleanup removed the instance, key, backup, state, and config while
+the main service stayed active. Enable the timer only after reviewing a real
+customer config and completing that customer's first restore test:
+
+```bash
+systemctl enable --now webclx-trial-maintenance.timer
+systemctl list-timers webclx-trial-maintenance.timer
+```
+
 This evidence does not open hosted trials. Customer DNS/TLS, public login
-flows, scheduled enforcement and retention, native hard quotas or equivalent
-continuous containment, and business/legal details remain separate release
-gates.
+flows, a reviewed real-customer key/config and enabled schedule, native hard
+quotas or equivalent continuous containment, and business/legal details remain
+separate release gates.
 
 ## Host log limits
 

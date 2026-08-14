@@ -211,6 +211,9 @@ case "$ACTION" in
     case "$BACKUP_DIR" in
       "$INSTANCE_DIR"|"$INSTANCE_DIR"/*) die_usage "backup directory must be outside the live instance" ;;
     esac
+    if [ -e "$BACKUP_DIR" ] || [ -L "$BACKUP_DIR" ]; then
+      [ -d "$BACKUP_DIR" ] && [ ! -L "$BACKUP_DIR" ] || die "backup directory must be a real directory"
+    fi
     [ -d "$WORKSPACE_DIR" ] && [ ! -L "$WORKSPACE_DIR" ] || die "workspace must be a real directory"
     if find "$WORKSPACE_DIR" -type l -print -quit | grep -q .; then
       die "workspace backup refuses symbolic links"

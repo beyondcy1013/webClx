@@ -1,0 +1,12 @@
+[Unit]
+Description=Run webClx trial maintenance hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=10m
+AccuracySec=1m
+Unit=webclx-trial-maintenance.service
+
+[Install]
+WantedBy=timers.target
