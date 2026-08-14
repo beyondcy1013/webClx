@@ -1,65 +1,228 @@
-# webClx 开源试运行发布文案
+# webClx launch and revenue copy
 
-这些文案可由项目所有者发布。它们不是已发布记录；发布到各社区前仍需按对应版规调整标题和格式。
+This file is an execution pack, not evidence that every channel has already
+been posted. Use the canonical product page as the destination:
 
-## 中文长文
+- Product: https://beyondcy1013.github.io/webClx/
+- Source: https://github.com/beyondcy1013/webClx
+- Release: https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11
+- Trial waitlist: https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml
 
-### 标题
+The hosted preview is invite-only. Never describe it as instant, generally
+available, or production SaaS until customer DNS/TLS, backup recovery, disk
+quotas, legal identity, and payment operations are verified.
 
-webClx：在手机和浏览器里管理 Codex、Claude 与 DeepSeek Harness 的持久终端
+## Positioning
 
-### 正文
+Do not lead with "multi-agent orchestration." Lead with the expensive moment:
+a developer leaves the desk while a build, deployment, or coding Agent still
+needs attention.
 
-我开源了 webClx，一个自托管的浏览器工作区。它不替代 Codex、Claude 或 DeepSeek Harness，而是把它们原有的终端和上下文保留下来，再提供统一的工作区、持久 tmux 会话、预设切换、任务转交、相互 review、编译部署队列和手机端操作。
+Primary promise:
 
-这次试运行包括中英文界面，以及内置的 `webclx-terminal-message` Skill。Codex、Claude 和 DeepSeek Harness 可以通过现有终端消息 API 交换任务；同一工作树建议只保留一个写入者，其它 Agent 做只读 review。
+> Start a coding task at your desk. Resume the same native terminal from your
+> phone.
 
-项目采用 AGPL-3.0-or-later。适合自己部署的个人开发者可以免费使用；我也在小规模测试隔离托管、部署支持和商业许可。当前仍是开发者预览，请放在可信网络、TLS 反向代理、防火墙或 VPN 后面，不要直接裸露管理端口。
+Supporting proof:
 
-- 源码：https://github.com/beyondcy1013/webClx
-- 版本化源码包和 SHA-256：https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11
-- 英文说明：https://github.com/beyondcy1013/webClx/blob/main/README.en.md
+- native Codex, Claude, DeepSeek Harness, and shell sessions remain intact;
+- tmux-backed terminals survive browser closure and device changes;
+- the bundled Skill hands work to another Harness for read-only review;
+- self-hosted users keep code, workspaces, and model configuration on their own
+  infrastructure.
 
-我尤其想听到三类反馈：手机端终端是否真正可用、跨 Harness 任务转交是否节省时间、你愿意为什么样的托管或支持付费。
+Revenue offers:
 
-## 中文短文
+1. Free AGPL self-hosting builds trust and adoption.
+2. Deployment support starts at USD 49 for people who own a server but do not
+   want to configure installation, TLS, network controls, upgrades, and a
+   recovery exercise.
+3. Invite-only managed personal preview starts at USD 8/month, excluding cloud
+   infrastructure and model usage.
+4. Professional hosting and commercial licensing remain manually scoped.
 
-开源试运行：webClx 是 Codex、Claude、DeepSeek Harness 的自托管浏览器工作区，保留原生终端与上下文，支持持久会话、手机操作、任务转交和相互 review。中英文 UI 与终端通讯 Skill 已内置。AGPL 自托管免费，隔离托管正在小规模招募试用。源码：https://github.com/beyondcy1013/webClx
+## Channel status
 
-## Show HN / Product Hunt English
+| Channel | Status now | Publish condition | Objective |
+| --- | --- | --- | --- |
+| GitHub Discussions | Ready | Product page and Release live | Recruit technical trial users |
+| DEV Community / Hashnode | Draft ready | Owner account | Search traffic and self-host installs |
+| Indie Hackers | Draft ready | Owner account | Pricing and problem interviews |
+| Reddit | Draft ready, adapt per subreddit | Read current rules and participate from owner account | Technical feedback |
+| Show HN | Hold | A directly usable demo with no email gate | Engineering feedback |
+| Product Hunt | Hold | 60-90 second real video and 3-5 real trial outcomes | Product launch |
+| AlternativeTo | Hold | Stable product page, support identity, and durable service status | Long-tail discovery |
+| Awesome Selfhosted | Not eligible before 2026-12-14 | First public release at least four months old | Directory discovery |
+
+Do not mechanically cross-post on the same day. Publish one technical article,
+answer every substantive comment, record objections, then adapt the next post.
+
+## Tracking links
+
+- DEV:
+  `https://beyondcy1013.github.io/webClx/?utm_source=devto&utm_medium=article&utm_campaign=public-preview`
+- Hashnode:
+  `https://beyondcy1013.github.io/webClx/?utm_source=hashnode&utm_medium=article&utm_campaign=public-preview`
+- Indie Hackers:
+  `https://beyondcy1013.github.io/webClx/?utm_source=indiehackers&utm_medium=community&utm_campaign=pricing-validation`
+- Reddit:
+  `https://beyondcy1013.github.io/webClx/?utm_source=reddit&utm_medium=community&utm_campaign=public-preview`
+- Hacker News, when eligible:
+  `https://beyondcy1013.github.io/webClx/?utm_source=hackernews&utm_medium=community&utm_campaign=show-hn`
+- Product Hunt, when eligible:
+  `https://beyondcy1013.github.io/webClx/?utm_source=producthunt&utm_medium=launch&utm_campaign=product-hunt`
+
+The GitHub Issue Form does not provide a reliable analytics backend by itself.
+Until a privacy-reviewed application form exists, ask applicants for their
+discovery source and record it manually without collecting model credentials.
+
+## DEV / Hashnode article
 
 ### Title
 
-Show HN: webClx, a self-hosted mobile workspace for Codex, Claude, and DeepSeek Harness
+I stopped rebuilding coding Agents for mobile and kept their native terminals
+instead
 
 ### Body
 
-I built webClx to keep native coding-agent terminals persistent and usable from a browser or phone. It complements Codex, Claude, and DeepSeek Harness rather than replacing them.
+Most mobile interfaces for coding Agents start by replacing the Agent's native
+terminal with a smaller chat UI. That creates a second context, a second set of
+commands, and another place where long-running work can disappear.
 
-The current developer preview provides persistent tmux-backed sessions, workspace browsing and editing, provider presets, build/deploy queues, downloadable artifacts, and a built-in terminal messaging Skill. The Skill can hand a task from one Harness to another and request a read-only review while keeping one writer per working tree.
+I built webClx around the opposite choice: keep the native Codex, Claude,
+DeepSeek Harness, and shell terminals alive with tmux, then make those sessions
+available in a browser workspace that also works from a phone.
 
-The UI is available in Chinese and English. The project is AGPL-3.0-or-later and free to self-host. I am also validating isolated managed hosting, deployment support, and commercial licensing. Because webClx has administrative access to files and terminals, it should run behind TLS and network controls, not on an exposed management port.
+The workflow I care about is ordinary but expensive when it breaks:
 
-- Source: https://github.com/beyondcy1013/webClx
-- Versioned source archive and SHA-256: https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11
-- Security model: https://github.com/beyondcy1013/webClx/blob/main/SECURITY.md
+1. start a coding or deployment task at a workstation;
+2. leave the desk without terminating the terminal;
+3. check build output or logs from a phone;
+4. ask another Harness for a read-only review through the bundled terminal
+   messaging Skill;
+5. resume the same native context later.
 
-I would value feedback on mobile terminal ergonomics, cross-Harness handoffs, and the smallest managed plan you would actually pay for.
+webClx is written in Rust, is AGPL-3.0-or-later, and is currently a developer
+preview. It has administrative access to files and terminals, so remote use
+requires TLS and network controls; the management port should never be exposed
+directly.
 
-## 渠道顺序
+The source and versioned v1.8.11 archive are public. I am also inviting a small
+number of users to a seven-day isolated hosted preview while I validate setup,
+support time, and pricing. Each approved trial is intended to use a separate OS
+user, service, workspace, credentials, and source port boundary. It is not a
+shared administrator account.
 
-| 阶段 | 海外 | 国内 | 发布条件 |
-| --- | --- | --- | --- |
-| 1. 技术验证 | GitHub Release, Dev.to | V2EX, 掘金, 开源中国 | 公共仓库、版本包、安装文档和安全说明可访问 |
-| 2. 可试玩发布 | Show HN | 技术社区演示帖 | 有隔离演示实例，访客无需提交邮箱即可低门槛试玩；只有申请页时不要发 Show HN |
-| 3. 产品验证 | Product Hunt, Indie Hackers, Reddit 相关社区 | 少数派、知乎、即刻 | 有真实演示视频、3 至 5 位试用反馈和明确试用入口 |
-| 4. 长尾收录 | AlternativeTo, Hashnode | 项目周报与案例文章 | 有稳定版本、定价页、隐私和服务条款 |
-| 5. 成熟项目目录 | Awesome Selfhosted | 国内自托管目录 | 首个公开 Release 已满 4 个月；v1.8.11 于 2026-08-14 发布，最早 2026-12-14 提交 |
+Product and synthetic workflow demonstration:
+https://beyondcy1013.github.io/webClx/?utm_source=devto&utm_medium=article&utm_campaign=public-preview
 
-每个社区先阅读版规，避免同日机械群发。首批内容以技术实现、真实限制和演示为主，不伪造用户数、收入、客户评价或安全认证。外部发帖需要项目所有者的账号与明确授权；自动化代理只准备文案和检查链接。
+Source: https://github.com/beyondcy1013/webClx
 
-## 发布前检查项
+I am looking for concrete feedback: when you leave your workstation, which
+coding task is most painful to monitor or continue from a phone?
 
-- 试用申请入口：独立表单或邮箱，不使用共享管理员登录页。
-- 试用状态：尚未开放自动交付时统一写“候补”与“人工确认”，不暗示实例随时可用。
-- 演示素材：桌面和手机的真实产品画面，隐藏工作区、终端历史、模型凭据和客户数据。
+## Indie Hackers post
+
+### Title
+
+Validating an $8/month managed version of an open-source mobile coding workspace
+
+### Body
+
+I built webClx for a problem I repeatedly had myself: a coding Agent or build is
+still running when I need to leave the workstation. Phone SSH works, but it is
+awkward for switching persistent sessions, browsing the workspace, monitoring
+builds, and handing a task to another Harness for review.
+
+The open-source product keeps native Codex, Claude, DeepSeek Harness, and shell
+terminals persistent behind a browser UI. The monetization hypothesis is not
+"charge for more AI." It is charge for isolated hosting and the operational
+work around TLS, upgrades, backup targets, recovery, and support.
+
+Current preview offers:
+
+- AGPL self-hosting: free;
+- deployment support on the user's server: from $49;
+- invite-only isolated personal hosting: $8/month preview, infrastructure and
+  model usage separate.
+
+I am deliberately not enabling unattended billing yet. I first need to measure
+activation, support time, seven-day retention, and the reasons people refuse to
+pay.
+
+Product page:
+https://beyondcy1013.github.io/webClx/?utm_source=indiehackers&utm_medium=community&utm_campaign=pricing-validation
+
+Question for builders who use coding Agents: would you pay for managed remote
+access, or is a one-time deployment service the more valuable offer?
+
+## Reddit adaptation
+
+Use only in a subreddit whose current rules allow project posts. Remove pricing
+from the title, disclose that you are the author, and spend most of the post on
+the technical decision.
+
+### Title
+
+I made a self-hosted browser workspace that keeps native coding-agent terminals
+persistent on mobile
+
+### Body
+
+I am the author of webClx. Instead of recreating Codex/Claude/DeepSeek Harness
+inside another chat UI, it keeps their native tmux-backed terminals and exposes
+the same sessions through a desktop or mobile browser.
+
+The part I am testing now is cross-Harness handoff: one terminal remains the
+writer, while another receives a read-only review request through a bundled
+Skill and replies to the original session.
+
+It is AGPL and intended for trusted self-hosted infrastructure behind TLS and
+network controls. I would appreciate criticism of the security boundary and
+mobile workflow, especially from people already using persistent SSH/tmux
+setups.
+
+Demo and source:
+https://beyondcy1013.github.io/webClx/?utm_source=reddit&utm_medium=community&utm_campaign=public-preview
+
+## Show HN draft - do not publish yet
+
+### Title
+
+Show HN: webClx - continue native Codex, Claude, and DeepSeek terminals from a phone
+
+The body should use the DEV technical explanation but must link to a directly
+usable sandbox. A screenshot and waitlist are not enough for Show HN. Publish
+only after a disposable instance can be used without sharing an administrator
+account and without requiring an email before first interaction.
+
+## Product Hunt assets - do not publish yet
+
+- Tagline: `Continue your coding-agent terminals from any browser or phone`
+- Short description: `Self-hosted persistent Codex, Claude, DeepSeek Harness,
+  and shell sessions with mobile access and cross-Harness task handoff.`
+- Required media before launch: a real 60-90 second desktop-to-phone recording,
+  three product screenshots, and no internal paths or credentials.
+- Required proof before launch: 3-5 real trial outcomes, support contact,
+  privacy/deletion contact, and a working application path.
+
+## Chinese short copy
+
+webClx 是 Codex、Claude、DeepSeek Harness 与 Shell 的自托管浏览器工作区。
+它保留原生终端和上下文，让长任务在关闭浏览器后继续运行，并可从手机恢复、查看
+构建与日志、向另一 Harness 发起只读 review。AGPL 自托管免费；7 天隔离托管试用
+目前采用人工审核候补，不共享管理员账号。产品页：
+https://beyondcy1013.github.io/webClx/
+
+## Weekly operating loop
+
+Track these numbers once per week:
+
+```text
+channel -> meaningful conversations -> trial applications -> approved trials
+-> first mobile terminal success -> active on 3 of 7 days -> paid / declined
+support minutes -> infrastructure cost -> contribution margin
+```
+
+Optimize for conversations, activation, and payment evidence. Do not optimize
+for impressions, stars, or raw download counts in isolation.
