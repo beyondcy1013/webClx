@@ -322,7 +322,7 @@ mod tests {
             id: "proxy-https-test".to_string(),
             name: "HTTPS proxy".to_string(),
             proxy_type: ProxyType::Https,
-            server: "us.fpsq.xyz:17891".to_string(),
+            server: "proxy.example.com:PORT".to_string(),
             enabled: true,
             username: Some("proxy-user".to_string()),
             password: Some("proxy-secret".to_string()),
