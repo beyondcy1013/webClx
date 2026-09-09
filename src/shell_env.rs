@@ -367,7 +367,7 @@ mod tests {
     fn inherited_network_env_keeps_no_proxy_and_applies_shell_override() {
         let merged = merge_allowed_env_entries(
             &[
-                ("NO_PROXY".to_string(), "127.0.0.1,192.168.3.2".to_string()),
+                ("NO_PROXY".to_string(), "127.0.0.1,127.0.0.1".to_string()),
                 ("HTTP_PROXY".to_string(), "http://service-proxy:7890".to_string()),
                 ("IGNORED".to_string(), "service".to_string()),
             ],
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(
             merged,
             vec![
-                ("NO_PROXY".to_string(), "127.0.0.1,192.168.3.2".to_string(),),
+                ("NO_PROXY".to_string(), "127.0.0.1,127.0.0.1".to_string(),),
                 ("HTTP_PROXY".to_string(), "http://shell-proxy:17890".to_string(),),
             ]
         );
