@@ -100,7 +100,7 @@ def main() -> None:
                 sessionId: "s-test",
                 getSession: () => ({
                   codex_api_preset_name: "sub2api_gpt-5.6_1M",
-                  codex_api_base_url: "http://192.168.3.2:18381/v1",
+                  codex_api_base_url: "http://HOST:PORT/v1",
                 }),
                 requestJson: async () => ({ codex_status: status }),
                 isActive: () => true,
