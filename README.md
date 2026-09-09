@@ -2,45 +2,9 @@
 
 中文 | [English](README.en.md)
 
-[下载 v1.8.11](https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11) ·
-[加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
-[体验交互演示](https://beyondcy1013.github.io/webClx/demo.html) ·
-[产品页](https://beyondcy1013.github.io/webClx/) ·
-[商业支持与授权](COMMERCIAL.md) ·
-[讨论区](https://github.com/beyondcy1013/webClx/discussions)
-
-![webClx 合成演示：在电脑编程终端开始任务并从手机继续](site/assets/webclx-remote-workflow.png)
-
-上图为纯合成演示，不含客户数据、凭据或内部项目路径。
-
 webClx 是面向 Codex、Claude、DeepSeek Harness 与普通 Shell 的自托管工作控制面。它保留各执行器的原生终端和上下文，同时统一提供工作区、会话、预设、任务转交、编译部署与移动端访问。
 
 > 当前版本是开发者预览，适合可信网络中的个人工作站和私有服务器。它拥有文件修改、终端执行和部署能力，不应直接裸露到公网。
-
-## 为什么使用 webClx
-
-- **手机也能继续真实开发工作**：浏览器连接自己的开发机，继续使用原生 Codex、Claude、DeepSeek Harness 和 Shell，而不是把任务限制在简化聊天框里。
-- **长任务不会随浏览器关闭而消失**：终端与 Agent 会话在后台持续运行，换电脑或手机后继续查看和接管。
-- **不同 Harness 可以交接和复核**：内置终端消息 Skill 可把原任务、上下文和 review 请求在 Codex、Claude、DeepSeek 之间可靠转交。
-- **代码和凭据留在自己的机器**：自托管模式下，工作区、终端和模型配置由使用者控制。
-
-适合需要离开电脑后继续处理编译、部署、日志排查和 Agent 长任务的独立开发者与小团队。手机端优势来自远程访问完整开发环境，而不是在手机上复制一套缩水 IDE。
-
-## 5 分钟开始
-
-要求：Linux、Rust stable、`tmux`、Node.js。先在可信网络的测试机运行：
-
-```bash
-git clone https://github.com/beyondcy1013/webClx.git
-cd webClx
-cargo run --release -- serve
-```
-
-首次启动会在运行目录生成权限为 `0600` 的 `.webclx-initial-password`。从主机终端读取一次，用浏览器打开 `http://127.0.0.1:11111` 登录；首次成功登录后该恢复文件会自动删除。
-
-准备远程使用前，请先阅读 [安全策略](SECURITY.md)，并配置 TLS、主机防火墙或 VPN。不要把 `11111` 管理端口直接暴露到公网。
-
-不想自行部署时，可[加入 7 天独立托管试用候补](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml)。当前由维护者逐一确认容量和开通时间，不承诺提交后立即交付。获准开通的试用实例按客户隔离，不与项目维护者或其他客户共享管理员账号、Cookie、工作区或模型凭据。
 
 一个用 Rust 写的轻量 Web 工作区：
 
@@ -54,6 +18,8 @@ cargo run --release -- serve
 - 默认工作目录支持再向上进入一层父目录，但不能继续向上跨更多层
 - 可在设置页控制是否显示 `.` 开头的文件和目录，默认显示
 - 中文与英文界面可在浏览器中即时切换，语言偏好只保存在当前浏览器
+- 顶部“DeepSeek Agent”入口交给独立部署的 DeepSeek Harness；webClx 不再公开自研聊天 Agent API
+- `/agent/profiles` 继续管理 Codex / Claude 终端智能体的工作目录、预设、Skill 和会话名称
 - 随程序内置 `webclx-terminal-message` Skill，支持 Codex、Claude 与 DeepSeek Harness 之间转交、回复和相互 review
 
 ## 多智能体任务转交
@@ -99,13 +65,13 @@ flowchart LR
 cargo run -- serve
 ```
 
-默认监听所有网络接口：
+默认监听配置的网络接口：
 
 ```text
-0.0.0.0:11111
+HOST:PORT
 ```
 
-本机访问地址通常是 `http://127.0.0.1:11111`。如需对外提供服务，应同时配置主机防火墙和反向代理认证。
+本机访问地址使用部署时配置的 `HOST:PORT`。如需对外提供服务，应同时配置主机防火墙和反向代理认证。
 
 默认浏览根目录：
 
@@ -233,13 +199,15 @@ install -m 0755 frps /home/bin/webclx/frps
 - `systemd` 仅用于服务安装和终端 scope 隔离；本地开发运行不强制要求
 - `frpc` / `frps` 仅在开发对应 FRP 功能时需要，也可以由设置页下载
 
+将 `REPOSITORY_URL` 替换为实际仓库地址：
+
 ```bash
-git clone https://github.com/beyondcy1013/webClx.git
+git clone REPOSITORY_URL webClx
 cd webClx
 cargo run
 ```
 
-也可从 [GitHub Releases](https://github.com/beyondcy1013/webClx/releases) 下载带 SHA-256 校验文件的版本化源码包。包内的 `SOURCE_RELEASE` 与 `STATIC_ASSETS_MANIFEST.sha256` 记录后端提交和静态资源来源。
+公开仓库地址公布前，请从 webClx 下载中心获取带 SHA-256 的源码候选包。包内的 `SOURCE_RELEASE` 与 `STATIC_ASSETS_MANIFEST.sha256` 记录后端提交和静态资源来源。
 
 服务启动后访问 `http://127.0.0.1:11111`。开发时直接修改 `static/*`；磁盘静态资源优先于二进制内嵌副本，无需额外的前端构建步骤。
 
