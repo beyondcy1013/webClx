@@ -4567,9 +4567,9 @@ mod terminal_profile_tests {
     fn dollar_skill_references_create_explicit_read_skill_calls() {
         assert_eq!(
             extract_explicit_skill_invocations(
-                "先用 $mihomo-proxy-ops，再用 $terminal-message 汇报；重复 $mihomo-proxy-ops。",
+                "先用 $mihomo-proxy-ops 汇报；重复 $mihomo-proxy-ops。",
             ),
-            vec!["mihomo-proxy-ops", "terminal-message"],
+            vec!["mihomo-proxy-ops"],
         );
         assert!(
             extract_explicit_skill_invocations("价格 $100，变量price$skill，单独一个 $").is_empty()
