@@ -15,7 +15,7 @@ runtime behavior while tightening source-release boundaries before publication.
 - Generate portable checksum files that work after downloading into any local
   directory.
 - Add release tests that prevent internal execution records and credentialed
-  `fpsq.xyz` URLs from entering future source packages.
+  `example.invalid` URLs from entering future source packages.
 
 ## Source archive
 
