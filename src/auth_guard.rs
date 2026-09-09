@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn non_loopback_is_not_exempt_even_with_the_local_token() {
-        let addr = "192.168.3.2:45678".parse().unwrap();
+        let addr = "127.0.0.1:45678".parse().unwrap();
 
         assert!(!is_local_api_request(addr, &headers(Some(TOKEN)), TOKEN));
     }
