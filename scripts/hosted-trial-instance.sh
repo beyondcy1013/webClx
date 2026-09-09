@@ -7,7 +7,7 @@ Usage: scripts/hosted-trial-instance.sh --customer-id ID [options]
 
 Options:
   --port PORT             Instance source port (default: 12101)
-  --domain DOMAIN         Base domain (default: fpsq.xyz)
+  --domain DOMAIN         Base domain (default: example.invalid)
   --binary PATH           Verified webClx binary for apply readiness
   --static-dir PATH       Verified static asset directory for apply readiness
   --tls-cert PATH         TLS certificate for the customer hostname
@@ -23,7 +23,7 @@ USAGE
 
 CUSTOMER_ID=""
 PORT="12101"
-DOMAIN="fpsq.xyz"
+DOMAIN="example.invalid"
 BINARY=""
 STATIC_DIR=""
 TLS_CERT=""
