@@ -40,14 +40,14 @@ Do not use compatibility aliases such as `--target` or `--path`; compile request
 If the current shell lacks `WEBCLX_TERMINAL_ID` and `WEBCLX_TERMINAL_NAME`, the wrapper can resolve the current webClx-managed tmux session name `webclx_s<number>` through `/api/terminal/sessions?all=true` and still submit the terminal name. The server persists `source_terminal_id`, `source_terminal_name`, and `source_tmux_session`; completion notification prefers the stable id, then the tmux-derived id, then the terminal name.
 Use Chinese `--note` text. The wrapper normalizes known legacy English notes to Chinese before submitting the request.
 
-After a successful queue response, do not poll or begin result-dependent verification. Independent work may continue; the worker sends both a browser-level toast and a completion prompt to the source terminal, so a reconnecting or hung model turn cannot hide build completion from the user. The `/api/terminal/sessions/message` prompt remains the join point for deployment verification. Compile logs and deploy audit reports live under the webClx-owned `compile/runs/<run-id>/` directory (below the app dir), never in the client project's source tree. Callbacks include their absolute paths and a compact file-difference summary.
+After a successful queue response, do not poll or begin result-dependent verification. Independent work may continue; the worker sends both a browser-level toast and a completion prompt to the source terminal, so a reconnecting or hung model turn cannot hide build completion from the user. The completion callback remains the join point for deployment verification. Compile logs and deploy audit reports live under the webClx-owned `compile/runs/<run-id>/` directory (below the app dir), never in the client project's source tree. Callbacks include their absolute paths and a compact file-difference summary.
 
 If an older worker left `webclx-build-*` or `webclx-install-report-*` files below client `docs/logs` directories, run `bash scripts/migrate-compile-api-logs.sh` first, inspect the dry-run totals, then rerun with `--apply`. The script archives them below `compile/legacy/`, updates retained run path references, and writes a SHA-256 manifest. Do not move those files by hand.
 
 Status:
 
 ```bash
-curl -fsS http://127.0.0.1:11111/api/build/compile/status | jq .
+curl -fsS http://127.0.0.1:PORT/api/build/compile/status | jq .
 ```
 
 Requests with the same complete build specification are continuously coalesced
