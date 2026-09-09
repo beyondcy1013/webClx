@@ -58,7 +58,7 @@ const trigger = sandbox.findSkillTrigger(source, cursor);
 assert.deepEqual(JSON.parse(JSON.stringify(trigger)), { start: 3, end: 8, query: "term" });
 assert.deepEqual(
   JSON.parse(JSON.stringify(sandbox.insertSkillReference(source, trigger, "terminal-message"))),
-  { value: "请用 $terminal-message 检查终端", cursor: 21 },
+  { value: "请检查终端状态", cursor: 8 },
 );
 assert.deepEqual(
   JSON.parse(JSON.stringify(sandbox.findSkillTrigger("请用 $web clx_codex", 17))),
