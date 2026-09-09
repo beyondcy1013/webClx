@@ -11,8 +11,8 @@ Generate a secret-free plan and reviewable configuration bundle:
 scripts/hosted-trial-instance.sh \
   --customer-id demo-01 \
   --port 12101 \
-  --tls-cert /etc/letsencrypt/live/trial-demo-01.fpsq.xyz/fullchain.pem \
-  --tls-key /etc/letsencrypt/live/trial-demo-01.fpsq.xyz/privkey.pem \
+  --tls-cert /etc/letsencrypt/live/trial-demo-01.example.invalid/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/trial-demo-01.example.invalid/privkey.pem \
   --render-dir /tmp/webclx-trial-demo-01
 ```
 
@@ -48,7 +48,7 @@ service, firewall rule, OS user, runtime directories, and (unless explicitly
 kept) exports, then checks for residue.
 
 On 2026-08-14 the complete disposable lifecycle was verified on the US trial
-candidate as `qa-us-01` on port `12101`: loopback HTTP worked, direct public
+candidate as `qa-example-01` on port `12101`: loopback HTTP worked, direct public
 access failed, systemd limits were active, a synthetic workspace was frozen
 and exported, and final deletion left no unit, user, port, firewall rule,
 runtime directory, or export. The existing `webclx.service` remained active.
@@ -69,8 +69,8 @@ a private temporary directory, rejects paths outside `workspace/`, links, and
 special files, and extracts only into an explicit empty restore directory. A
 restore never targets the live instance directory.
 
-On 2026-08-14 this data guard was exercised on the US trial candidate with a
-new disposable `qa-us-01` instance and one-time GPG key. The encrypted file did
+On 2026-08-14 this data guard was exercised on the example trial candidate with a
+new disposable `qa-example-01` instance and one-time GPG key. The encrypted file did
 not expose the synthetic workspace plaintext, the restored workspace matched
 byte-for-byte and contained no artifacts, a zero-MiB limit stopped the QA
 service and removed all write bits, and cleanup left no QA user, unit, port,
@@ -117,7 +117,7 @@ existing logging services. The included systemd timer runs the dedicated
 logrotate policy hourly so high-volume logs cannot grow unchecked between
 daily system jobs.
 
-The US trial candidate was prepared with these limits on 2026-08-14. Its npm
+The example trial candidate was prepared with these limits on 2026-08-14. Its npm
 content-addressed download cache was also cleared because it occupied about
 21 GB and contained no project or configuration data. Application data and
 global npm installations were not removed.
