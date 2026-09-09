@@ -4291,15 +4291,15 @@ fn terminal_message_delivery_ack_requires_new_rollout_evidence() {
 fn parses_codex_model_provider_from_status_output() {
     let snapshot = concat!(
         "│  Model:                gpt-5.6-sol (reasoning xhigh, summaries auto)    │\n",
-        "│  Model provider:       sub2api_gpt-5.6_1M - http://192.168.3.2:18381/v1  │\n",
+        "│  Model provider:       sub2api_gpt-5.6_1M - http://HOST:PORT/v1  │\n",
     );
 
     let provider = super::manager::parse_codex_model_provider(snapshot.as_bytes())
         .expect("Model provider should be present");
-    assert_eq!(provider, "sub2api_gpt-5.6_1M - http://192.168.3.2:18381/v1");
+    assert_eq!(provider, "sub2api_gpt-5.6_1M - http://HOST:PORT/v1");
     assert_eq!(
         super::manager::split_codex_model_provider(&provider),
-        ("sub2api_gpt-5.6_1M".to_string(), "http://192.168.3.2:18381/v1".to_string(),)
+        ("sub2api_gpt-5.6_1M".to_string(), "http://HOST:PORT/v1".to_string(),)
     );
 }
 
