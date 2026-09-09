@@ -7,8 +7,8 @@ final class SourceRegistry {
     static final String PROBE_PATH = "api/auth/session";
     static final String UPDATE_MANIFEST_PATH = "api/artifacts/update/android/webClx";
     static final String[] URLS = {
-        "http://192.168.3.2:11111/",
-        "http://fpsq.xyz:11112/",
+        "http://HOST:PORT/",
+        "http://PUBLIC_DOMAIN:PORT/",
     };
     static final String[] LABELS = {
         "局域网",
