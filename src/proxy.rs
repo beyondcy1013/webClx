@@ -1270,8 +1270,8 @@ mod tests {
     fn https_proxy_uses_tls_proxy_url() {
         assert_eq!(serde_json::to_string(&ProxyType::Https).unwrap(), r#""https""#);
         assert_eq!(
-            build_proxy_url(&ProxyType::Https, "us.fpsq.xyz:17891"),
-            "https://us.fpsq.xyz:17891"
+            build_proxy_url(&ProxyType::Https, "proxy.example.com:PORT"),
+            "https://proxy.example.com:PORT"
         );
     }
 
