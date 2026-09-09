@@ -340,7 +340,7 @@ mod tests {
                 .all(|(_, value)| value.contains("webclx-https-proxy:proxy-https-test@"))
         );
         assert!(env.iter().all(|(_, value)| !value.contains("proxy-secret")));
-        assert!(env.iter().all(|(_, value)| !value.contains("us.fpsq.xyz")));
+        assert!(env.iter().all(|(_, value)| !value.contains("proxy.example.com")));
     }
 
     #[test]
