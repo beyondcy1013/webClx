@@ -37,12 +37,12 @@ test("project commands expose server switching first and provide the configured 
   assert.match(terminalHtml, /id="terminal-server-switch-dialog"/);
   assert.match(terminalHtml, /id="terminal-server-switch-select"/);
   for (const target of [
-    "fpsq.xyz",
+    "example.invalid",
     "frp6.ccszxc.site:25401",
-    "fpsq.xyz:11112",
-    "fpsq.xyz:14151",
-    "us.fpsq.xyz",
-    "jd.fpsq.xyz",
+    "example.invalid:11112",
+    "example.invalid:14151",
+    "example.invalid",
+    "example.invalid",
     "192.168.3.38",
   ]) {
     assert.match(terminalHtml, new RegExp(`value="${target.replaceAll(".", "\\.")}"`));
@@ -101,10 +101,10 @@ test("server targets default to port 11111 and preserve the current terminal rou
   vm.createContext(sandbox);
   vm.runInContext(serverSwitchSource, sandbox);
 
-  assert.equal(sandbox.normalizeTerminalServerTarget("fpsq.xyz"), "http://fpsq.xyz:11111");
+  assert.equal(sandbox.normalizeTerminalServerTarget("example.invalid"), "http://example.invalid:11111");
   assert.equal(
-    sandbox.normalizeTerminalServerTarget("fpsq.xyz:11112"),
-    "http://fpsq.xyz:11112",
+    sandbox.normalizeTerminalServerTarget("example.invalid:11112"),
+    "http://example.invalid:11112",
   );
   assert.equal(
     sandbox.buildTerminalServerSwitchUrl("192.168.3.38", sandbox.window.location),
@@ -129,9 +129,9 @@ test("server switching stays inside Android and falls back to browser navigation
   vm.createContext(sandbox);
   vm.runInContext(serverSwitchSource, sandbox);
 
-  const expected = "http://fpsq.xyz:14151/terminal?path=webClx#session";
+  const expected = "http://example.invalid:14151/terminal?path=webClx#session";
   assert.equal(
-    sandbox.navigateToTerminalServer("fpsq.xyz:14151", location, {
+    sandbox.navigateToTerminalServer("example.invalid:14151", location, {
       openInWebView(url) { openedInWebView.push(url); },
     }),
     expected,
@@ -139,7 +139,7 @@ test("server switching stays inside Android and falls back to browser navigation
   assert.deepEqual(openedInWebView, [expected]);
   assert.deepEqual(assigned, []);
 
-  sandbox.navigateToTerminalServer("fpsq.xyz:14151", location, null);
+  sandbox.navigateToTerminalServer("example.invalid:14151", location, null);
   assert.deepEqual(assigned, [expected]);
 });
 
@@ -159,7 +159,7 @@ test("server probing stops after a healthy current origin", async () => {
   const sandbox = {
     document: { getElementById() { return null; } },
     window: {
-      location: { origin: "http://fpsq.xyz:11112" },
+      location: { origin: "http://example.invalid:11112" },
       WebClxAndroid: {
         probeHost(url) {
           probedUrls.push(url);
@@ -184,5 +184,5 @@ test("server probing stops after a healthy current origin", async () => {
   );
 
   assert.equal(selected, null);
-  assert.deepEqual(probedUrls, ["http://fpsq.xyz:11112/favicon.svg"]);
+  assert.deepEqual(probedUrls, ["http://example.invalid:11112/favicon.svg"]);
 });
