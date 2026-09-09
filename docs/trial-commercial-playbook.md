@@ -32,7 +32,7 @@ English summary follows the Chinese operating plan.
 
 ## 强制隔离边界
 
-- 不给陌生客户共享当前 `fpsq.xyz:11112` 管理员实例、管理员 Cookie 或一个公共账号。
+- 不给陌生客户共享当前 `PUBLIC_DOMAIN:PORT` 管理员实例、管理员 Cookie 或一个公共账号。
 - 每位客户至少使用独立 OS 用户、webClx app 目录、systemd service、监听端口、工作区根目录和模型配置目录。
 - 生产入口只暴露 TLS 反向代理；源端口由防火墙限制。反向代理不能伪造 loopback 身份。
 - 模型凭据由客户直接写入自己的隔离实例，不经终端消息、工单、聊天或日志传递。
