@@ -8,7 +8,7 @@ Only the latest published webClx release receives security fixes during the deve
 
 webClx is an administrative tool. It can access workspaces, terminal processes, model credentials, and deployment actions.
 
-- Do not expose port `11111` directly to the public Internet.
+- Do not expose port `PORT` directly to the public Internet.
 - On first start, retrieve the random initial credential from `.webclx-initial-password` in the runtime working directory through the host console. New installations use `webclx` as the default username; upgrades preserve the existing username. The file is owner-readable only and is removed after the first successful login.
 - Use TLS, a reverse proxy, firewall rules, and a private network or VPN.
 - Loopback alone is not trusted. Local automation bypasses browser login only when it also presents the server-generated token from `.webclx-local-api-token`; both files must remain owner-readable only.
