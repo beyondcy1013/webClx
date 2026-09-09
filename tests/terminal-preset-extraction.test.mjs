@@ -62,7 +62,7 @@ test("single extraction updates the matching session from the status provider", 
       return {
         session_id: "s1",
         preset_name: "sub2api_gpt-5.6_1M",
-        base_url: "http://192.168.3.2:18381/v1",
+        base_url: "http://HOST:PORT/v1",
       };
     },
     renderSessions() {
@@ -79,7 +79,7 @@ test("single extraction updates the matching session from the status provider", 
     id: "s1",
     name: "terminal_1",
     codex_api_preset_name: "sub2api_gpt-5.6_1M",
-    codex_api_base_url: "http://192.168.3.2:18381/v1",
+    codex_api_base_url: "http://HOST:PORT/v1",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["/api/terminal/sessions/s1/extract-preset", { method: "POST" }],
