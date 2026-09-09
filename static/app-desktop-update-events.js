@@ -1,4 +1,4 @@
-const DEFAULT_DESKTOP_REMOTE_URL = "https://192.168.3.2:14083/";
+const DEFAULT_DESKTOP_REMOTE_URL = "https://HOST:PORT/";
 
 function normalizeDesktopRemoteUrl(value) {
   const trimmed = typeof value === "string" ? value.trim() : "";
