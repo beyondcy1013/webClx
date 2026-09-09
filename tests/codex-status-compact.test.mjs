@@ -73,7 +73,7 @@ const compact = formatCompactCodexStatus({
   status,
   session: {
     codex_api_preset_name: "sub2api_gpt-5.6_1M",
-    codex_api_base_url: "http://192.168.3.2:18381/v1",
+    codex_api_base_url: "http://HOST:PORT/v1",
   },
   sourceLines: narrowStatusLines.slice(block.start, block.end + 1),
   columns: 49,
@@ -87,7 +87,7 @@ assert.ok(compact[1].includes(">_ OpenAI Codex v0.144.5"));
 assert.equal(compact[2], `├${"─".repeat(9)}┬${"─".repeat(37)}┤`);
 assert.ok(compact.some((line) => line.includes("│Model    │ gpt-5.6-sol | xhigh | auto")));
 assert.ok(compact.some((line) => line.includes("│Provider │ sub2api_gpt-5.6_1M")));
-assert.ok(compact.some((line) => line.includes("│URL      │ http://192.168.3.2:18381/v1")));
+assert.ok(compact.some((line) => line.includes("│URL      │ http://HOST:PORT/v1")));
 assert.ok(compact.some((line) => line.includes(status.session_id)));
 assert.ok(compact.some((line) => line.includes("│Agents   │ /home/root/.codex/AGENTS.md")));
 assert.ok(compact.some((line) => line.includes("│         │ /home/codes/webClx/AGENTS.md")));
