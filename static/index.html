@@ -1331,7 +1331,7 @@
             <span class="field-label">服务端口被占用时自动顺延</span>
             <span class="toggle-row">
               <input id="server-port-auto-increment-input" type="checkbox" checked />
-              <span class="toggle-note">开启后优先监听 0.0.0.0:11111；如果端口被占用，会自动尝试 11112、11113 等后续端口。</span>
+              <span class="toggle-note">开启后优先监听 0.0.0.0:PORT；如果端口被占用，会自动尝试 PORT、11113 等后续端口。</span>
             </span>
           </label>
 
@@ -2515,7 +2515,7 @@
               </div>
             </div>
             <div class="settings-toggle-list">
-              <label class="toggle-row" title="https://open.bigmodel.cn/api/coding/paas/v4&#10;http://127.0.0.1:11111/api/codex-proxy/zhipu/v1">
+              <label class="toggle-row" title="https://open.bigmodel.cn/api/coding/paas/v4&#10;http://127.0.0.1:PORT/api/codex-proxy/zhipu/v1">
                 <input
                   type="checkbox"
                   data-codex-api-auto-proxy-provider="zhipu"
@@ -2684,7 +2684,7 @@
                   </label>
                   <label class="field">
                     <span class="field-label">远端端口</span>
-                    <input id="frp-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                    <input id="frp-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
                   </label>
                   <label class="field">
                     <span class="field-label">auth.token</span>
@@ -2985,11 +2985,11 @@
                       </label>
                       <label class="field">
                         <span class="field-label">本地端口</span>
-                        <input id="frp-role-frpc-local-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                        <input id="frp-role-frpc-local-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
                       </label>
                       <label id="frp-role-frpc-remote-port-field" class="field">
                         <span class="field-label">远端端口</span>
-                        <input id="frp-role-frpc-remote-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
+                        <input id="frp-role-frpc-remote-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
                       </label>
                       <label id="frp-role-frpc-custom-domains-field" class="field" hidden>
                         <span class="field-label">域名</span>
@@ -3081,7 +3081,7 @@
                 class="text-input mono-text"
                 type="text"
                 list="preset-sync-remote-url-history"
-                placeholder="http://192.168.3.2:11111"
+                placeholder="http://HOST:PORT"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -3301,7 +3301,7 @@
                   id="proxy-server-input"
                   class="text-input mono-text"
                   type="text"
-                  placeholder="192.168.3.2:7890"
+                  placeholder="HOST:7890"
                   autocomplete="off"
                   spellcheck="false"
                 />
@@ -3610,7 +3610,7 @@
                 class="text-input mono-text desktop-url-input"
                 type="text"
                 list="desktop-url-history"
-                value="https://192.168.3.2:14083/"
+                value="https://HOST:14083/"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -3625,7 +3625,7 @@
           <iframe
             id="desktop-frame"
             class="desktop-frame"
-            src="https://192.168.3.2:14083/"
+            src="https://HOST:14083/"
             title="远程桌面"
             loading="lazy"
             allow="clipboard-read; clipboard-write; fullscreen"
@@ -3845,7 +3845,7 @@
               id="remote-copy-url"
               class="text-input mono-text"
               type="text"
-              placeholder="http://192.168.1.100:11111"
+              placeholder="http://192.168.1.100:PORT"
               autocomplete="off"
               spellcheck="false"
             />
