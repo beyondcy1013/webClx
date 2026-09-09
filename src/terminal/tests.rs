@@ -1356,7 +1356,7 @@ mod removed_codex_command_env_tests {
         );
 
         assert!(script.contains(&format!("export HTTPS_PROXY='{proxy_url}'\n")), "{script}");
-        assert!(script.contains("us.fpsq.xyz:17891"), "{script}");
+        assert!(script.contains("proxy.example.com:PORT"), "{script}");
         assert!(!script.contains("http://proxy-user"), "{script}");
     }
 }
