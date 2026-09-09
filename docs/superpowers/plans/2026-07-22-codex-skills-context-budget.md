@@ -135,7 +135,7 @@
 
 - [x] **Step 1: Classify remaining global symlinks**
 
-  Keep cross-project routing/operations aliases: `baidusyncdisk-remote-qt-build`, `connect-xiaoshuai-chrome-devtools`, `lyystock-project-locator`, `obsidian-wine`, `stalwart-mail-ops`, `sync-server-xiaoshuai`, `sync-极空间`, `terminal-message`, `webclx-artifact-publisher`, `windows-qt-stock-path-map`, and `zcode`.
+  Keep cross-project routing/operations aliases: `baidusyncdisk-remote-qt-build`, `connect-xiaoshuai-chrome-devtools`, `lyystock-project-locator`, `obsidian-wine`, `stalwart-mail-ops`, `sync-server-xiaoshuai`, `sync-极空间`, `terminal-notifications`, `webclx-artifact-publisher`, `windows-qt-stock-path-map`, and `zcode`.
 
   Rank all other symlinks by whether their target already lives under an owning project's `.codex/skills` directory. Select the lowest-use project-only aliases until both audit targets pass; never move the target directory.
 
