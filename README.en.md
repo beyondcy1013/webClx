@@ -41,7 +41,7 @@ cargo run --release -- serve
 
 Versioned source archives and checksum files are available from [GitHub Releases](https://github.com/beyondcy1013/webClx/releases). Each preview archive contains `SOURCE_RELEASE` and `STATIC_ASSETS_MANIFEST.sha256` provenance files.
 
-Open `http://127.0.0.1:11111`. On first start, webClx generates a random password and writes the one-time recovery credential to `.webclx-initial-password` in the runtime working directory with owner-only permissions. New installations use `webclx` as the default username; upgrades preserve the existing username. Read the recovery file from the host console and store the credential in a password manager; the file is removed after the first successful login. Put a TLS reverse proxy and network access controls in front of any non-local deployment.
+Open `http://127.0.0.1:PORT`. On first start, webClx generates a random password and writes the one-time recovery credential to `.webclx-initial-password` in the runtime working directory with owner-only permissions. New installations use `webclx` as the default username; upgrades preserve the existing username. Read the recovery file from the host console and store the credential in a password manager; the file is removed after the first successful login. Put a TLS reverse proxy and network access controls in front of any non-local deployment.
 
 Prefer a managed setup? [Request a 7-day isolated hosted trial](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml). Trial instances do not share administrator accounts, cookies, workspaces, or model credentials with maintainers or other customers.
 
