@@ -1896,7 +1896,7 @@ auth.token = "3166"
 [[proxies]]
 name = "newapi"
 type = "tcp"
-localIP = "192.168.3.2"
+localIP = "127.0.0.1"
 localPort = 13000
 remotePort = 29999
 
@@ -1915,7 +1915,7 @@ customDomains = ["a.example.com", "b.example.com"]
         assert_eq!(config.token, "3166");
         assert_eq!(config.proxies.len(), 2);
         assert_eq!(config.proxies[0].name, "newapi");
-        assert_eq!(config.proxies[0].local_ip, "192.168.3.2");
+        assert_eq!(config.proxies[0].local_ip, "127.0.0.1");
         assert_eq!(config.proxies[0].local_port, 13000);
         assert_eq!(config.proxies[0].remote_port, 29999);
         assert_eq!(config.proxies[1].proxy_type, "http");
