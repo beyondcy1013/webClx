@@ -65,8 +65,8 @@ const buildScript = readFileSync(
 
 test("Android client races every configured source and selects the fastest healthy result", () => {
   for (const source of [
-    "http://192.168.3.2:11111/",
-    "http://fpsq.xyz:11112/",
+    "http://HOST:PORT/",
+    "http://HOST:PORT/",
   ]) {
     assert.match(sourceRegistry, new RegExp(`"${source.replaceAll(".", "\\.")}"`));
   }
