@@ -16,7 +16,7 @@
 const TERMINAL_SERVER_PROBE = (() => {
   "use strict";
 
-  const DEFAULT_PORT = "11111";
+  const DEFAULT_PORT = "PORT";
   const PROBE_TIMEOUT_MS = 3500;
   const MIN_PROBE_INTERVAL_MS = 8000;
   const PROBE_PATH = "/favicon.svg";
@@ -29,7 +29,7 @@ const TERMINAL_SERVER_PROBE = (() => {
     const fromSelect = select
       ? [...select.querySelectorAll("option")].map((opt) => opt.value).filter(Boolean)
       : [];
-    cachedCandidates = [...new Set(["192.168.3.2", ...fromSelect])];
+    cachedCandidates = [...new Set(["HOST", ...fromSelect])];
     return cachedCandidates;
   }
 
