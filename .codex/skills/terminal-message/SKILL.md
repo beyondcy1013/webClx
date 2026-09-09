@@ -40,7 +40,7 @@ The API confirms that the text became a real Codex/Claude rollout user message. 
 - For cross-server replies, pass `--reply-base-url <sender-webclx-url>` or set `WEBCLX_REPLY_URL`. This URL is the sender's reachable webClx endpoint, not the destination passed to `--base-url`. Never guess a LAN IP that the recipient may not be able to reach.
 - Before sending a reply request, the script queries the reply endpoint and requires it to resolve the sender terminal uniquely. A remote destination cannot use a loopback reply URL. If `--from` is omitted, infer the sender from the reply endpoint, not the destination.
 - Auto-submitted messages are normalized to one line so embedded newlines cannot remain in the Agent composer; `--no-enter` preserves intentional multiline input.
-- On this server, the recorded public reply endpoint is `http://fpsq.xyz:11112`; use it unless the user provides a newer endpoint.
+- For a remote reply, use the operator-provided reachable endpoint is `REPLY_BASE_URL`; use it unless the user provides a newer endpoint.
 - Avoid literal `$terminal-message` in auto-submitted terminal text because `$...` can trigger TUI mention/skill pickers and prevent Enter from submitting.
 
 ## Script Options
@@ -50,8 +50,8 @@ The API confirms that the text became a real Codex/Claude rollout user message. 
 - `--start-if-needed` starts `--agent` in the uniquely resolved shell terminal before delivery. Use `--agent-start-timeout 30` to adjust the wait.
 - `--from <sender-terminal-name>` sets the sender when it cannot be inferred from the current cwd.
 - `--path <relative-workspace-path>` disambiguates duplicate terminal names.
-- `--base-url http://host:11111` targets a non-local webClx service. The default is `WEBCLX_URL` or `http://127.0.0.1:11111`.
-- `--reply-base-url http://sender-host:11111` tells a remote recipient where to send its reply. It defaults to `WEBCLX_REPLY_URL`; loopback messages reuse `--base-url`. Remote `--request-reply` calls fail unless the URL is reachable, non-loopback, and uniquely resolves the sender terminal.
+- `--base-url http://REMOTE_HOST:PORT` targets a non-local webClx service. The default is `WEBCLX_URL` or `http://127.0.0.1:11111`.
+- `--reply-base-url http://SENDER_HOST:PORT` tells a remote recipient where to send its reply. It defaults to `WEBCLX_REPLY_URL`; loopback messages reuse `--base-url`. Remote `--request-reply` calls fail unless the URL is reachable, non-loopback, and uniquely resolves the sender terminal.
 - `--no-enter` inserts text without submitting.
 - `--submit-enters 1` is the default initial submission attempt. The API retries Enter only when rollout confirmation is still missing.
 - `--no-verify` disables rollout confirmation for plain shell targets.
@@ -66,8 +66,8 @@ Example with an explicit sender and reply request:
 python3 /home/root/.codex/skills/terminal-message/scripts/send_terminal_message.py \
   --target 'webClx#3' \
   --from 'webClx#2' \
-  --base-url 'http://remote-webclx:11111' \
-  --reply-base-url 'http://sender-webclx:11111' \
+  --base-url 'http://REMOTE_HOST:PORT' \
+  --reply-base-url 'http://SENDER_HOST:PORT' \
   --message '请确认收到这条终端通讯测试。' \
   --request-reply
 ```
@@ -122,5 +122,5 @@ Accepted target aliases include `target`, `session_id`, `terminal_name`, or `nam
 For Windows `cmd.exe`, quote the JSON with escaped double quotes:
 
 ```bat
-curl -X POST "http://192.168.3.2:11111/api/terminal/sessions/message" -H "Content-Type: application/json" -d "{\"target\":\"webClx#1\",\"data\":\"[from webClx#2] message text\",\"submit\":true,\"submit_enters\":1,\"bracketed_paste\":true,\"verify_submission\":true,\"delivery_id\":\"[from webClx#2] message text\"}"
+curl -X POST "http://HOST:PORT/api/terminal/sessions/message" -H "Content-Type: application/json" -d "{\"target\":\"webClx#1\",\"data\":\"[from webClx#2] message text\",\"submit\":true,\"submit_enters\":1,\"bracketed_paste\":true,\"verify_submission\":true,\"delivery_id\":\"[from webClx#2] message text\"}"
 ```
