@@ -32,7 +32,7 @@ test("trial instance planner is dry-run by default and emits no secrets", () => 
   const plan = JSON.parse(result.stdout);
   assert.equal(plan.mode, "dry-run");
   assert.equal(plan.customer_id, "demo-01");
-  assert.equal(plan.hostname, "trial-demo-01.fpsq.xyz");
+  assert.equal(plan.hostname, "trial-demo-01.example.invalid");
   assert.equal(plan.loopback_port, 12101);
   assert.equal(plan.service_name, "webclx-trial-demo-01.service");
   assert.equal(plan.os_user, "webclx_demo_01");
