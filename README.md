@@ -20,21 +20,11 @@ webClx 是面向 Codex、Claude、DeepSeek Harness 与普通 Shell 的自托管�
 - 中文与英文界面可在浏览器中即时切换，语言偏好只保存在当前浏览器
 - 顶部“DeepSeek Agent”入口交给独立部署的 DeepSeek Harness；webClx 不再公开自研聊天 Agent API
 - `/agent/profiles` 继续管理 Codex / Claude 终端智能体的工作目录、预设、Skill 和会话名称
-- 随程序内置 `webclx-terminal-message` Skill，支持 Codex、Claude 与 DeepSeek Harness 之间转交、回复和相互 review
+- Agent 之间的终端交接属于本机运行能力，不在公开源码中发布地址、凭据或消息端点。
 
 ## 多智能体任务转交
 
-webClx 通过可确认投递的终端消息 API 保留 Agent 的完整交互上下文。建议同一工作树只有一个写入者，其它 Agent 只读 review：
-
-```bash
-python3 ~/.codex/skills/webclx-terminal-message/scripts/send_terminal_message.py \
-  --target 'project-review' \
-  --from 'project-implement' \
-  --message '请只读 review 当前 diff，并返回具体问题。' \
-  --request-reply
-```
-
-内置 Skill 同时安装到终端用户的 Codex、Claude 与 DeepSeek Harness Skill 目录（默认分别为 `~/.codex/skills`、`~/.claude/skills`、`~/.dsh/skills`）。三种 Harness 使用同一套可验证终端消息协议；DeepSeek 尚未提供兼容 Codex/Claude rollout 的提交回执时，可按 Skill 说明使用 `--no-verify`。
+终端交接接口仅用于本机受保护部署。公开源码不包含消息脚本、服务器地址、回调端点或凭据；部署时请在私有运维层配置访问控制。
 
 ## 架构概览
 
