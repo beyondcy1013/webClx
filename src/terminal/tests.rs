@@ -1308,7 +1308,7 @@ mod removed_codex_command_env_tests {
     fn codex_command_env_keeps_shell_no_proxy_when_application_proxy_is_active() {
         let shell_env = vec![
             ("HTTP_PROXY".to_string(), "http://old-proxy.example:7890".to_string()),
-            ("NO_PROXY".to_string(), "127.0.0.1,localhost,192.168.3.2,::1".to_string()),
+            ("NO_PROXY".to_string(), "127.0.0.1,localhost,127.0.0.1,::1".to_string()),
             ("PATH".to_string(), "/usr/local/bin:/usr/bin".to_string()),
         ];
         let effective_env = current_api_command_env(
@@ -1327,7 +1327,7 @@ mod removed_codex_command_env_tests {
         );
 
         assert!(
-            script.contains("export NO_PROXY='127.0.0.1,localhost,192.168.3.2,::1'\n"),
+            script.contains("export NO_PROXY='127.0.0.1,localhost,127.0.0.1,::1'\n"),
             "{script}"
         );
         assert!(
