@@ -36,7 +36,7 @@ vm.runInNewContext(
 );
 
 const skills = [
-  { name: "terminal-message", description: "Send terminal notifications", disabled: false },
+  { name: "terminal-notifications", description: "Send terminal notifications", disabled: false },
   { name: "mihomo-proxy-ops", description: "Operate Clash Meta proxies and VPN routes", disabled: false },
   { name: "webclx-codex-api-terminal-ops", description: "Work on Agent presets and terminal UI", disabled: false },
   { name: "disabled-skill", description: "Unavailable", disabled: true },
@@ -44,7 +44,7 @@ const skills = [
 
 assert.deepEqual(
   Array.from(sandbox.rankSkills(skills, "")).map((skill) => skill.name),
-  ["mihomo-proxy-ops", "terminal-message", "webclx-codex-api-terminal-ops"],
+  ["mihomo-proxy-ops", "terminal-notifications", "webclx-codex-api-terminal-ops"],
 );
 assert.equal(sandbox.rankSkills(skills, "proxy")[0].name, "mihomo-proxy-ops");
 assert.equal(sandbox.rankSkills(skills, "agent preset")[0].name, "webclx-codex-api-terminal-ops");
@@ -57,7 +57,7 @@ const cursor = source.indexOf(" 检查");
 const trigger = sandbox.findSkillTrigger(source, cursor);
 assert.deepEqual(JSON.parse(JSON.stringify(trigger)), { start: 3, end: 8, query: "term" });
 assert.deepEqual(
-  JSON.parse(JSON.stringify(sandbox.insertSkillReference(source, trigger, "terminal-message"))),
+  JSON.parse(JSON.stringify(sandbox.insertSkillReference(source, trigger, "terminal-notifications"))),
   { value: "请检查终端状态", cursor: 8 },
 );
 assert.deepEqual(
@@ -65,7 +65,7 @@ assert.deepEqual(
   { start: 3, end: 17, query: "web clx_codex" },
 );
 assert.equal(sandbox.findSkillTrigger("price$term", 10), null);
-assert.equal(sandbox.isCompletedSkillReference("terminal-message 请汇报", skills), true);
+assert.equal(sandbox.isCompletedSkillReference("terminal-notifications 请汇报", skills), true);
 assert.equal(sandbox.isCompletedSkillReference("terminal message", skills), false);
 
 console.log("native Agent Skill picker checks passed");
