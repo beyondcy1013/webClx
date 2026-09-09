@@ -279,7 +279,7 @@ for line in resp.iter_lines():
 ### API
 
 ```text
-POST /api/terminal/sessions/message
+POST /api/terminal/callback
 ```
 
 请求体（`src/terminal.rs` 的 `TerminalMessageRequest`，约第 678 行）：
