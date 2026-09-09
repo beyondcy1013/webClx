@@ -968,7 +968,7 @@ public final class MainActivity extends Activity {
          * to test cross-origin server reachability without CORS restrictions
          * and with accurate latency measurement.
          *
-         * @param url     full URL to probe (e.g. http://192.168.3.2:11111/favicon.svg)
+         * @param url     full URL to probe (e.g. http://HOST:PORT/favicon.svg)
          * @param timeoutMs connect/read timeout in milliseconds
          * @return JSON object string: {"ok":true/false,"latency":<ms>} or null on error
          */
