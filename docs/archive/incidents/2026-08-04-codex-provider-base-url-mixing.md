@@ -9,7 +9,7 @@
 使用 GLM 预设恢复已有 Codex 会话时，启动界面和历史上下文已经显示 `GLM-5.2`，但首次请求仍发往切换前 GPT 预设的 Base URL：
 
 ```text
-http://192.168.3.2:18381/v1/responses
+http://HOST:PORT/v1/responses
 Model "GLM-5.2" is not supported by any configured account in this group
 ```
 
@@ -90,7 +90,7 @@ Base URL；同目录 `model_catalog.json` 中 `GLM-5.2.upgrade=null`。随后 P1
 
 - `tests/webclx-run-preset-atomicity.test.mjs` 4/4 通过，覆盖 cwd 同步、apply 后启动、`deferred=true` 禁止 spawn 和退出后不恢复旧配置。
 - 使用项目内临时假 Codex 做端到端验证：`webclx use` 切换 GPT 时同时更新用户级与 cwd 项目级配置；`webclx run` 切换 GLM 并恢复原 thread 时实际参数包含 `resume --model GLM-5.2 <thread-id>`；子进程退出后 GLM 仍保持为当前共享预设。临时目录已清理。
-- 验收结束后恢复活动 API 预设 `api-1783646277593`：`model=gpt-5.6-sol`、`provider=webclx_api`、`base_url=http://192.168.3.2:18381/v1`、`wire_api=responses`。
+- 验收结束后恢复活动 API 预设 `api-1783646277593`：`model=gpt-5.6-sol`、`provider=webclx_api`、`base_url=http://HOST:PORT/v1`、`wire_api=responses`。
 - 初次修复部署请求 `201843-18c889a330fc26fc` 成功；Cargo 版本来源修正后的最终部署请求 `202732-18c899a4468f3075` 成功。
 - 模型目录回归测试先在请求 `212350-18c89c23266d3d01` 精确红灯，再由请求 `212545-18c89c23266d3d02` 验证 8 项聚焦测试通过；部署请求 `212649-18c89c23266d3d03` 成功。
 - 最终运行验证：`webclx.service=active`，`/api/system/info` 返回 `version=1.8.2`；构建产物、安装二进制和运行中 `/proc/<pid>/exe` 的 SHA-256 均为 `da5c399a20782bb012736b4751ff8c527ee2e68c729ba2fd21b3ec724e1516a0`。
