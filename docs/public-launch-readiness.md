@@ -6,12 +6,12 @@
 
 | 建议名称 | 用途 | 可以暴露的内容 | 禁止内容 |
 | --- | --- | --- | --- |
-| `code.fpsq.xyz` 或公共 Git 托管地址 | 项目主页与源码仓库 | README、许可证、安全策略、issue、release | 私有工作区、运行日志、凭据 |
-| `downloads.fpsq.xyz` | 公开只读发布物 | 指定的源码归档、校验文件、发布说明 | 管理导航、其它项目制品、上传/删除/刷新 API |
-| `apply.fpsq.xyz` | 试用申请 | 最小申请表、隐私和试用条款 | 模型密钥、服务器密码、管理员登录 |
-| `trial-<customer>.fpsq.xyz` | 单个受邀客户实例 | 该客户的登录页和独立 webClx 实例 | 其它客户数据、当前管理员实例 |
+| `code.PUBLIC_DOMAIN` 或公共 Git 托管地址 | 项目主页与源码仓库 | README、许可证、安全策略、issue、release | 私有工作区、运行日志、凭据 |
+| `downloads.PUBLIC_DOMAIN` | 公开只读发布物 | 指定的源码归档、校验文件、发布说明 | 管理导航、其它项目制品、上传/删除/刷新 API |
+| `apply.PUBLIC_DOMAIN` | 试用申请 | 最小申请表、隐私和试用条款 | 模型密钥、服务器密码、管理员登录 |
+| `trial-<customer>.PUBLIC_DOMAIN` | 单个受邀客户实例 | 该客户的登录页和独立 webClx 实例 | 其它客户数据、当前管理员实例 |
 
-不要把 `fpsq.xyz:11112`、本机 `/downloads` 管理页面或一个公共 webClx 账号直接发给陌生用户。
+不要把 `PUBLIC_DOMAIN:PORT`、本机 `/downloads` 管理页面或一个公共 webClx 账号直接发给陌生用户。
 
 ## 公开下载入口
 
@@ -94,8 +94,8 @@ trial_expires_at
 
 ## 当前未满足项
 
-- `trial.fpsq.xyz`、`downloads.fpsq.xyz` 和 `apply.fpsq.xyz` 当前没有 DNS 解析；试用候补暂由 GitHub Issue Form 收集。
-- `fpsq.xyz:11112` 是现有管理员实例，禁止作为客户试用入口或共享管理员凭据。
+- `trial.PUBLIC_DOMAIN`、`downloads.PUBLIC_DOMAIN` 和 `apply.PUBLIC_DOMAIN` 当前没有 DNS 解析；试用候补暂由 GitHub Issue Form 收集。
+- `PUBLIC_DOMAIN:PORT` 是现有管理员实例，禁止作为客户试用入口或共享管理员凭据。
 - 美国候选宿主已于 2026-08-14 配置高容量日志轮转、journald 512 MB 上限和 hourly 检查，并清理 21 GB 可重建 npm 下载缓存；根分区复核为约 32% 使用、35 GiB 可用。实例计划器仍强制至少 12 GiB 空闲。当前 XFS 根分区以 `noquota` 挂载，因此只有需调度执行的应用级容量闸门，不宣称原生硬配额；启用 XFS project quota 需要单独维护窗口和挂载配置验证。
 - webClx 1.8.11 强制服务绑定 `0.0.0.0:<port>`；每个客户实例必须先完成主机防火墙、网络命名空间或等效的源端口隔离，并从外部验证源端口不可达。
 - 经营主体、支持/隐私邮箱、适用地区、支付与收据方式尚未填写，因此只能收集人工审核的免费试用候补，不能开放无人值守收费注册。
