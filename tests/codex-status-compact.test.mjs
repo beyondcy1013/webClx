@@ -50,13 +50,13 @@ const status = {
   model: "gpt-5.6-sol",
   reasoning_effort: "xhigh",
   summary_mode: "auto",
-  cwd: "/home/codes/stockScreener",
+  cwd: "/home/codes/lyyStock/stockScreener",
   permission: "Full Access",
   collaboration_mode: "Default",
   session_id: "019f741e-6bb4-7a03-ac49-d28a60ef3765",
   forked_from: "019f73d6-ece8-72d0-addc-e74da1b25a1a",
   thread_name: "扩展字段基础上注册为dsl",
-  agents_md: ["/home/root/.codex/AGENTS.md", "/home/codes/webClx/AGENTS.md"],
+  agents_md: ["/home/root/.codex/AGENTS.md", "/home/codes/tools/webClx/AGENTS.md"],
   token_usage: {
     input_tokens: 1_610_000,
     output_tokens: 45_700,
@@ -90,7 +90,7 @@ assert.ok(compact.some((line) => line.includes("│Provider │ sub2api_gpt-5.6_
 assert.ok(compact.some((line) => line.includes("│URL      │ http://HOST:PORT/v1")));
 assert.ok(compact.some((line) => line.includes(status.session_id)));
 assert.ok(compact.some((line) => line.includes("│Agents   │ /home/root/.codex/AGENTS.md")));
-assert.ok(compact.some((line) => line.includes("│         │ /home/codes/webClx/AGENTS.md")));
+assert.ok(compact.some((line) => line.includes("│         │ /home/codes/tools/webClx/AGENTS.md")));
 assert.ok(compact.some((line) => line.includes("│Context  │ 98% left | 15.8K / 1.00M")));
 assert.ok(
   compact.slice(3, -1).every((line) => line.split("│").length === 4),

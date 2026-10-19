@@ -50,7 +50,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /async function openFreshTerminalSession\([\s\S]*terminalName = ""[\s\S]*requestJson\("\/api\/terminal\/sessions", \{[\s\S]*method: "POST"[\s\S]*renameFreshTerminalForRestore\(session, requestedPath, terminalName\)[\s\S]*window\.location\.assign/,
+  /async function openFreshTerminalSession\([\s\S]*terminalName = ""[\s\S]*WebClxNewTerminal\.createSession\(requestJson, \{[\s\S]*renameFreshTerminalForRestore\(session, requestedPath, terminalName\)[\s\S]*window\.location\.assign/,
   "restoring a conversation should rename the concrete terminal through the API before navigation",
 );
 
@@ -62,14 +62,14 @@ assert.match(
 
 assert.match(
   appJs,
-  /item\.type === "archive"[\s\S]*openFreshTerminalRunLink\(event, workingPath, command, \{[\s\S]*terminalName: item\.activeTerminalName/,
-  "archive restore should request the archived terminal name",
+  /sourceTerminalName: item\?\.activeTerminalName \|\| ""/,
+  "conversation restore should forward the recorded terminal name through its launch options",
 );
 
 assert.match(
   appJs,
-  /item\.sessionId[\s\S]*openFreshTerminalRunLink\(event, workingPath, command, \{[\s\S]*terminalName: item\.activeTerminalName/,
-  "conversation restore should request the recorded terminal name",
+  /sourceTerminalName: target\.item\.activeTerminalName/,
+  "archive restore should forward the recorded terminal name through its launch options",
 );
 
 {
@@ -83,7 +83,7 @@ assert.match(
       if (requestedNames.length < 3) {
         throw new Error(`修改会话名称失败: 名称 \`${name}\` 已存在，请使用其他名称。`);
       }
-      return { id: "s-new", name, path: "/home/codes/webClx" };
+      return { id: "s-new", name, path: "/home/codes/tools/webClx" };
     },
   });
   for (const name of [
@@ -95,7 +95,7 @@ assert.match(
   }
 
   const renamed = await vm.runInContext(
-    'renameFreshTerminalForRestore({ id: "s-new", name: "webClx_4", path: "/home/codes/webClx" }, "/home/codes/webClx", "原终端")',
+    'renameFreshTerminalForRestore({ id: "s-new", name: "webClx_4", path: "/home/codes/tools/webClx" }, "/home/codes/tools/webClx", "原终端")',
     context,
   );
   assert.deepEqual(
@@ -126,7 +126,7 @@ assert.match(
 
   await assert.rejects(
     vm.runInContext(
-      'renameFreshTerminalForRestore({ id: "s-new", name: "webClx_4", path: "/home/codes/webClx" }, "/home/codes/webClx", "原终端")',
+      'renameFreshTerminalForRestore({ id: "s-new", name: "webClx_4", path: "/home/codes/tools/webClx" }, "/home/codes/tools/webClx", "原终端")',
       context,
     ),
     /会话不存在/,
@@ -213,7 +213,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /function createWorkspaceHistoryMoreButton\(item\)[\s\S]*label: "改名"[\s\S]*startWorkspaceHistoryTerminalRename\(item, button\)/,
+  /function createWorkspaceHistoryMoreButton\(item, fallbackPath\)[\s\S]*label: "改名"[\s\S]*startWorkspaceHistoryTerminalRename\(item, button\)/,
   "workspace history rows should expose terminal rename from the more menu",
 );
 
@@ -319,8 +319,14 @@ assert.match(
 
 assert.match(
   appJs,
-  /sessionRenameDialogEl\.addEventListener\("cancel"[\s\S]*event\.preventDefault\(\)[\s\S]*closeTerminalRenameDialog\(\)[\s\S]*sessionRenameDialogEl\.addEventListener\("click"[\s\S]*event\.target === sessionRenameDialogEl[\s\S]*closeTerminalRenameDialog\(\)[\s\S]*sessionRenameCancelButton\.addEventListener\("click"[\s\S]*closeTerminalRenameDialog\(\)[\s\S]*sessionRenameFormEl\.addEventListener\("submit"[\s\S]*workspaceHistoryRenamingItem[\s\S]*renameWorkspaceHistoryTerminal\(\)[\s\S]*renameSession\(\)/,
+  /sessionRenameDialogEl\.addEventListener\("cancel"[\s\S]*event\.preventDefault\(\)[\s\S]*closeTerminalRenameDialog\(\)[\s\S]*sessionRenameCancelButton\.addEventListener\("click"[\s\S]*closeTerminalRenameDialog\(\)[\s\S]*sessionRenameFormEl\.addEventListener\("submit"[\s\S]*workspaceHistoryRenamingItem[\s\S]*renameWorkspaceHistoryTerminal\(\)[\s\S]*renameSession\(\)/,
   "shared rename dialog should support Escape, backdrop, cancel, and target-aware submit",
+);
+
+assert.doesNotMatch(
+  appHtml,
+  /<form id="session-rename-form"[^>]*method="dialog"/,
+  "workspace rename drag selection must not implicitly submit and close the dialog",
 );
 
 assert.match(
@@ -349,7 +355,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /actionCell\.appendChild\(createWorkspaceHistoryMoreButton\(item\)\)/,
+  /actionCell\.appendChild\(createWorkspaceHistoryMoreButton\(item, selectedPath\)\)/,
   "workspace history should render a more-action menu next to the primary action",
 );
 
@@ -373,7 +379,7 @@ assert.match(
 
 assert.match(
   stylesBase,
-  /\.workspace-history-table th:nth-child\(1\),[\s\S]*?width:\s*202px;/,
+  /\.workspace-history-table th:nth-child\(1\),[\s\S]*?width:\s*124px;/,
   "workspace history should allocate enough width for restore, fork, model selection, and more actions",
 );
 
@@ -412,7 +418,7 @@ assert.match(
     sortTerminalArchives: (archives) => archives,
     state: {
       workspaceDir: "/home/codes",
-      sessions: [{ id: "s-active", name: "旧名称", path: "/home/codes/webClx" }],
+      sessions: [{ id: "s-active", name: "旧名称", path: "/home/codes/tools/webClx" }],
       terminalArchives: [],
     },
   });
@@ -435,9 +441,9 @@ assert.match(
   await vm.runInContext(
     `persistWorkspaceHistoryArchiveName({
       type: "terminal",
-      terminal: { id: "s-active", name: "旧名称", path: "/home/codes/webClx" },
+      terminal: { id: "s-active", name: "旧名称", path: "/home/codes/tools/webClx" },
       sessionId: "resume-active",
-      cwd: "/home/codes/webClx"
+      cwd: "/home/codes/tools/webClx"
     }, "新名称")`,
     context,
   );

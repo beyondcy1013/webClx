@@ -172,7 +172,7 @@ function renderEntries(directory) {
 
   if (directory.parent_path !== null) {
     const row = document.createElement("tr");
-    const parentTerminalAction = createActionLink("终端", buildFreshTerminalUrl(directory.parent_path), "mini-button accent");
+    const parentTerminalAction = createActionLink("新开", buildFreshTerminalUrl(directory.parent_path), "mini-button accent");
     parentTerminalAction.addEventListener("click", (event) => {
       recordWorkspaceHistory(directory.parent_path);
       openFreshTerminalLink(event, directory.parent_path);
@@ -253,7 +253,7 @@ function renderEntries(directory) {
       nameCell.appendChild(
         createEntryLink(entry.name, buildWorkspaceUrl(entry.path), () => navigateTo(entry.path), "entry-link dir"),
       );
-      const terminalAction = createActionLink("终端", buildFreshTerminalUrl(entry.path), "mini-button accent");
+      const terminalAction = createActionLink("新开", buildFreshTerminalUrl(entry.path), "mini-button accent");
       terminalAction.addEventListener("click", (event) => {
         recordWorkspaceHistory(entry.path);
         openFreshTerminalLink(event, entry.path);

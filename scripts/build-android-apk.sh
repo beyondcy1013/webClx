@@ -67,7 +67,7 @@ fi
     --no-daemon \
     --stacktrace \
     -p "${ANDROID_DIR}" \
-    clean assembleRelease \
+    clean assembleRelease lintRelease \
     "-PwebclxVersion=${client_version}" \
     "-PwebclxVersionCode=${version_code}"
 

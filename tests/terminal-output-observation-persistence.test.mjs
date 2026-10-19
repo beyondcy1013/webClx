@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 
-const terminalSource = fs.readFileSync(
-  new URL("../src/terminal.rs", import.meta.url),
-  "utf8",
-);
+const terminalSource = ["../src/terminal.rs", "../src/terminal/websocket.rs"]
+  .map((file) => fs.readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 const managerSource = fs.readFileSync(
   new URL("../src/terminal/manager.rs", import.meta.url),
   "utf8",
@@ -27,7 +25,7 @@ assert.match(
 );
 assert.match(
   managerSource,
-  /fn persist_state_locked\([\s\S]*output_observations: collect_stored_output_observations\(state\)/,
+  /fn persist_state\([\s\S]*output_observations: collect_stored_output_observations\(&state\)/,
   "terminal registry persistence must include output observations",
 );
 assert.match(
@@ -66,17 +64,17 @@ assert.match(
 );
 assert.match(
   terminalSource,
-  /output_viewed_mark_interval\.tick\(\)[\s\S]{0,260}manager\.mark_session_output_viewed_in_memory\(&session\.id\)/,
+  /output_viewed_mark_interval\.tick\(\)[\s\S]{0,600}manager\.mark_session_output_viewed_in_memory\(&session\.id\)/,
   "the periodic live-output acknowledgement must not write the registry every second",
 );
 assert.match(
   terminalSource,
-  /ClientMessage::Visibility \{ visible \} => \{[\s\S]{0,400}output_visible\.swap\(visible,[\s\S]{0,400}else if was_visible \{[\s\S]{0,260}manager\.mark_session_output_viewed\(&session\.id\)/,
+  /ClientMessage::Visibility \{ visible \} => \{[\s\S]{0,900}output_visible\.swap\(visible,[\s\S]{0,900}else if was_visible \{[\s\S]{0,500}manager\.mark_session_output_viewed\(&session_id\)/,
   "switching a viewed terminal into the background must persist its latest observation",
 );
 assert.match(
   terminalSource,
-  /'socket_loop: loop \{[\s\S]*\n\s*\}[\s\S]{0,180}if output_visible\.load\([\s\S]{0,160}manager\.mark_session_output_viewed\(&session\.id\)/,
+  /'socket_loop: loop \{[\s\S]*\n\s*\}[\s\S]{0,400}if output_visible\.load\([\s\S]{0,400}manager\.mark_session_output_viewed\(&session\.id\)/,
   "disconnecting a visible terminal must persist even after its periodic in-memory acknowledgement cleared the pending flag",
 );
 

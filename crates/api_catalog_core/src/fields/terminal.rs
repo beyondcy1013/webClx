@@ -67,7 +67,7 @@ pub(crate) const TERMINAL_SESSION_INFO_FIELDS: &[ApiField] = &[
         true,
         false,
         "Human-readable absolute path.",
-        Some("/home/codes/webClx/src"),
+        Some("/home/codes/tools/webClx/src"),
         EMPTY_TEXTS,
         EMPTY_FIELDS,
     ),

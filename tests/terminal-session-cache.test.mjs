@@ -39,6 +39,21 @@ assert.equal(disposed.length, 0, "switching sessions must not dispose background
 assert.equal(activated[1].previousContext, firstA);
 assert.equal(activated[2].previousContext, firstB);
 
+const activationCountBeforeBackgroundCreate = activated.length;
+const backgroundD = cache.getOrCreate(" session-d ");
+assert.equal(backgroundD.sessionId, "session-d");
+assert.equal(cache.get("session-d"), backgroundD);
+assert.equal(
+  cache.activeContext,
+  firstA,
+  "creating a background context must not replace the active terminal context",
+);
+assert.equal(
+  activated.length,
+  activationCountBeforeBackgroundCreate,
+  "creating a background context must not fire the foreground activation callback",
+);
+
 cache.remove("session-a");
 assert.deepEqual(disposed, [firstA], "removing a session should release its terminal context");
 assert.equal(cache.get("session-a"), null);
@@ -51,6 +66,66 @@ assert.notEqual(cache.get("session-c"), null);
 cache.clear();
 assert.equal(cache.size, 0);
 assert.equal(disposed.at(-1)?.sessionId, "session-c");
+
+// Bounded cache (Android DOM renderer): LRU eviction protects the active
+// context, the just-returned context, and anything canEvictContext pins.
+{
+  const disposedIds = [];
+  const createdIds = [];
+  const pinned = new Set();
+  const bounded = createTerminalSessionCache({
+    createContext(sessionId) {
+      const context = { sessionId };
+      createdIds.push(sessionId);
+      return context;
+    },
+    activateContext() {},
+    disposeContext(context) {
+      disposedIds.push(context.sessionId);
+    },
+    maxContexts: 3,
+    canEvictContext: (context) => !pinned.has(context.sessionId),
+  });
+
+  bounded.activate("s1");
+  bounded.activate("s2");
+  bounded.activate("s3");
+  assert.equal(bounded.size, 3);
+  assert.equal(disposedIds.length, 0, "at-capacity cache must not evict");
+
+  pinned.add("s1");
+  bounded.activate("s4");
+  assert.deepEqual(disposedIds, ["s2"], "the oldest unpinned context is evicted first");
+  assert.notEqual(bounded.get("s1"), null, "a context with pending input stays pinned");
+  assert.notEqual(bounded.get("s4"), null, "the newly activated context is protected");
+
+  bounded.activate("s5");
+  assert.deepEqual(disposedIds, ["s2", "s3"], "s1 is pinned so s3 evicts next");
+  assert.equal(bounded.size, 3);
+
+  // Re-opening an evicted session recreates its context from scratch.
+  const recreated = bounded.activate("s2");
+  assert.ok(recreated);
+  assert.equal(createdIds.filter((id) => id === "s2").length, 2);
+  assert.deepEqual(disposedIds, ["s2", "s3", "s4"]);
+
+  // A freshly created background context is protected from its own trim.
+  const fresh = bounded.getOrCreate("s6");
+  assert.equal(bounded.get("s6"), fresh);
+  assert.equal(bounded.size <= 3, true, "overflow trims an older evictable context");
+  assert.deepEqual(disposedIds.at(-1), "s5");
+
+  // Everything pinned => soft overflow is allowed until a later trim.
+  ["s1", "s2", "s6"].forEach((id) => pinned.add(id));
+  bounded.activate("s7");
+  assert.equal(bounded.size, 4, "a fully pinned cache may exceed the budget");
+  pinned.delete("s1");
+  bounded.getOrCreate("s8");
+  assert.ok(
+    disposedIds.includes("s1"),
+    "unpinning lets the next creation trim the stale entry",
+  );
+}
 
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
 const shellSource = readFileSync(
@@ -83,6 +158,11 @@ assert.match(
   shellSource,
   /function activateTerminalSessionContext\(sessionId[\s\S]*cache\.activate\(normalizedSessionId\)[\s\S]*restoreCachedTerminalViewport\(context\)/,
   "activating a session should reuse its cached xterm and restore its viewport immediately",
+);
+assert.match(
+  shellSource,
+  /function getOrCreateBackgroundTerminalContext\(sessionId\)[\s\S]*cache\.getOrCreate\(normalizedSessionId\)/,
+  "background preconnect should create a cached context without activating it",
 );
 assert.match(
   shellSource,
@@ -131,5 +211,72 @@ assert.match(
   /connect:[\s\S]*!isTerminalConnected\(\) \|\| targetSession\.id !== activeTerminalContext\?\.sessionId/,
   "history navigation should compare the target with the mounted context, not only state.activeSessionId",
 );
+
+// Exercise the real production eviction predicate (not a fake Set) so the
+// "pending input / in-flight write / replay / retained terminal" pin list
+// stays honest.
+{
+  const settingsSource = readFileSync(
+    new URL("../static/terminal-shell-settings.js", import.meta.url),
+    "utf8",
+  );
+  const fnStart = settingsSource.indexOf("function terminalContextSafeToEvict(");
+  assert.ok(fnStart >= 0, "terminalContextSafeToEvict must exist in production");
+  let fnEnd = settingsSource.indexOf("function ", fnStart + 10);
+  assert.ok(fnEnd > fnStart);
+  const sandbox = { activeTerminalContext: null };
+  vm.createContext(sandbox);
+  vm.runInContext(settingsSource.slice(fnStart, fnEnd), sandbox);
+  const safe = sandbox.terminalContextSafeToEvict;
+
+  const clean = {
+    disposed: false,
+    pendingInputChars: 0,
+    pendingInputQueue: [],
+    inputFlushTimer: null,
+    outputWriteInFlight: false,
+    outputDrainTimer: null,
+    outputQueue: [],
+    initialReplayPending: false,
+    backlogReplayActive: false,
+    retainedTerm: null,
+  };
+  assert.equal(safe(clean), true, "an idle background context is evictable");
+  assert.equal(
+    safe({ ...clean, pendingInputChars: 1 }),
+    false,
+    "unflushed keystrokes pin the context",
+  );
+  assert.equal(
+    safe({ ...clean, pendingInputQueue: ["x"] }),
+    false,
+    "a queued input payload pins the context",
+  );
+  assert.equal(
+    safe({ ...clean, inputFlushTimer: 12 }),
+    false,
+    "a pending input flush timer pins the context",
+  );
+  assert.equal(
+    safe({ ...clean, outputWriteInFlight: true }),
+    false,
+    "an in-flight xterm write pins the context",
+  );
+  assert.equal(
+    safe({ ...clean, outputQueue: [{ bytes: new Uint8Array([65]) }] }),
+    false,
+    "queued output pins the context",
+  );
+  assert.equal(
+    safe({ ...clean, backlogReplayActive: true }),
+    false,
+    "an active replay pins the context",
+  );
+  assert.equal(
+    safe({ ...clean, retainedTerm: {} }),
+    false,
+    "a retained terminal pins the context",
+  );
+}
 
 console.log("terminal session cache tests passed");

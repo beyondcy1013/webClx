@@ -32,7 +32,7 @@ pub(crate) const TERMINAL_SESSIONS_RESPONSE_BODY: ApiBodySchema = body(
             true,
             false,
             "Human-readable path label.",
-            Some("/home/codes/webClx/src"),
+            Some("/home/codes/tools/webClx/src"),
             EMPTY_TEXTS,
             EMPTY_FIELDS,
         ),

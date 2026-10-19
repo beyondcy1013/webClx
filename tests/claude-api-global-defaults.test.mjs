@@ -18,11 +18,15 @@ const settingsEventBindingsJs = readFileSync(
 
 const claudeViewStart = indexHtml.indexOf('id="claude-view"');
 const settingsViewStart = indexHtml.indexOf('id="settings-view"');
+const globalSettingsStart = indexHtml.indexOf('id="claude-api-global-defaults"');
 assert.ok(
   claudeViewStart >= 0 && settingsViewStart > claudeViewStart,
   "Claude_API view should exist",
 );
-const claudeViewHtml = indexHtml.slice(claudeViewStart, settingsViewStart);
+const claudeDialogHtml = globalSettingsStart >= 0
+  ? indexHtml.slice(globalSettingsStart, indexHtml.indexOf('</dialog>', globalSettingsStart))
+  : "";
+const claudeViewHtml = indexHtml.slice(claudeViewStart, settingsViewStart) + claudeDialogHtml;
 
 assert.match(
   claudeViewHtml,

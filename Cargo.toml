@@ -1,6 +1,6 @@
 [package]
 name = "webclx"
-version = "1.8.11"
+version = "1.10.15"
 edition = "2024"
 
 [workspace]
@@ -19,8 +19,8 @@ api_catalog_core = { path = "crates/api_catalog_core" }
 argon2 = "0.5"
 auth_core = { path = "crates/auth_core" }
 axum = { version = "0.8", features = ["multipart", "ws"] }
-base64 = "0.22"
-hmac = "0.12"
+base64 = "0.23"
+hmac = "0.13"
 hex = "0.4"
 codex_proxy_core = { path = "crates/codex_proxy_core" }
 flate2 = "1.0"
@@ -28,18 +28,18 @@ futures-util = "0.3"
 include_dir = "0.7"
 percent-encoding = "2"
 portable-pty = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "socks", "stream", "form"] }
 rand = "0.8"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 runtime_paths_core = { path = "crates/runtime_paths_core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha2 = "0.10"
+sha2 = "0.11"
 shell-words = "1.1"
 settings_core = { path = "crates/settings_core" }
 tar = "0.4"
 terminal_core = { path = "crates/terminal_core" }
-time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1.44", features = [
     "fs",
     "io-util",
@@ -51,7 +51,7 @@ tokio = { version = "1.44", features = [
     "sync",
     "time",
 ] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "logging", "tls12"] }
 toml_edit = "0.22"
 tower-http = { version = "0.6", features = ["compression-br", "compression-gzip", "fs", "set-header"] }
 tracing = "0.1"
@@ -66,7 +66,12 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }

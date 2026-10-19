@@ -4,20 +4,24 @@
 
 // ---- 套餐用量查询 (quota) ----
 // 平台枚举与后端 `src/quota.rs::QuotaPlatform` 对齐，按此在 filter 与
-// render 阶段分派。当前只覆盖 ZHIPU（bigmodel.cn）与 MINIMAX
-// （minimaxi.com / minimax.io）。新增平台时需要同时更新这里的
+// render 阶段分派。当前覆盖 ZHIPU（bigmodel.cn / zcode.z.ai）、MINIMAX
+// （minimaxi.com / minimax.io）和 OPENROUTER（openrouter.ai）。新增平台时需要同时更新这里的
 // PRESET_URL_FILTERS 与 renderQuotaReport。
 const QUOTA_PLATFORM_LABELS = {
   ZHIPU: "智谱 GLM Coding Plan",
   MINIMAX: "MiniMax TokenPlan",
+  GROK: "Grok Build 余量",
+  OPENROUTER: "OpenRouter Credits",
 };
 const PRESET_URL_FILTERS = [
-  // 智谱：所有 bigmodel.cn 域名都算进来，包含 open.bigmodel.cn、
-  // bigmodel.cn 与本地代理 /api/codex-proxy/zhipu/。
-  (url) => /bigmodel\.cn|\/api\/codex-proxy\/zhipu\//i.test(url),
+  // 智谱：兼容旧的 bigmodel.cn、GLM 5.3 的 zcode.z.ai 模型入口，
+  // 以及本地代理 /api/codex-proxy/zhipu/。
+  (url) => /bigmodel\.cn|zcode\.z\.ai|\/api\/codex-proxy\/zhipu\//i.test(url),
   // MiniMax：国内 minimaxi.com 与国际 minimax.io 都参与；同时兼容走本地
   // codex-proxy minimax 通路的预设。
   (url) => /minimaxi\.com|minimax\.io|\/api\/codex-proxy\/minimax\//i.test(url),
+  (url) => /grok\.com|x\.ai/i.test(url),
+  (url) => /openrouter\.ai/i.test(url),
 ];
 const quotaIsQuotaPreset = (preset) => {
   if (!preset || !preset.base_url) return false;
@@ -27,9 +31,38 @@ const quotaIsQuotaPreset = (preset) => {
 const quotaDetectPlatform = (baseUrl, fallback = "ZHIPU") => {
   const url = String(baseUrl || "").toLowerCase();
   if (/minimaxi\.com|minimax\.io|\/api\/codex-proxy\/minimax\//.test(url)) return "MINIMAX";
-  if (/bigmodel\.cn|\/api\/codex-proxy\/zhipu\//.test(url)) return "ZHIPU";
+  if (/grok\.com|x\.ai/.test(url)) return "GROK";
+  if (/openrouter\.ai/.test(url)) return "OPENROUTER";
+  if (/bigmodel\.cn|zcode\.z\.ai|\/api\/codex-proxy\/zhipu\//.test(url)) return "ZHIPU";
   return fallback;
 };
+// 与 quotaDetectPlatform 相同的识别规则，但不做 ZHIPU 兜底：识别不出时
+// 返回空串，供「指定账号」列表如实标注非识别平台的预设。
+const quotaDetectPlatformStrict = (baseUrl) => quotaDetectPlatform(baseUrl, "");
+
+// 快速切换下拉里「指定账号」条目的固定 value；预设条目用数字下标，
+// 已保存配置留空，互不冲突。
+const QUOTA_CUSTOM_OPTION_VALUE = "custom";
+
+// option 的 label 与 value 都要过同一套转义，防注入。
+const quotaEscapeOptionLabel = (label) =>
+  String(label)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+// 智谱监测接口的 HTTP 仍是 200，但业务失败会返回 success=false。
+// 把这类响应转换成异常，避免渲染出“0 次调用 / 0 token”的假结果。
+function quotaUpstreamErrorMessage(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const code = Number(payload.code);
+  const message = String(payload.msg || payload.message || "").trim();
+  if (payload.success === false || (Number.isFinite(code) && code !== 0 && message)) {
+    return message || `上游返回错误码 ${code}`;
+  }
+  return null;
+}
 
 const UNIT_LABELS = { 1: "sec", 2: "min", 3: "hour", 5: "month", 6: "week" };
 const quotaUnitLabel = (unit, number) => {
@@ -41,6 +74,21 @@ const quotaFormatResetTime = (ts) => {
   const d = new Date(ts);
   const pad = (v) => String(v).padStart(2, "0");
   return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const quotaFormatResetCountdown = (ts, now = Date.now()) => {
+  const resetTime = Number(ts);
+  if (!Number.isFinite(resetTime) || resetTime <= 0) return "-";
+  const remainingMs = resetTime - Number(now);
+  if (remainingMs <= 0) return "已到重置时间";
+  const totalMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
+  const days = Math.floor(totalMinutes / 1_440);
+  const hours = Math.floor((totalMinutes % 1_440) / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+  if (days) parts.push(`${days}天`);
+  if (days || hours) parts.push(`${hours}小时`);
+  parts.push(`${minutes}分钟`);
+  return parts.join("");
 };
 
 function quotaMdTable(headers, rows) {
@@ -102,6 +150,18 @@ function renderQuotaReport(data) {
   }
   const platform = data.platform || "ZHIPU";
 
+  // 后端目前把智谱三路监测响应透传回来。任何一路携带业务错误时都说明
+  // 这不是可渲染的用量数据；优先给出明确错误，而不是把空对象汇总成 0。
+  const upstreamError = [data.model_usage, data.tool_usage, data.quota_limit]
+    .map(quotaUpstreamErrorMessage)
+    .find(Boolean);
+  if (upstreamError) {
+    terminalQuotaBodyEl.innerHTML =
+      `<h3>上游查询失败</h3><p class="meta-text">${quotaEsc(upstreamError)}</p>` +
+      `<p class="meta-text">请在套餐下拉切换到可用账号，或打开「设置」更新当前 API Key / Base URL。</p>`;
+    return;
+  }
+
   let html = "";
   const parts = [];
 
@@ -111,6 +171,21 @@ function renderQuotaReport(data) {
     // remaining / window / plan）的友好提示。
     const remains = data.remains ?? data;
     html += renderMinimaxRemains(remains);
+    terminalQuotaBodyEl.innerHTML = html;
+    return;
+  }
+
+  if (platform === "OPENROUTER") {
+    html += renderOpenRouterCredits(data.credits);
+    if (data.free_usage) {
+      html += renderOpenRouterFreeUsage(data.free_usage);
+    }
+    terminalQuotaBodyEl.innerHTML = html;
+    return;
+  }
+
+  if (platform === "GROK") {
+    html += renderGrokQuota(data.billing, data.subscription);
     terminalQuotaBodyEl.innerHTML = html;
     return;
   }
@@ -132,12 +207,11 @@ function renderQuotaReport(data) {
       let windowLabel, detail;
       if (l.type === "TOKENS_LIMIT") {
         windowLabel = quotaEsc(`Token (${quotaUnitLabel(l.unit, l.number)})`);
-        detail = `重置: ${quotaEsc(quotaFormatResetTime(l.nextResetTime))}`;
-        if (winText) detail = `${winText}; ${detail}`;
+        detail = `重置: ${quotaEsc(quotaFormatResetTime(l.nextResetTime))}; 还差: ${quotaEsc(quotaFormatResetCountdown(l.nextResetTime))}`;
+        if (winText) detail += `; ${winText}`;
       } else if (l.type === "TIME_LIMIT") {
         windowLabel = quotaEsc(`MCP (${quotaUnitLabel(l.unit, l.number)})`);
-        const dd = (l.usageDetails || []).map((d) => `${d.modelCode}: ${quotaFmtNum(d.usage)}`);
-        detail = `${quotaFmtNum(l.currentValue)} / ${quotaFmtNum(l.usage)} (剩余 ${quotaFmtNum(l.remaining)})` + (dd.length ? `; ${dd.map((x) => quotaEsc(x)).join(", ")}` : "") + `; 重置: ${quotaEsc(quotaFormatResetTime(l.nextResetTime))}`;
+        detail = `重置: ${quotaEsc(quotaFormatResetTime(l.nextResetTime))}; 还差: ${quotaEsc(quotaFormatResetCountdown(l.nextResetTime))}; ${quotaFmtNum(l.currentValue)} / ${quotaFmtNum(l.usage)} (剩余 ${quotaFmtNum(l.remaining)})`;
       } else {
         windowLabel = quotaEsc(l.type || "-");
         detail = "-";
@@ -322,6 +396,110 @@ function renderMinimaxRemains(remains) {
   return html;
 }
 
+// Render OpenRouter GET /api/v1/key. A key can be unlimited (`limit` is null),
+// so remaining amount comes from the official payload instead of being derived.
+function renderOpenRouterCredits(payload) {
+  if (!payload || typeof payload !== "object") {
+    return `<p class="meta-text">OpenRouter 返回为空。</p>`;
+  }
+
+  let data = typeof payload.data === "object" && payload.data !== null ? payload.data : payload;
+  const limit = data.limit === null || data.limit === undefined ? null : Number(data.limit);
+  const remaining = data.limit_remaining === null || data.limit_remaining === undefined
+    ? null
+    : Number(data.limit_remaining);
+  const usage = Number(data.usage);
+  const hasLimit = Number.isFinite(limit);
+  const hasRemaining = Number.isFinite(remaining);
+  const hasUsage = Number.isFinite(usage);
+  const usedPercent = hasLimit && hasUsage && limit > 0
+    ? Math.min(100, Math.max(0, (usage / limit) * 100))
+    : 0;
+  const formatUsd = (amount) => `$${amount.toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+  const rows = [
+    ["额度上限", hasLimit ? formatUsd(limit) : "无限制"],
+    ["已用", hasUsage ? formatUsd(usage) : "-"],
+    ["剩余", hasRemaining ? `<strong>${formatUsd(remaining)}</strong>` : (hasLimit ? "-" : "无限制")],
+    ["使用进度", `${quotaBar(usedPercent)} 已用 ${usedPercent.toFixed(1)}%`],
+  ];
+
+  Object.entries(data).forEach(([key, value]) => {
+    if (/^limit$|^limit_remaining$|^usage$/.test(key)) return;
+    let display = "-";
+    if (typeof value === "number") display = quotaFmtNum(value);
+    else if (typeof value === "string") display = quotaEsc(value);
+    else display = `<code>${quotaEsc(JSON.stringify(value))}</code>`;
+    rows.push([quotaEsc(key), display]);
+  });
+
+  return `<h3>OpenRouter 当前 Key 额度</h3><div class="quota-table-scroll">${quotaHtmlTable(
+    ["项目", "值"], rows,
+  )}</div>`;
+}
+
+function renderOpenRouterFreeUsage(usage) {
+  const used = Math.max(0, Number(usage.used ?? 0));
+  const limit = Number(usage.limit);
+  if (!Number.isFinite(limit) || limit <= 0) return "";
+  const remaining = Number.isFinite(Number(usage.remaining))
+    ? Math.max(0, Number(usage.remaining))
+    : Math.max(0, limit - used);
+  const percent = Math.min(100, (used / limit) * 100);
+  const day = usage.day || "-";
+  return `<h3>OpenRouter 免费模型次数（本地代理）</h3>` +
+    `<div class="quota-table-scroll">${quotaHtmlTable(["项目", "值"], [
+      ["日期", quotaEsc(day)],
+      ["已用", `<strong>${quotaFmtNum(used)}</strong> 次`],
+      ["剩余", `${quotaFmtNum(remaining)} / ${quotaFmtNum(limit)} 次`],
+      ["使用进度", `${quotaBar(percent)} 已用 ${percent.toFixed(1)}%`],
+    ])}</div><p class="meta-text">${quotaEsc(
+      usage.note ||
+        "统计通过 webClx 本地代理发出的成功 :free 模型请求；其他客户端流量不会计入。",
+    )}</p>`;
+}
+
+// Render Grok Build `/billing?format=credits` and `/user?include=subscription`.
+// Backend currently returns no `creditUsagePercent`; show period, credits, and
+// subscription, and surface raw billing fields so future fields stay visible.
+function renderGrokQuota(billingEnvelope, subscription) {
+  if (!billingEnvelope || typeof billingEnvelope !== "object") {
+    return `<p class="meta-text">Grok 返回为空。</p>`;
+  }
+  const config = billingEnvelope.config ?? {};
+  const period = config.currentPeriod || {};
+  const cents = (value) => {
+    const n = Number(value?.val ?? value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const formatUsd = (amount) =>
+    amount === null ? "-" : `$${(Math.abs(amount) / 100).toLocaleString("en-US", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })}`;
+  const prepaid = cents(config.prepaidBalance);
+  const rows = [
+    ["订阅", quotaEsc(subscription?.subscriptionTier || "-")],
+    ["账户", quotaEsc(subscription?.email || "-")],
+    ["计费模式", config.isUnifiedBillingUser === true ? "统一用量池" : "-"],
+    ["窗口", `${quotaEsc(quotaFormatResetTime(period.start))} ~ ${quotaEsc(quotaFormatResetTime(period.end))}`],
+    ["重置", quotaEsc(quotaFormatResetTime(period.end))],
+    ["倒计时", quotaEsc(quotaFormatResetCountdown(Date.parse(period.end)))],
+    ["预付 Credits", formatUsd(prepaid)],
+    ["On-demand 已用", formatUsd(cents(config.onDemandUsed))],
+    ["On-demand 上限", formatUsd(cents(config.onDemandCap))],
+  ];
+  const extra = Object.entries(config)
+    .filter(([key]) => !/^(currentPeriod|onDemandCap|onDemandUsed|prepaidBalance|isUnifiedBillingUser|billingPeriodStart|billingPeriodEnd)$/.test(key))
+    .map(([key, value]) => [quotaEsc(key), `<code>${quotaEsc(JSON.stringify(value))}</code>`]);
+  return `<h3>Grok Build 用量与 Credits</h3><div class="quota-table-scroll">${quotaHtmlTable(
+    ["项目", "值"], [...rows, ...extra],
+  )}</div><p class="meta-text">官方接口本次未返回 creditUsagePercent，暂无法计算套餐余量百分比。</p>`;
+}
+
 // MiniMax 的 5 小时 / 周 窗口到点会重新计数。`end_time` /
 // `weekly_end_time` 都是 ms 时间戳。在每个 reset 时刻起一个 setTimeout，
 // 让前端到点自动重查一次，避免"到了时间没复位"。setTimeout 上限是
@@ -385,8 +563,28 @@ async function refreshTerminalQuota({ apiKey = "", baseUrl = "" } = {}) {
     const qs = new URLSearchParams();
     if (apiKey) qs.set("api_key", apiKey);
     if (baseUrl) qs.set("base_url", baseUrl);
-    const url = "/api/quota/query" + (qs.toString() ? "?" + qs.toString() : "");
-    const data = await requestJson(url);
+    let data;
+    if (quotaDetectPlatform(baseUrl) === "OPENROUTER") {
+      try {
+        const response = await fetch("https://openrouter.ai/api/v1/key", {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        });
+        if (!response.ok) throw new Error(`OpenRouter key HTTP ${response.status}`);
+        const payload = await response.json();
+        // GET /key returns the raw `{data}` envelope; the renderer consumes the
+        // same normalized shape as the backend proxy.
+        data = { ...payload, credits: payload.credits ?? payload };
+        data.platform = "OPENROUTER";
+        data.base_url = baseUrl || "https://openrouter.ai/api/v1";
+      } catch (directError) {
+        // Keep the backend proxy path for deployments that block direct browser calls.
+        const url = "/api/quota/query" + (qs.toString() ? "?" + qs.toString() : "");
+        data = await requestJson(url);
+      }
+    } else {
+      const url = "/api/quota/query" + (qs.toString() ? "?" + qs.toString() : "");
+      data = await requestJson(url);
+    }
     renderQuotaReport(data);
     if (terminalQuotaKeyStatusEl) {
       if (apiKey) {
@@ -404,6 +602,7 @@ async function refreshTerminalQuota({ apiKey = "", baseUrl = "" } = {}) {
 async function loadQuotaConfigIntoInputs() {
   try {
     const cfg = await requestJson("/api/quota/config");
+    quotaConfigCache = cfg;
     if (terminalQuotaApiKeyInputEl) terminalQuotaApiKeyInputEl.value = cfg.api_key || "";
     if (terminalQuotaBaseUrlInputEl) terminalQuotaBaseUrlInputEl.value = cfg.base_url || "";
     // 缺省回退到 SAVED，老配置（没有该字段）保持旧行为。
@@ -414,6 +613,15 @@ async function loadQuotaConfigIntoInputs() {
       );
       terminalQuotaDefaultProviderEl.value = hasOption ? value : "SAVED";
     }
+    // 「指定账号」下拉由 loadQuotaCustomPresetOptions 先填充好选项，这里
+    // 只回填当前选择；id 已失效（预设被删）时回到「未指定」。
+    if (terminalQuotaCustomPresetSelectEl) {
+      const customId = String(cfg.custom_preset_id || "").trim();
+      const hasCustomOption = customId && Array.from(terminalQuotaCustomPresetSelectEl.options || []).some(
+        (o) => o.value === customId,
+      );
+      terminalQuotaCustomPresetSelectEl.value = hasCustomOption ? customId : "";
+    }
     if (terminalQuotaConfigStatusEl) terminalQuotaConfigStatusEl.textContent = cfg.api_key_masked ? `当前 Key: ${cfg.api_key_masked}` : "";
   } catch (error) {
     if (terminalQuotaConfigStatusEl) terminalQuotaConfigStatusEl.textContent = `读取配置失败: ${error.message || error}`;
@@ -421,15 +629,29 @@ async function loadQuotaConfigIntoInputs() {
 }
 
 let quotaApiPresetsCache = null;
+// 「指定账号」不受平台域名过滤，需要保留完整预设列表用于按 id 解析。
+let quotaAllApiPresetsCache = null;
+// 最近一次读取的 /api/quota/config；selectedQuotaOverrideParams 用它的
+// custom_preset_id 解析「指定账号」条目对应的 api_key/base_url。
+let quotaConfigCache = null;
 async function fetchQuotaApiPresets() {
   try {
     const resp = await requestJson("/api/auth/api-presets");
-    quotaApiPresetsCache = (resp.presets || []).filter(quotaIsQuotaPreset);
+    quotaAllApiPresetsCache = resp.presets || [];
+    quotaApiPresetsCache = quotaAllApiPresetsCache.filter(quotaIsQuotaPreset);
     return quotaApiPresetsCache;
   } catch (error) {
     quotaApiPresetsCache = null;
+    quotaAllApiPresetsCache = null;
     return null;
   }
+}
+
+// 按 id 在完整预设列表里解析「指定账号」；未指定或预设已被删除时返回 null。
+function resolveQuotaCustomPreset(customPresetId) {
+  const id = String(customPresetId || "").trim();
+  if (!id || !Array.isArray(quotaAllApiPresetsCache)) return null;
+  return quotaAllApiPresetsCache.find((p) => p && p.id === id) || null;
 }
 
 async function loadQuotaApiPresetsIntoDropdown() {
@@ -455,43 +677,112 @@ async function loadQuotaApiPresetsIntoDropdown() {
 }
 
 async function loadQuotaKeyDropdown() {
-  return populateQuotaKeyDropdown(await fetchQuotaApiPresets(), "SAVED");
+  return populateQuotaKeyDropdown(
+    await fetchQuotaApiPresets(),
+    "SAVED",
+    quotaConfigCache && quotaConfigCache.custom_preset_id,
+  );
 }
 
-// 把下拉里第一个匹配平台（ZHIPU / MINIMAX）的预设设为选中；缺省
-// `SAVED` 或找不到匹配项时回到「已保存配置」（空值）。
-function populateQuotaKeyDropdown(presets, defaultProvider) {
-  if (!terminalQuotaKeySelectEl) return;
-  if (!presets || presets.length === 0) {
-    terminalQuotaKeySelectEl.innerHTML = '<option value="">无可用预设</option>';
+// 「指定账号」下拉列出全部 Codex_API 预设（不过滤平台类型）。识别不出
+// 平台的预设如实标注「其他」，查询仍按后端默认算法（智谱监测接口）尝试。
+async function loadQuotaCustomPresetOptions() {
+  if (!terminalQuotaCustomPresetSelectEl) return;
+  const presets = await fetchQuotaApiPresets();
+  if (!presets) {
+    terminalQuotaCustomPresetSelectEl.innerHTML = '<option value="">读取预设失败</option>';
     return;
   }
-  // value 形如 "<idx>"，留空表示用已保存配置查询。
-  let selectIdx = "";
-  if (defaultProvider === "ZHIPU" || defaultProvider === "MINIMAX") {
-    const idx = presets.findIndex((p) => quotaDetectPlatform(p.base_url) === defaultProvider);
-    if (idx >= 0) selectIdx = String(idx);
+  const all = Array.isArray(quotaAllApiPresetsCache) ? quotaAllApiPresetsCache : [];
+  terminalQuotaCustomPresetSelectEl.innerHTML =
+    '<option value="">未指定</option>' +
+    all
+      .map((p) => {
+        const masked = p.masked_api_key || String(p.api_key || "").slice(0, 8) + "***";
+        const platform = quotaDetectPlatformStrict(p.base_url);
+        const platformLabel = platform
+          ? (QUOTA_PLATFORM_LABELS[platform] || platform)
+          : "其他";
+        const label = `[${platformLabel}] ${p.name || "未命名"}  |  ${masked}  |  ${p.base_url || "-"}`;
+        return '<option value="' + quotaEscapeOptionLabel(p.id || "") + '">' +
+          quotaEscapeOptionLabel(label) + "</option>";
+      })
+      .join("");
+}
+
+// 组装快速切换下拉：第一个条目是「已保存配置」——即设置面板保存的（内置
+// 默认为 GLM/智谱）key 配置，label 直接标注平台与掩码 key，让这份不走
+// Codex_API 预设的 GLM key 在账号列表里实名可见；其后是「指定账号」条目
+// （已配置且能解析到预设时）与按平台自动过滤出的预设。defaultProvider
+// 决定默认选中：ZHIPU / MINIMAX / OPENROUTER 选中对应平台的第一个预设，
+// 没有匹配预设但已保存配置就是该平台时选中「已保存配置」；CUSTOM 选中
+// 「指定账号」；缺省或找不到匹配项时回到「已保存配置」（空值）。
+function populateQuotaKeyDropdown(presets, defaultProvider, customPresetId) {
+  if (!terminalQuotaKeySelectEl) return;
+  const list = Array.isArray(presets) ? presets : [];
+  const savedPlatform = quotaConfigCache && quotaConfigCache.base_url
+    ? quotaDetectPlatform(quotaConfigCache.base_url)
+    : "";
+  const savedPlatformLabel = savedPlatform
+    ? (QUOTA_PLATFORM_LABELS[savedPlatform] || savedPlatform)
+    : "";
+  const savedMasked = quotaConfigCache && quotaConfigCache.api_key_masked
+    ? quotaConfigCache.api_key_masked
+    : "";
+  const savedLabelParts = ["已保存配置"];
+  if (savedPlatformLabel) savedLabelParts.push(`[${savedPlatformLabel}]`);
+  if (savedMasked) savedLabelParts.push(savedMasked);
+  const savedOption =
+    '<option value="">' + quotaEscapeOptionLabel(savedLabelParts.join("  ")) + "</option>";
+  const customPreset = resolveQuotaCustomPreset(customPresetId);
+  if (list.length === 0 && !customPreset) {
+    // 没有任何预设也要保留已保存配置条目，遗留 GLM key 配置仍可直接查询。
+    terminalQuotaKeySelectEl.innerHTML = savedOption;
+    terminalQuotaKeySelectEl.value = "";
+    return;
+  }
+  let customOption = "";
+  if (customPreset) {
+    const masked = customPreset.masked_api_key || String(customPreset.api_key || "").slice(0, 8) + "***";
+    const label = `指定账号: ${customPreset.name || "未命名"}  |  ${masked}  |  ${customPreset.base_url || "-"}`;
+    customOption =
+      '<option value="' + QUOTA_CUSTOM_OPTION_VALUE + '">' +
+      quotaEscapeOptionLabel(label) + "</option>";
+  }
+  // value 形如 "<idx>"；"custom" 表示指定账号；留空表示用已保存配置查询。
+  let selectValue = "";
+  if (defaultProvider === "CUSTOM" && customPreset) {
+    selectValue = QUOTA_CUSTOM_OPTION_VALUE;
+  } else if (defaultProvider === "ZHIPU" || defaultProvider === "MINIMAX" || defaultProvider === "OPENROUTER") {
+    const idx = list.findIndex((p) => quotaDetectPlatform(p.base_url) === defaultProvider);
+    if (idx >= 0) selectValue = String(idx);
+    else if (savedPlatform === defaultProvider) selectValue = "";
   }
   terminalQuotaKeySelectEl.innerHTML =
-    '<option value="">已保存配置</option>' +
-    presets
+    savedOption +
+    customOption +
+    list
       .map((p, i) => {
         const masked = p.masked_api_key || String(p.api_key).slice(0, 8) + "***";
         const platform = quotaDetectPlatform(p.base_url);
         const platformLabel = QUOTA_PLATFORM_LABELS[platform] || platform;
         const label = `[${platformLabel}] ${(p.name || "未命名")}  |  ${masked}`;
-        return '<option value="' + i + '">' +
-          label.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;") +
-          "</option>";
+        return '<option value="' + i + '">' + quotaEscapeOptionLabel(label) + "</option>";
       })
       .join("");
-  terminalQuotaKeySelectEl.value = selectIdx;
+  terminalQuotaKeySelectEl.value = selectValue;
 }
 
 function selectedQuotaOverrideParams() {
   if (!terminalQuotaKeySelectEl || !quotaApiPresetsCache) return {};
   const raw = terminalQuotaKeySelectEl.value;
   if (raw === "") return {};
+  // 「指定账号」条目按配置里记录的预设 id 从完整列表解析，不受平台过滤。
+  if (raw === QUOTA_CUSTOM_OPTION_VALUE) {
+    const customPreset = resolveQuotaCustomPreset(quotaConfigCache && quotaConfigCache.custom_preset_id);
+    if (!customPreset) return {};
+    return { apiKey: customPreset.api_key || "", baseUrl: customPreset.base_url || "" };
+  }
   const idx = Number(raw);
   if (Number.isNaN(idx) || idx < 0 || idx >= quotaApiPresetsCache.length) return {};
   const preset = quotaApiPresetsCache[idx];
@@ -529,10 +820,12 @@ function openTerminalQuotaDialog() {
   // 任一请求失败都退回已保存配置查询，保持可用。
   Promise.all([requestJson("/api/quota/config").catch(() => null), fetchQuotaApiPresets()])
     .then(([cfg, presets]) => {
+      quotaConfigCache = cfg;
       const defaultProvider = cfg?.default_provider || "SAVED";
-      populateQuotaKeyDropdown(presets, defaultProvider);
+      populateQuotaKeyDropdown(presets, defaultProvider, cfg?.custom_preset_id);
       // populateQuotaKeyDropdown 已设置好下拉 value，这里读出选中项
-      // 的 override 参数：默认平台匹配到预设就用预设查，否则回退已保存配置。
+      // 的 override 参数：默认平台（含「指定账号」）匹配到预设就用预设查，
+      // 否则回退已保存配置。
       refreshTerminalQuota(selectedQuotaOverrideParams());
     })
     .catch(() => refreshTerminalQuota());
@@ -554,7 +847,8 @@ function toggleTerminalQuotaSettingsPanel() {
   const willOpen = terminalQuotaSettingsPanelEl.hidden;
   terminalQuotaSettingsPanelEl.hidden = !willOpen;
   if (willOpen) {
-    loadQuotaConfigIntoInputs();
+    // 「指定账号」选项要先就位，loadQuotaConfigIntoInputs 才能回填当前选择。
+    loadQuotaCustomPresetOptions().finally(() => loadQuotaConfigIntoInputs());
     loadQuotaApiPresetsIntoDropdown();
   }
 }
@@ -564,6 +858,7 @@ async function saveTerminalQuotaConfig() {
   const apiKey = terminalQuotaApiKeyInputEl?.value?.trim() || "";
   const baseUrl = terminalQuotaBaseUrlInputEl?.value?.trim() || "";
   const defaultProvider = (terminalQuotaDefaultProviderEl?.value || "SAVED").trim();
+  const customPresetId = (terminalQuotaCustomPresetSelectEl?.value || "").trim();
   terminalQuotaSaveConfigBtnEl.disabled = true;
   if (terminalQuotaConfigStatusEl) terminalQuotaConfigStatusEl.textContent = "保存中…";
   try {
@@ -574,17 +869,36 @@ async function saveTerminalQuotaConfig() {
         api_key: apiKey,
         base_url: baseUrl,
         default_provider: defaultProvider,
+        custom_preset_id: customPresetId || null,
       }),
     });
+    // 同步本地缓存，selectedQuotaOverrideParams 立即能解析新指定的账号，
+    // 「已保存配置」条目的实名 label（平台 + 掩码 key）也随保存刷新。
+    quotaConfigCache = Object.assign({}, quotaConfigCache, {
+      custom_preset_id: res.custom_preset_id ?? (customPresetId || null),
+      api_key_masked: res.api_key_masked || (quotaConfigCache && quotaConfigCache.api_key_masked) || "",
+      base_url: res.base_url || (quotaConfigCache && quotaConfigCache.base_url) || "",
+    });
     if (terminalQuotaConfigStatusEl) {
-      const providerLabel = QUOTA_PLATFORM_LABELS[res.default_provider]
-        || (res.default_provider === "SAVED" ? "已保存配置" : res.default_provider);
+      const providerLabelMap = {
+        SAVED: "已保存配置",
+        CUSTOM: "指定账号",
+        ZHIPU: QUOTA_PLATFORM_LABELS.ZHIPU,
+        MINIMAX: QUOTA_PLATFORM_LABELS.MINIMAX,
+        OPENROUTER: QUOTA_PLATFORM_LABELS.OPENROUTER,
+      };
+      const providerLabel = providerLabelMap[res.default_provider] || res.default_provider;
       terminalQuotaConfigStatusEl.textContent =
         `已保存。当前 Key: ${res.api_key_masked || "?"} · 默认显示: ${quotaEsc(providerLabel)}`;
     }
-    // 保存的是「默认配置」，把快速切换下拉复位到默认平台对应项再查询。
-    populateQuotaKeyDropdown(quotaApiPresetsCache, res.default_provider || "SAVED");
-    refreshTerminalQuota();
+    // 保存的是「默认配置」，把快速切换下拉复位到默认项（含「指定账号」）
+    // 再按选中项查询，保证展示与数据一致。
+    populateQuotaKeyDropdown(
+      quotaApiPresetsCache,
+      res.default_provider || "SAVED",
+      quotaConfigCache.custom_preset_id,
+    );
+    refreshTerminalQuota(selectedQuotaOverrideParams());
   } catch (error) {
     if (terminalQuotaConfigStatusEl) {
       terminalQuotaConfigStatusEl.textContent = `保存失败: ${error.message || error}`;

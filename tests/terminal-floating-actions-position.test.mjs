@@ -111,19 +111,19 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /terminalScheduleButton\.addEventListener\("click", \(\) => \{[\s\S]*?openScheduledTerminalPasteDialog\(\)/,
-  "the merged schedule button should open the existing scheduling dialog",
+  /terminalScheduleButton\.addEventListener\("click", \(\) => \{[\s\S]*?openScheduledTaskManagement\(\)/,
+  "the merged schedule button should open scheduled task management",
 );
 
 assert.match(
   terminalHtml,
-  /styles-base\.css\?v=20260727b/,
+  /styles-base\.css\?v=20260913a/,
   "terminal page should refresh its cached base styles",
 );
 
 assert.match(
   terminalHtml,
-  /styles-terminal\.css\?v=20260804b/,
+  /styles-terminal\.css\?v=20260912c/,
   "terminal page should refresh its cached floating-action styles",
 );
 

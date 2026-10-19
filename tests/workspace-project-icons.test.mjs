@@ -9,6 +9,7 @@ const browserJs = readFileSync(new URL("../static/app-workspace-browser.js", imp
 const terminalRenderJs = readFileSync(new URL("../static/terminal-session-render.js", import.meta.url), "utf8");
 const workspaceRoutesRs = readFileSync(new URL("../src/routes/workspace.rs", import.meta.url), "utf8");
 const settingsLoadSaveJs = readFileSync(new URL("../static/app-settings-load-save.js", import.meta.url), "utf8");
+const stylesBaseCss = readFileSync(new URL("../static/styles-base.css", import.meta.url), "utf8");
 
 const context = vm.createContext({
   URLSearchParams,
@@ -23,11 +24,16 @@ assert.equal(helpers.normalizeProjectIconPath("../escape.ico", "icon.ico"), "ico
 assert.equal(helpers.normalizeProjectIconPath("/absolute/icon.ico", "icon.ico"), "icon.ico");
 assert.equal(helpers.workspaceProjectKey("webClx/src"), "webClx");
 assert.equal(
+  helpers.workspaceProjectKey("third_party/zcodeOfficial/src"),
+  "third_party/zcodeOfficial",
+);
+assert.equal(
   helpers.workspaceProjectKey("../third_party/sub2api/frontend/src"),
   "../third_party/sub2api",
 );
 assert.equal(helpers.workspaceProjectTextIcon("webClx"), "WC");
 assert.equal(helpers.workspaceProjectTextIcon("webClx/src"), "WC");
+assert.equal(helpers.workspaceProjectTextIcon("third_party/zcodeOfficial"), "ZO");
 assert.equal(helpers.workspaceProjectTextIcon("../third_party/sub2api"), "S2");
 const colorSlots = helpers.workspaceProjectColorSlots(["beta", "alpha/src", "alpha"]);
 assert.equal(colorSlots.get("alpha"), 0);
@@ -35,6 +41,10 @@ assert.equal(colorSlots.get("beta"), 1);
 assert.equal(helpers.workspaceProjectHue("alpha", colorSlots), 210);
 assert.equal(helpers.workspaceProjectHue("alpha/src", colorSlots), 210);
 assert.equal(helpers.workspaceProjectHue("beta", colorSlots), 347.508);
+assert.notEqual(
+  helpers.workspaceProjectHue("third_party/zcodeOfficial"),
+  helpers.workspaceProjectHue("third_party/sub2api"),
+);
 assert.equal(
   helpers.workspaceProjectHue("webClx"),
   helpers.workspaceProjectHue("webClx/src"),
@@ -55,3 +65,6 @@ assert.match(iconsJs, /event\.key === "Escape"/);
 assert.match(workspaceRoutesRs, /"\/api\/workspace-icon",\s*get\(filesystem::read_workspace_icon\)/);
 assert.match(settingsLoadSaveJs, /workspace_browser_icon_path:/);
 assert.match(settingsLoadSaveJs, /terminal_workspace_icon_path:/);
+assert.match(iconsJs, /const groupBadge = `【\$\{groupName\}】`;/);
+assert.match(iconsJs, /marker\.hidden = true;\s*marker\.style\.display = "none";/);
+assert.match(stylesBaseCss, /\.workspace-icon-select-group-marker\s*\{[^}]*display:\s*none/);

@@ -220,5 +220,5 @@ test("manual input typed during initial replay is restored and sent as one comma
 });
 
 test("terminal page loads the quick-start fix with a fresh asset version", () => {
-  assert.match(terminalHtml, /terminal-command-quickstart\.js\?v=20260803b/);
+  assert.match(terminalHtml, /terminal-command-quickstart\.js\?v=20260901a/);
 });

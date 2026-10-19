@@ -120,6 +120,31 @@ assert.match(
   /id="claude-access-mode-input"[\s\S]*不转换（直连 Anthropic Messages）[\s\S]*Anthropic 无转换中转[\s\S]*OpenAI Chat → Anthropic Messages/,
   "Claude_API preset editor should expose protocol conversion choices",
 );
+assert.match(
+  indexHtml,
+  /id="claude-preset-editor-panel"[^>]*hidden/,
+  "the Claude_API editor panel should stay hidden until 新增预设 or 编辑 opens it",
+);
+assert.match(
+  claudeManagerJs,
+  /function cancelClaudePresetEdit\(\)[\s\S]*resetClaudePresetForm[\s\S]*hideClaudePresetEditor\(\)/,
+  "closing the Claude editor should clear form state and hide the panel",
+);
+assert.match(
+  claudeManagerJs,
+  /claudeAddPresetButton\?\.addEventListener\("click", \(\) => \{[\s\S]*if \(claudePresetEditorPanelEl\) claudePresetEditorPanelEl\.hidden = false/,
+  "新增预设 should reveal the Claude editor",
+);
+assert.match(
+  claudeManagerJs,
+  /function editClaudePreset\(presetId\)[\s\S]*if \(claudePresetEditorPanelEl\) claudePresetEditorPanelEl\.hidden = false;/,
+  "row edit should reveal the Claude editor",
+);
+assert.match(
+  readFileSync(new URL("../static/app-preset-form-event-bindings.js", import.meta.url), "utf8"),
+  /claudeClearInputButton\.addEventListener\("click", \(\) => \{[\s\S]*claudeManager\.cancelClaudePresetEdit\(\);/,
+  "清空/取消编辑 should close the Claude editor instead of leaving it on the page",
+);
 assert.doesNotMatch(
   appJs,
   /function renderClaudePresets\(presets\) \{[\s\S]*decorateRow: \(row, preset\) => makePresetRowClickable\(row, preset, \(\) => applyClaudePreset\(preset\.id\)\)/,
@@ -130,6 +155,16 @@ assert.match(
   appJs,
   /requestJson\(`\/api\/auth\/api-presets\/\$\{encodeURIComponent\(presetId\)\}\/test`,\s*\{\s*method: "POST"/,
   "Codex_API single test should call its backend test endpoint",
+);
+assert.match(
+  appJs,
+  /async function testApiPreset\(presetId, presetName, statusElement = apiManagerStatusEl\)[\s\S]*正在测试 API 预设[\s\S]*测试\$\{result\.ok \? "通过" : "失败"\}/,
+  "Codex_API single test should show immediate progress and a visible completion status",
+);
+assert.match(
+  appJs,
+  /account\.kind === "api"[\s\S]*testApiPreset\(account\.id, account\.name, document\.getElementById\("codex-account-status"\)\)/,
+  "the unified Codex account table should render API test feedback in its visible status area",
 );
 assert.match(
   appJs,

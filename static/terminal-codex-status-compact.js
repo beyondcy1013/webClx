@@ -506,6 +506,16 @@
         );
         if (!disposed && requestKey === resolvedRequestKey) {
           currentStatus = response?.codex_status || null;
+          if (
+            currentStatus?.context_window &&
+            typeof state !== "undefined" &&
+            state?.sessionContextCache instanceof Map
+          ) {
+            state.sessionContextCache.set(resolvedSessionId, currentStatus.context_window);
+            if (state.showSessionContext && typeof renderSessions === "function") {
+              renderSessions();
+            }
+          }
           renderOverlay();
         }
       } catch {

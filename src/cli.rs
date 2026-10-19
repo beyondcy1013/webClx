@@ -1,24 +1,36 @@
 use std::{
     env,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use auth_core::{
-    ApiPresetLookup, ApiPresetSelectionEntry, PresetConfigOverride, PresetTerminalEnvVar,
-    model_from_config_overrides, select_api_preset_index,
+    ApiPresetLookup, ApiPresetSelectionEntry, CodexAccountKind, CurrentAuthMode,
+    PresetConfigOverride, PresetTerminalEnvVar, model_from_config_overrides,
+    select_api_preset_index,
 };
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, StatusCode, header::HeaderMap};
 use serde::Deserialize;
-use tokio::process::Command;
+use tokio::process::{Child, Command};
 
-use crate::codex_launch::{codex_history_args_with_model, read_codex_model};
+use crate::codex_conversation_model::prepare_codex_history_args_model_for_current_user;
+use crate::codex_launch::{
+    codex_history_args_with_model, read_codex_model, read_codex_model_provider,
+};
 
 const DEFAULT_WEBCLX_URL: &str = "http://127.0.0.1:11111";
+/// Once a fresh startup signal is observed, wait this long before restoring
+/// the previous preset so the agent can finish loading the applied
+/// configuration (Codex initializes provider and credentials after the model).
+const AGENT_STARTUP_SETTLE_GRACE: Duration = Duration::from_secs(3);
+/// Fixed fallback: restore this long after launch even when no startup signal
+/// is available (outside tmux, or the banner never matched).
+const AGENT_STARTUP_FALLBACK_DELAY: Duration = Duration::from_secs(6);
+const AGENT_STARTUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(unix)]
 struct TerminalModeGuard {
     fd: libc::c_int,
@@ -84,7 +96,9 @@ Commands:
   webclx current                             Show active presets
   webclx use <type> <preset-or-model>        Switch to a preset by selector
   webclx run <type> <preset-or-model> [--] <agent>
-                                               Launch an agent with a selected preset
+                                             Launch an agent with a selected preset
+  webclx close <session-id>                  Close a terminal session
+  webclx terminal close <session-id>         Close a terminal session
   webclx serve                               Start the webClx server
   webclx help [command]                      Show command help
   webclx version                             Show the webClx version
@@ -105,8 +119,6 @@ Examples:
   webclx list api
   webclx use api "primary"
   webclx run api "primary" -- codex
-  webclx run oauth "plus-account" -- codex resume <session-id>
-  webclx run claude "anthropic" -- claude
 "#;
 
 const LIST_HELP: &str = r#"Usage:
@@ -139,8 +151,8 @@ const RUN_HELP: &str = r#"Usage:
   webclx run <type> <preset-or-model> [--] <agent> [agent arguments...]
 
 Apply the selected preset to the real shared configuration, then launch the
-agent. The selected preset remains active for subsequent processes. Existing
-agent processes do not hot-reload it; restart, resume, or fork a new process.
+agent without a runtime preset gate. After startup is verified, the previously
+active preset is immediately applied again; agent exit is unrelated to restore.
 For type `api`, a model selects its first preset in the saved table order.
 
 Examples:
@@ -216,6 +228,9 @@ pub enum CliAction {
         agent: String,
         args: Vec<String>,
     },
+    Close {
+        session_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -278,29 +293,23 @@ struct PresetListResponse {
 struct PresetApplyResponse {
     #[serde(default)]
     deferred: bool,
-    #[serde(default)]
-    config_file: Option<String>,
-    #[serde(default)]
-    local_config_file: Option<String>,
 }
 
-impl PresetApplyResponse {
-    fn codex_model(&self) -> Result<Option<String>> {
-        let config_file = self
-            .local_config_file
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-            .or_else(|| {
-                self.config_file
-                    .as_deref()
-                    .filter(|path| !path.trim().is_empty())
-            });
-        let Some(config_file) = config_file else {
-            return Ok(None);
-        };
-        read_codex_model(Path::new(config_file))
-            .with_context(|| format!("failed to read the applied Codex model from {config_file}"))
-    }
+#[derive(Debug, Deserialize)]
+struct CodexAccountListResponse {
+    #[serde(default)]
+    current_mode: Option<CurrentAuthMode>,
+    #[serde(default)]
+    accounts: Vec<CodexAccountSummaryResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexAccountSummaryResponse {
+    kind: CodexAccountKind,
+    id: String,
+    name: String,
+    #[serde(default)]
+    active: bool,
 }
 
 struct PresetLists {
@@ -323,6 +332,7 @@ impl PresetLists {
 struct CliClient {
     base_url: String,
     client: Client,
+    local_api_token: Option<String>,
 }
 
 impl CliClient {
@@ -341,7 +351,12 @@ impl CliClient {
             .timeout(Duration::from_secs(120))
             .build()
             .context("failed to create webClx HTTP client")?;
-        Ok(Self { base_url, client })
+        let local_api_token = local_api_token_for_url(&base_url);
+        Ok(Self {
+            base_url,
+            client,
+            local_api_token,
+        })
     }
 
     async fn presets(&self, kind: PresetKind) -> Result<Vec<PresetSummary>> {
@@ -361,15 +376,36 @@ impl CliClient {
         Ok(PresetLists { oauth, api, claude })
     }
 
+    async fn codex_accounts(&self) -> Result<CodexAccountListResponse> {
+        self.request_json(self.client.get(self.url("/api/auth/codex-accounts")))
+            .await
+            .context("failed to list codex accounts")
+    }
+
+    async fn close_session(&self, session_id: &str) -> Result<serde_json::Value> {
+        let path = format!(
+            "/api/terminal/sessions/{}/close",
+            utf8_percent_encode(session_id, NON_ALPHANUMERIC)
+        );
+        self.request_json(self.client.post(self.url(&path))).await
+    }
+
     async fn apply(
         &self,
         kind: PresetKind,
         preset: &PresetSummary,
         project_path: Option<&Path>,
+        temporary: bool,
     ) -> Result<PresetApplyResponse> {
         let preset_id = utf8_percent_encode(&preset.id, NON_ALPHANUMERIC);
         let path = format!("{}/{preset_id}/apply", kind.endpoint());
         let mut request = self.client.put(self.url(&path));
+        // Temporary `webclx run` switches must not restart the Codex app-server
+        // daemon: the restore half would otherwise kill the just-launched
+        // daemon-hosted agent.
+        if temporary {
+            request = request.query(&[("skip_daemon_restart", "true")]);
+        }
         if let Some(project_path) = project_path {
             request = request.query(&[("project_path", project_path)]);
         }
@@ -386,20 +422,76 @@ impl CliClient {
     where
         T: for<'de> Deserialize<'de>,
     {
+        let request = if let Some(token) = self.local_api_token.as_deref() {
+            request.header(auth_core::WEBCLX_LOCAL_API_TOKEN_HEADER, token)
+        } else {
+            request
+        };
         let response = request
             .send()
             .await
             .with_context(|| format!("cannot reach webClx at {}", self.base_url))?;
         let status = response.status();
+        let headers = response.headers().clone();
         let body = response
             .bytes()
             .await
             .context("failed to read webClx response")?;
         if !status.is_success() {
-            bail!("webClx API returned {status}: {}", String::from_utf8_lossy(&body).trim());
+            bail!(cli_api_error_message(status, &headers, &body));
         }
         serde_json::from_slice(&body).context("webClx returned invalid JSON")
     }
+}
+
+fn cli_api_error_message(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> String {
+    if status == StatusCode::UNAUTHORIZED
+        && headers
+            .get("X-WebClx-Auth")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value == "required")
+    {
+        return "webClx CLI local authentication failed: the running service did not accept its local token"
+            .to_string();
+    }
+    format!("webClx API returned {status}: {}", String::from_utf8_lossy(body).trim())
+}
+
+fn local_api_token_for_url(base_url: &str) -> Option<String> {
+    let env_token = env::var(auth_core::WEBCLX_LOCAL_API_TOKEN_ENV).ok();
+    let env_token_file = env::var_os("WEBCLX_LOCAL_TOKEN_FILE").map(PathBuf::from);
+    let executable_path = env::current_exe().ok();
+    local_api_token_from_sources(
+        base_url,
+        env_token.as_deref(),
+        env_token_file.as_deref(),
+        executable_path.as_deref(),
+    )
+}
+
+fn local_api_token_from_sources(
+    base_url: &str,
+    env_token: Option<&str>,
+    env_token_file: Option<&Path>,
+    executable_path: Option<&Path>,
+) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    if !url
+        .host_str()
+        .is_some_and(|host| matches!(host, "127.0.0.1" | "::1" | "localhost"))
+    {
+        return None;
+    }
+    if let Some(token) = env_token.map(str::trim).filter(|token| !token.is_empty()) {
+        return Some(token.trim().to_string());
+    }
+    if let Some(token_file) = env_token_file
+        && let Ok(token) = crate::auth_guard::read_existing_local_api_token(token_file)
+    {
+        return Some(token);
+    }
+    let token_file = crate::auth_guard::local_api_token_path(executable_path?.parent()?);
+    crate::auth_guard::read_existing_local_api_token(&token_file).ok()
 }
 
 pub fn parse_process_args() -> std::result::Result<CliAction, String> {
@@ -418,7 +510,9 @@ where
 {
     let args = args.into_iter().collect::<Vec<_>>();
     if args.is_empty() {
-        return if program_name == "webClx" {
+        return if program_name.eq_ignore_ascii_case("webClx")
+            || program_name.eq_ignore_ascii_case("webClx.exe")
+        {
             Ok(CliAction::Serve)
         } else {
             Ok(CliAction::Help(None))
@@ -503,6 +597,20 @@ where
                 args: rest[command_start + 1..].to_vec(),
             })
         }
+        "close" => match rest {
+            [session_id] if !session_id.trim().is_empty() => Ok(CliAction::Close {
+                session_id: session_id.trim().to_string(),
+            }),
+            _ => Err("usage: webclx close <session-id>".to_string()),
+        },
+        "terminal" => match rest {
+            [action, session_id] if action == "close" && !session_id.trim().is_empty() => {
+                Ok(CliAction::Close {
+                    session_id: session_id.trim().to_string(),
+                })
+            }
+            _ => Err("usage: webclx terminal close <session-id>".to_string()),
+        },
         _ => Err(format!("unknown command `{command}`\n\n{ROOT_HELP}")),
     }
 }
@@ -600,6 +708,16 @@ pub async fn execute(action: CliAction) -> Result<()> {
             agent,
             args,
         } => run_agent(kind, &selector, &agent, &args).await,
+        CliAction::Close { session_id } => {
+            let client = CliClient::new()?;
+            let resp = client.close_session(&session_id).await?;
+            let name = resp
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or(&session_id);
+            println!("终端会话“{name}”已关闭。");
+            Ok(())
+        }
     }
 }
 
@@ -649,7 +767,7 @@ async fn use_preset(kind: PresetKind, selector: &str) -> Result<()> {
     let presets = client.presets(kind).await?;
     let preset = resolve_preset_for_kind(kind, &presets, selector).map_err(anyhow::Error::msg)?;
     let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let response = client.apply(kind, &preset, Some(&cwd)).await?;
+    let response = client.apply(kind, &preset, Some(&cwd), false).await?;
     if response.deferred {
         println!(
             "Queued {} preset `{}` [{}]. It will be written after the current serialized preset operation completes.",
@@ -673,6 +791,37 @@ async fn run_agent(kind: PresetKind, selector: &str, agent: &str, args: &[String
     let lists = client.all_presets().await?;
     let target = resolve_preset_for_kind(kind, lists.for_kind(kind), selector)
         .map_err(anyhow::Error::msg)?;
+    let original = if kind == PresetKind::Claude {
+        lists
+            .claude
+            .iter()
+            .find(|preset| preset.active)
+            .map(|preset| (PresetKind::Claude, preset.clone()))
+    } else {
+        let active_codex = client.codex_accounts().await.ok().and_then(|resp| {
+            resp.accounts
+                .into_iter()
+                .find(|acc| acc.active)
+                .and_then(|acc| {
+                    let acc_kind = match acc.kind {
+                        CodexAccountKind::Oauth => PresetKind::OAuth,
+                        CodexAccountKind::Api => PresetKind::Api,
+                    };
+                    lists
+                        .for_kind(acc_kind)
+                        .iter()
+                        .find(|p| p.id == acc.id)
+                        .map(|p| (acc_kind, p.clone()))
+                })
+        });
+        active_codex.or_else(|| {
+            lists
+                .for_kind(kind)
+                .iter()
+                .find(|preset| preset.active)
+                .map(|preset| (kind, preset.clone()))
+        })
+    };
 
     #[cfg(unix)]
     let _interrupt_signal =
@@ -683,36 +832,69 @@ async fn run_agent(kind: PresetKind, selector: &str, agent: &str, args: &[String
         .context("failed to install terminal quit handler")?;
 
     let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let mut applied = client.apply(kind, &target, Some(&cwd)).await?;
-    let mut deferred_notice_printed = false;
-    while applied.deferred {
-        if !deferred_notice_printed {
-            println!(
-                "{} preset `{}` [{}] is queued; waiting for the current serialized preset operation to finish before launching `{agent}`...",
-                kind.title(),
-                target.name,
-                target.id
-            );
-            io::stdout().flush().ok();
-            deferred_notice_printed = true;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        applied = client.apply(kind, &target, Some(&cwd)).await?;
+    let applied = client.apply(kind, &target, Some(&cwd), true).await?;
+    if applied.deferred {
+        bail!("temporary preset apply was deferred instead of written to the real config files");
     }
-    let codex_model = applied.codex_model()?;
+    let codex_selection = match read_applied_codex_selection(agent, &cwd) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let restore_result =
+                restore_previous_preset(&client, kind, original.as_ref(), &target, &cwd).await;
+            return match restore_result {
+                Ok(()) => Err(error).context("failed to read the applied Codex selection"),
+                Err(restore_error) => Err(restore_error).context(format!(
+                    "failed to read the applied Codex selection: {error}; configuration restore also failed"
+                )),
+            };
+        }
+    };
+    let codex_model = codex_selection
+        .as_ref()
+        .and_then(|selection| selection.model.as_deref());
+    let codex_model_provider = codex_selection
+        .as_ref()
+        .map(|selection| selection.model_provider.as_str())
+        .unwrap_or("openai");
+    let claude_startup_model = read_applied_claude_model(agent).unwrap_or_else(|error| {
+        eprintln!("Warning: continuing without the applied Claude model: {error:#}");
+        None
+    });
+    if let Err(error) = prepare_codex_history_args_model_for_current_user(
+        agent,
+        args,
+        codex_model,
+        codex_model_provider,
+    ) {
+        let restore_result =
+            restore_previous_preset(&client, kind, original.as_ref(), &target, &cwd).await;
+        return match restore_result {
+            Ok(()) => Err(error).context("failed to prepare Codex history before launching agent"),
+            Err(restore_error) => Err(restore_error).context(format!(
+                "failed to prepare Codex history before launching agent: {error}; configuration restore also failed"
+            )),
+        };
+    }
     println!(
-        "Launching `{agent}` with {} preset `{}` [{}]; the selected preset remains active for subsequent processes.",
+        "Launching `{agent}` with temporary {} preset `{}` [{}] from the real configuration files; no runtime preset gate is held. The previous preset is restored a few seconds after startup is detected, or after a short fixed fallback delay; startup problems never stop the agent.",
         kind.title(),
         target.name,
         target.id
     );
     io::stdout().flush().ok();
+    let startup_baseline = capture_current_tmux_pane().await;
 
     let mut terminal_mode = TerminalModeGuard::capture_stdin();
-
-    let launch_args = codex_history_args_with_model(agent, args, codex_model.as_deref());
+    let launch_args = codex_history_args_with_model(agent, args, codex_model);
     let mut command = Command::new(agent);
+    if is_program(agent, "codex") {
+        // Codex 0.157+ hosts TUI sessions inside the shared app-server daemon,
+        // which caches auth.json/config.toml in memory. A temporary preset only
+        // takes effect if the agent reads the just-written files directly.
+        command.arg("--no-daemon");
+    }
     command.args(&launch_args);
+    configure_agent_process_lifetime(&mut command);
     for (key, _) in env::vars_os() {
         if key
             .to_str()
@@ -721,20 +903,47 @@ async fn run_agent(kind: PresetKind, selector: &str, agent: &str, args: &[String
             command.env_remove(key);
         }
     }
-    let mut child = command
+    let child = command
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()
-        .with_context(|| format!("failed to launch agent `{agent}`"))?;
+        .spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(error) => {
+            let restore_result =
+                restore_previous_preset(&client, kind, original.as_ref(), &target, &cwd).await;
+            return match restore_result {
+                Ok(()) => Err(error).with_context(|| format!("failed to launch agent `{agent}`")),
+                Err(restore_error) => Err(restore_error).context(format!(
+                    "failed to launch agent `{agent}`: {error}; configuration restore also failed"
+                )),
+            };
+        }
+    };
+
+    settle_agent_startup(
+        agent,
+        codex_model.as_deref(),
+        claude_startup_model.as_deref(),
+        startup_baseline.as_deref(),
+        &mut child,
+    )
+    .await;
+    let restore_result =
+        restore_previous_preset(&client, kind, original.as_ref(), &target, &cwd).await;
+    if let Err(error) = &restore_result {
+        eprintln!("Warning: agent started, but restoring the previous preset failed: {error}");
+    }
+
     let status = child
         .wait()
         .await
         .with_context(|| format!("failed to wait for agent `{agent}`"))?;
-    let terminal_restore = terminal_mode.restore();
-    if let Err(error) = terminal_restore {
+    if let Err(error) = terminal_mode.restore() {
         eprintln!("Warning: failed to restore terminal mode: {error}");
     }
+    restore_result?;
 
     if !status.success() {
         bail!("agent `{agent}` exited with status {status}");
@@ -742,18 +951,341 @@ async fn run_agent(kind: PresetKind, selector: &str, agent: &str, args: &[String
     Ok(())
 }
 
+/// Keep a managed Agent tied to the CLI wrapper that owns its terminal.
+/// Without this, an abrupt wrapper exit can orphan Codex while it still holds
+/// the thread writer lock, making the next `codex resume` fail with -32600.
+fn configure_agent_process_lifetime(command: &mut Command) {
+    command.kill_on_drop(true);
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+async fn restore_previous_preset(
+    client: &CliClient,
+    kind: PresetKind,
+    original: Option<&(PresetKind, PresetSummary)>,
+    target: &PresetSummary,
+    cwd: &Path,
+) -> Result<()> {
+    match original {
+        Some((orig_kind, original)) if *orig_kind != kind || original.id != target.id => {
+            let kind = *orig_kind;
+            let restored = client.apply(kind, original, Some(cwd), true).await?;
+            if restored.deferred {
+                bail!("restoring the previous preset was deferred");
+            }
+            Ok(())
+        }
+        Some(_) => Ok(()),
+        None => {
+            eprintln!(
+                "Warning: the original real configuration did not match a saved preset; leaving `{}` active.",
+                target.name
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Let the agent start natively before restoring the previous preset. A fresh
+/// startup signal (Codex `model:` banner, Claude startup banner) ends the wait
+/// after a short settle delay; a fixed fallback delay is the backstop when no
+/// signal is available or it never fires. Signals are advisory: an undetected
+/// or failed startup never kills the agent and never aborts the restore.
+async fn settle_agent_startup(
+    agent: &str,
+    expected_codex_model: Option<&str>,
+    expected_claude_model: Option<&str>,
+    startup_baseline: Option<&str>,
+    child: &mut Child,
+) {
+    let deadline = Instant::now() + AGENT_STARTUP_FALLBACK_DELAY;
+    let mut started_at = None;
+    if let Some(baseline) = startup_baseline {
+        let baseline_banner_count = claude_snapshot_banner_count(baseline);
+        let baseline_claude_model_count = expected_claude_model
+            .map(|model| claude_snapshot_model_count(baseline, model))
+            .unwrap_or_default();
+        let baseline_codex_model_count = expected_codex_model
+            .map(|model| terminal_snapshot_model_count(baseline, model))
+            .unwrap_or_default();
+        let is_claude = is_program(agent, "claude");
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                // The agent already exited; restore immediately and let the
+                // final wait report the exit status.
+                return;
+            }
+            if let Some(snapshot) = capture_current_tmux_pane().await
+                && snapshot != baseline
+                && (if is_claude {
+                    claude_snapshot_banner_count(&snapshot) > baseline_banner_count
+                        && expected_claude_model.is_none_or(|model| {
+                            claude_snapshot_model_count(&snapshot, model)
+                                > baseline_claude_model_count
+                        })
+                } else {
+                    expected_codex_model.is_some_and(|model| {
+                        terminal_snapshot_model_count(&snapshot, model) > baseline_codex_model_count
+                    })
+                })
+            {
+                started_at = Some(Instant::now());
+                break;
+            }
+            tokio::time::sleep(AGENT_STARTUP_POLL_INTERVAL).await;
+        }
+    }
+    match started_at {
+        Some(started_at) => {
+            let elapsed = started_at.elapsed();
+            if elapsed < AGENT_STARTUP_SETTLE_GRACE {
+                tokio::time::sleep(AGENT_STARTUP_SETTLE_GRACE - elapsed).await;
+            }
+        }
+        None => {
+            if startup_baseline.is_some() {
+                eprintln!(
+                    "Note: `{agent}` produced no fresh startup signal within {AGENT_STARTUP_FALLBACK_DELAY:?}; restoring the previous preset on the fixed fallback delay.",
+                );
+            }
+            let now = Instant::now();
+            if now < deadline {
+                tokio::time::sleep(deadline - now).await;
+            }
+        }
+    }
+}
+
+async fn capture_current_tmux_pane() -> Option<String> {
+    let pane = env::var("TMUX_PANE").ok()?;
+    if pane.trim().is_empty() {
+        return None;
+    }
+    let mut command = Command::new("tmux");
+    if let Some(socket) = tmux_socket_path_from_env() {
+        command.args(["-S", socket.as_str()]);
+    }
+    let output = command
+        .args(["capture-pane", "-p", "-t", pane.as_str(), "-S", "-200"])
+        .output()
+        .await
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn tmux_socket_path_from_env() -> Option<String> {
+    env::var("TMUX")
+        .ok()
+        .and_then(|value| tmux_socket_path(&value))
+}
+
+fn tmux_socket_path(value: &str) -> Option<String> {
+    value
+        .split(',')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn terminal_snapshot_model_count(snapshot: &str, expected_model: &str) -> usize {
+    snapshot
+        .lines()
+        .filter_map(terminal_line_model)
+        .filter(|model| model.eq_ignore_ascii_case(expected_model))
+        .count()
+}
+
+fn terminal_line_model(line: &str) -> Option<&str> {
+    let lower = line.to_ascii_lowercase();
+    if let Some(index) = lower.find("model:") {
+        return line
+            .get(index + "model:".len()..)
+            .map(|value| value.trim().trim_matches(['│', '|']).trim())
+            .and_then(|value| value.split_whitespace().next())
+            .filter(|value| !value.is_empty());
+    }
+
+    let value = line.trim().trim_matches(['│', '|']).trim();
+    value
+        .contains("· Context ")
+        .then(|| value.split_whitespace().next())
+        .flatten()
+        .filter(|model| !model.is_empty())
+}
+
+fn claude_snapshot_banner_count(snapshot: &str) -> usize {
+    snapshot
+        .lines()
+        .filter(|line| line.contains("Claude Code"))
+        .count()
+}
+
+fn claude_snapshot_model_count(snapshot: &str, expected_model: &str) -> usize {
+    snapshot
+        .lines()
+        .map(|line| line.trim().trim_matches(['│', '|']).trim())
+        .filter(|line| line.eq_ignore_ascii_case(expected_model))
+        .count()
+}
+
+fn is_program(candidate: &str, expected: &str) -> bool {
+    Path::new(candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
+}
+
+#[derive(Debug)]
+struct AppliedCodexSelection {
+    model: Option<String>,
+    model_provider: String,
+}
+
+fn read_applied_codex_selection(agent: &str, cwd: &Path) -> Result<Option<AppliedCodexSelection>> {
+    if Path::new(agent)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_none_or(|name| !name.eq_ignore_ascii_case("codex"))
+    {
+        return Ok(None);
+    }
+    let project_config = cwd.join(".codex/config.toml");
+    let profile = crate::runtime_paths::resolve_current_user_profile()
+        .context("failed to resolve the current terminal user")?;
+    let user_config = profile.home.join(".codex/config.toml");
+
+    let user_model = read_codex_model(&user_config)
+        .context("failed to read the Codex model from the applied user configuration")?;
+    let user_provider = read_codex_model_provider(&user_config)
+        .context("failed to read the Codex provider from the applied user configuration")?;
+    let project_model = if project_config.is_file() {
+        read_codex_model(&project_config)
+            .context("failed to read the Codex model from the applied project configuration")?
+    } else {
+        None
+    };
+    let project_provider = if project_config.is_file() {
+        read_codex_model_provider(&project_config)
+            .context("failed to read the Codex provider from the applied project configuration")?
+    } else {
+        None
+    };
+
+    Ok(Some(AppliedCodexSelection {
+        model: project_model.or(user_model),
+        model_provider: project_provider
+            .or(user_provider)
+            .unwrap_or_else(|| "openai".to_string()),
+    }))
+}
+
+fn read_applied_claude_model(agent: &str) -> Result<Option<String>> {
+    if !is_program(agent, "claude") {
+        return Ok(None);
+    }
+    let profile = crate::runtime_paths::resolve_current_user_profile()
+        .context("failed to resolve the current terminal user")?;
+    let settings_path = profile
+        .home
+        .join(auth_core::CLAUDE_SETTINGS_FILE_RELATIVE_PATH);
+    let content = std::fs::read_to_string(&settings_path)
+        .with_context(|| format!("failed to read {}", settings_path.display()))?;
+    let settings: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {}", settings_path.display()))?;
+    Ok(settings
+        .get("env")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|env| env.get("ANTHROPIC_MODEL"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn terminal_snapshot_model(snapshot: &str) -> Option<&str> {
+        snapshot.lines().rev().find_map(terminal_line_model)
+    }
+
+    #[cfg(unix)]
     #[test]
-    fn deployed_service_name_without_arguments_starts_server() {
-        assert_eq!(parse_args("webClx", Vec::<String>::new()), Ok(CliAction::Serve));
+    fn local_cli_discovers_sibling_api_token_without_environment_variables() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Cleanup(std::path::PathBuf);
+
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let fixture = std::env::current_dir().unwrap().join(".tmp").join(format!(
+            "webclx-cli-local-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture).unwrap();
+        let _cleanup = Cleanup(fixture.clone());
+        let executable = fixture.join("webClx");
+        std::fs::write(&executable, b"").unwrap();
+        let token_path = fixture.join(crate::auth_guard::LOCAL_API_TOKEN_FILE_NAME);
+        let token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        std::fs::write(&token_path, format!("{token}\n")).unwrap();
+        std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert_eq!(
+            local_api_token_from_sources("http://127.0.0.1:11111", None, None, Some(&executable),)
+                .as_deref(),
+            Some(token),
+            "an installed local CLI must authenticate without requiring token environment variables"
+        );
+        assert_eq!(
+            local_api_token_from_sources("http://HOST:PORT", None, None, Some(&executable),),
+            None,
+            "the installation-local token must never be sent to a remote webClx URL"
+        );
     }
 
     #[test]
-    fn cli_name_without_arguments_prints_help() {
-        assert_eq!(parse_args("webclx", Vec::<String>::new()), Ok(CliAction::Help(None)));
+    fn cli_does_not_surface_webui_session_expiry_errors() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-WebClx-Auth", "required".parse().unwrap());
+
+        let message = cli_api_error_message(
+            StatusCode::UNAUTHORIZED,
+            &headers,
+            "未登录或会话已过期".as_bytes(),
+        );
+
+        assert!(message.contains("CLI local authentication failed"));
+        assert!(!message.contains("会话已过期"));
+    }
+
+    #[test]
+    fn deployed_service_name_without_arguments_starts_server() {
+        assert_eq!(parse_args("webClx", Vec::<String>::new()), Ok(CliAction::Serve));
+        assert_eq!(parse_args("webclx", Vec::<String>::new()), Ok(CliAction::Serve));
+        assert_eq!(parse_args("webclx.exe", Vec::<String>::new()), Ok(CliAction::Serve));
     }
 
     #[test]
@@ -782,15 +1314,15 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_args(
-                "webclx",
-                ["run", "claude", "work", "claude", "--continue"].map(String::from)
-            ),
-            Ok(CliAction::Run {
-                kind: PresetKind::Claude,
-                selector: "work".to_string(),
-                agent: "claude".to_string(),
-                args: vec!["--continue".to_string()],
+            parse_args("webclx", ["close", "s100"].map(String::from)),
+            Ok(CliAction::Close {
+                session_id: "s100".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_args("webclx", ["terminal", "close", "s100"].map(String::from)),
+            Ok(CliAction::Close {
+                session_id: "s100".to_string(),
             })
         );
     }
@@ -854,6 +1386,56 @@ mod tests {
             resolve_preset_for_kind(PresetKind::OAuth, &presets, "GPT-5.6-SOL").is_err(),
             "model fallback is only valid for Codex API presets"
         );
+    }
+
+    #[test]
+    fn startup_probe_uses_the_latest_banner_model_and_requires_a_new_occurrence() {
+        let baseline = "│ model: gpt-old │\n│ model: gpt-target │\n";
+        let started = "│ model: gpt-old │\n│ model: gpt-target │\n│ model: GPT-TARGET │\n";
+
+        assert_eq!(terminal_snapshot_model(baseline), Some("gpt-target"));
+        assert_eq!(terminal_snapshot_model_count(baseline, "gpt-target"), 1);
+        assert_eq!(terminal_snapshot_model_count(started, "gpt-target"), 2);
+    }
+
+    #[test]
+    fn codex_startup_probe_ignores_effort_and_model_menu_hint() {
+        let banner = "│ model:       gpt-5.6-sol medium   /model to change │\n";
+
+        assert_eq!(terminal_snapshot_model(banner), Some("gpt-5.6-sol"));
+        assert_eq!(terminal_snapshot_model_count(banner, "gpt-5.6-sol"), 1);
+    }
+
+    #[test]
+    fn codex_startup_probe_accepts_resume_footer_model() {
+        let footer = "  gpt-5.6-sol medium · Context 19% used · Fast on\n";
+
+        assert_eq!(terminal_snapshot_model(footer), Some("gpt-5.6-sol"));
+        assert_eq!(terminal_snapshot_model_count(footer, "gpt-5.6-sol"), 1);
+    }
+
+    #[test]
+    fn tmux_socket_path_comes_from_the_current_isolated_server() {
+        assert_eq!(
+            tmux_socket_path("/tmp/tmux-0/webclx_s4942,1046692,0").as_deref(),
+            Some("/tmp/tmux-0/webclx_s4942")
+        );
+    }
+
+    #[test]
+    fn tmux_socket_path_ignores_missing_or_malformed_values() {
+        for value in ["", ",1046692,0"] {
+            assert_eq!(tmux_socket_path(value), None);
+        }
+    }
+
+    #[test]
+    fn claude_startup_probe_requires_a_fresh_matching_banner() {
+        let baseline = "╭─ Claude Code ─╮\n│ GLM-5.3 │\n";
+        let started = "╭─ Claude Code ─╮\n│ GLM-5.3 │\n╭─ Claude Code ─╮\n│ glm-5.3 │\n";
+
+        assert_eq!(claude_snapshot_model_count(baseline, "GLM-5.3"), 1);
+        assert_eq!(claude_snapshot_model_count(started, "GLM-5.3"), 2);
     }
 
     #[cfg(unix)]

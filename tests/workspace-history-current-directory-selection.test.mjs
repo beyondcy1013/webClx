@@ -26,7 +26,7 @@ function createHarness(activeTab = "workspace") {
   const state = {
     activeTab,
     activeSettingsTab: "system",
-    currentWorkspaceDirectoryPath: "/home/codes/webClx",
+    currentWorkspaceDirectoryPath: "/home/codes/tools/webClx",
     workspaceDir: "/home/codes",
     workspaceHistorySelectedPath: "/home/codes/other",
     workspaceHistorySettingsReady: false,
@@ -75,8 +75,8 @@ test("entering workspace history locates the browser current directory", () => {
 
   harness.context.setActiveTab("workspace-history");
 
-  assert.equal(harness.state.workspaceHistorySelectedPath, "/home/codes/webClx");
-  assert.deepEqual(harness.renderedSelections, ["/home/codes/webClx"]);
+  assert.equal(harness.state.workspaceHistorySelectedPath, "/home/codes/tools/webClx");
+  assert.deepEqual(harness.renderedSelections, ["/home/codes/tools/webClx"]);
 });
 
 test("rerendering the active history tab preserves its manual directory selection", () => {

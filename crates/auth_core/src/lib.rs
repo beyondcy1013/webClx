@@ -17,14 +17,14 @@ pub(crate) use config::{
 };
 pub use config::{
     clear_provider_and_set_config_entry_in_config_content, clear_provider_in_config_content,
-    merge_codex_snapshot_projects_in_config_content, parse_claude_settings_document,
-    set_api_provider_and_config_entry_in_config_content, set_claude_settings_in_value,
+    is_local_webclx_api_url, merge_codex_snapshot_projects_in_config_content,
+    parse_claude_settings_document, set_api_provider_and_config_entry_in_config_content,
+    set_api_provider_in_config_content, set_claude_settings_in_value,
     set_claude_settings_in_value_with_endpoint, set_local_proxy_auth_header_in_config_content,
 };
 #[cfg(test)]
 pub(crate) use config::{
     clear_provider_and_set_model_in_config_content, set_api_provider_and_model_in_config_content,
-    set_api_provider_in_config_content,
 };
 pub use current::{
     read_current_auth_state, read_current_claude_state, read_current_config_provider,
@@ -34,12 +34,14 @@ pub use models::{
     ApiResponsesProxyMode, ApplyApiPresetResponse, ApplyAuthPresetResponse,
     ApplyClaudePresetResponse, ApplyCurrentAuthRequest, ApplyCurrentAuthResponse, AuthFile,
     AuthPresetDetails, AuthPresetListResponse, AuthPresetManager, AuthPresetSummary, AuthTokens,
-    ClaudeAccessMode, ClaudePresetListResponse, ClaudePresetSummary, CodexAuthHttpClientProvider,
-    CodexOAuthManager, CodexOAuthSession, CodexOAuthSessionResponse, CodexOAuthSessionStatus,
-    ConfigProviderState, CurrentApiState, CurrentApiSummary, CurrentAuthMode, CurrentAuthState,
-    CurrentAuthSummary, CurrentClaudeState, CurrentClaudeSummary, DeleteApiPresetResponse,
-    DeleteAuthPresetResponse, DeleteClaudePresetResponse, ImportApiAccountsRequest,
-    ImportApiAccountsResponse, PendingCodexDeviceLogin, PresetConfigOverride, PresetTerminalEnvVar,
+    ClaudeAccessMode, ClaudePresetListResponse, ClaudePresetSummary, CodexAccountApplyResponse,
+    CodexAccountKind, CodexAccountListResponse, CodexAccountSummary, CodexAuthHttpClientProvider,
+    CodexOAuthFlow, CodexOAuthManager, CodexOAuthSession, CodexOAuthSessionResponse,
+    CodexOAuthSessionStatus, CodexReferralInfo, CodexResetCreditResult, ConfigProviderState,
+    CurrentApiState, CurrentApiSummary, CurrentAuthMode, CurrentAuthState, CurrentAuthSummary,
+    CurrentClaudeState, CurrentClaudeSummary, DeleteApiPresetResponse, DeleteAuthPresetResponse,
+    DeleteClaudePresetResponse, ImportApiAccountsRequest, ImportApiAccountsResponse,
+    PendingCodexDeviceLogin, PresetConfigOverride, PresetTerminalEnvVar,
     RefreshAllAuthPresetsResponse, RefreshAuthPresetFailure, ResolvedConfigTarget,
     SaveApiPresetRequest, SaveApiPresetResponse, SaveAuthPresetRequest, SaveAuthPresetResponse,
     SaveClaudePresetRequest, SaveClaudePresetResponse, StoredApiPreset, StoredAuthPreset,
@@ -54,9 +56,12 @@ pub(crate) use models::{
 #[cfg(test)]
 pub(crate) use models::{CodexRateLimit, CodexUsageWindow};
 pub use oauth::{
-    build_codex_device_authorize_url, codex_oauth_session_response, complete_codex_device_login,
-    extract_account_id_from_auth, parse_codex_device_poll_interval,
-    refresh_stored_auth_preset_quota, request_codex_device_user_code, summarize_remote_body,
+    PendingCodexBrowserLogin, build_codex_device_authorize_url, codex_oauth_session_response,
+    complete_codex_browser_login, complete_codex_device_login, consume_codex_reset_credit,
+    create_codex_browser_login, current_rfc3339_timestamp, extract_account_id_from_auth,
+    fetch_codex_referral_eligibility, parse_codex_browser_callback,
+    parse_codex_device_poll_interval, refresh_codex_tokens, refresh_stored_auth_preset_quota,
+    request_codex_device_user_code, send_codex_referral_invite, summarize_remote_body,
     touch_auth_last_refresh,
 };
 pub use selection::{
@@ -108,6 +113,7 @@ const CLAUDE_DEFAULT_OPUS_MODEL_KEY: &str = "ANTHROPIC_DEFAULT_OPUS_MODEL";
 const CLAUDE_MODEL_KEY: &str = "ANTHROPIC_MODEL";
 const CLAUDE_LEGACY_SMALL_FAST_MODEL_KEY: &str = "ANTHROPIC_SMALL_FAST_MODEL";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_USAGE_USER_AGENT: &str = "CodexBar";
@@ -116,6 +122,9 @@ const CODEX_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/devic
 pub const CODEX_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 const CODEX_DEVICE_TOKEN_EXCHANGE_REDIRECT_URI: &str =
     "https://auth.openai.com/deviceauth/callback";
+const CODEX_BROWSER_TOKEN_EXCHANGE_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+const CODEX_OAUTH_SCOPE: &str =
+    "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const CODEX_DEVICE_TIMEOUT_SECS: u64 = 15 * 60;
 const CODEX_DEVICE_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 const CODEX_OAUTH_SESSION_RETENTION_SECS: u64 = 60 * 60;
@@ -180,7 +189,13 @@ pub fn preset_summary(
         account_id: preset.auth.tokens.account_id.clone(),
         last_refresh: preset.auth.last_refresh.clone(),
         saved_at: preset.saved_at,
-        active: current_auth == Some(&preset.auth),
+        active: current_auth.is_some_and(|current| {
+            if !current.tokens.account_id.is_empty() && !preset.auth.tokens.account_id.is_empty() {
+                current.tokens.account_id == preset.auth.tokens.account_id
+            } else {
+                current.tokens.access_token == preset.auth.tokens.access_token
+            }
+        }),
         details: merge_auth_preset_details(&preset.details, &preset.auth),
         config_overrides: preset.config_overrides.clone(),
         config_key,
@@ -206,6 +221,10 @@ pub fn api_preset_summary_with_proxy_state(
     current_api: Option<&CurrentApiState>,
     upstream_proxy: &UpstreamProxySettings,
 ) -> ApiPresetSummary {
+    if current_mode != CurrentAuthMode::Api {
+        return api_preset_summary_with_active(preset, current_mode, current_api, Some(false));
+    }
+
     if current_mode == CurrentAuthMode::Api && current_api.is_some() {
         return api_preset_summary_with_active(
             preset,
@@ -283,6 +302,7 @@ fn api_preset_summary_with_active(
         account_id: is_chatgpt_oauth.then(|| preset.account_id.clone()),
         saved_at: preset.saved_at,
         active,
+        favorite: preset.favorite,
         switch_count: preset.switch_count,
     }
 }
@@ -316,11 +336,7 @@ pub fn api_preset_has_current_applied_api_credentials(
 ) -> bool {
     let use_local_proxy = api_preset_enables_local_upstream_proxy_on_apply(preset);
     let provider_base_url = api_provider_base_url_for_mode(preset, use_local_proxy);
-    let expected_api_key = if use_local_proxy {
-        local_proxy_api_key_for_preset_id(&preset.id)
-    } else {
-        preset.api_key.clone()
-    };
+    let expected_api_key = api_provider_api_key_for_mode(preset, use_local_proxy);
     let expected_wire_api = api_provider_options(preset).wire_api;
     current_mode == CurrentAuthMode::Api
         && current_api.is_some_and(|current| {
@@ -589,17 +605,12 @@ fn api_preset_credentials_match(
     current_auth: Option<&CurrentAuthState>,
 ) -> bool {
     let expected_wire_api = api_provider_options(preset).wire_api;
-    let current_key = current_auth.and_then(CurrentAuthState::api_key);
-    let wire_api_matches =
-        config.wire_api.as_deref().unwrap_or(WEBCLX_API_WIRE_API) == expected_wire_api;
-    let direct_matches = current_key == Some(preset.api_key.as_str())
-        && config.base_url.as_deref() == Some(api_provider_base_url(preset).as_str());
-    let local_proxy_base_url = api_provider_base_url_for_mode(preset, true);
-    let local_proxy_api_key = local_proxy_api_key_for_preset_id(&preset.id);
-    let local_proxy_matches = api_preset_enables_local_upstream_proxy_on_apply(preset)
-        && current_key == Some(local_proxy_api_key.as_str())
-        && config.base_url.as_deref() == Some(local_proxy_base_url.as_str());
-    wire_api_matches && (direct_matches || local_proxy_matches)
+    let use_local_proxy = api_preset_enables_local_upstream_proxy_on_apply(preset);
+    let provider_base_url = api_provider_base_url_for_mode(preset, use_local_proxy);
+    let expected_api_key = api_provider_api_key_for_mode(preset, use_local_proxy);
+    config.wire_api.as_deref().unwrap_or(WEBCLX_API_WIRE_API) == expected_wire_api
+        && current_auth.and_then(CurrentAuthState::api_key) == Some(expected_api_key.as_str())
+        && config.base_url.as_deref() == Some(provider_base_url.as_str())
 }
 
 /// 判断预设的 config_overrides 是否全部与当前 config.toml 实际取值一致。
@@ -794,6 +805,8 @@ pub fn sanitize_auth_preset_details(details: AuthPresetDetails) -> AuthPresetDet
         hourly_reset_time: details.hourly_reset_time,
         weekly_percentage: details.weekly_percentage,
         weekly_reset_time: details.weekly_reset_time,
+        reset_credit_count: details.reset_credit_count,
+        codex_points: sanitize_optional_text(details.codex_points),
     }
 }
 
@@ -1325,10 +1338,25 @@ pub fn api_provider_base_url(preset: &StoredApiPreset) -> String {
 }
 
 pub fn api_provider_base_url_for_mode(preset: &StoredApiPreset, proxy_enabled: bool) -> String {
-    if proxy_enabled {
+    if proxy_enabled
+        && matches!(
+            effective_api_responses_proxy(preset),
+            Some(ApiResponsesProxyMode::AnthropicChat)
+        )
+    {
+        api_provider_base_url(preset)
+    } else if proxy_enabled {
         format!("{}{}", local_webclx_origin(), OPENAI_UPSTREAM_PROXY_BASE_PATH)
     } else {
         api_provider_base_url(preset)
+    }
+}
+
+pub fn api_provider_api_key_for_mode(preset: &StoredApiPreset, proxy_enabled: bool) -> String {
+    if is_local_webclx_api_url(&api_provider_base_url_for_mode(preset, proxy_enabled)) {
+        local_proxy_api_key_for_preset_id(&preset.id)
+    } else {
+        preset.api_key.clone()
     }
 }
 
@@ -1480,6 +1508,8 @@ fn merge_auth_preset_details(stored: &AuthPresetDetails, auth: &AuthFile) -> Aut
         hourly_reset_time: stored.hourly_reset_time.or(derived.hourly_reset_time),
         weekly_percentage: stored.weekly_percentage.or(derived.weekly_percentage),
         weekly_reset_time: stored.weekly_reset_time.or(derived.weekly_reset_time),
+        reset_credit_count: stored.reset_credit_count,
+        codex_points: stored.codex_points.clone(),
     }
 }
 
@@ -1517,6 +1547,23 @@ fn merge_refreshed_auth_preset_details(
         weekly_reset_time: secondary_window
             .and_then(|window| window.reset_at)
             .or(stored.weekly_reset_time),
+        reset_credit_count: usage
+            .rate_limit_reset_credits
+            .as_ref()
+            .and_then(|credits| credits.available_count)
+            .or(stored.reset_credit_count),
+        codex_points: usage
+            .credits
+            .as_ref()
+            .map(|credits| {
+                if credits.unlimited {
+                    "∞".to_string()
+                } else {
+                    credits.balance.clone().unwrap_or_default()
+                }
+            })
+            .filter(|value| !value.is_empty())
+            .or_else(|| stored.codex_points.clone()),
     }
 }
 
@@ -1533,7 +1580,7 @@ fn round_percentage(value: Option<f64>) -> Option<u64> {
         .map(|value| value.clamp(0.0, 100.0).round() as u64)
 }
 
-fn derive_auth_preset_details(auth: &AuthFile) -> AuthPresetDetails {
+pub fn derive_auth_preset_details(auth: &AuthFile) -> AuthPresetDetails {
     let id_payload = decode_jwt_payload(&auth.tokens.id_token);
     let access_payload = decode_jwt_payload(&auth.tokens.access_token);
     let auth_claim = id_payload
@@ -1633,8 +1680,13 @@ fn normalize_login_method_label(value: String) -> String {
 pub struct ImportedAccount {
     pub access_token: String,
     pub account_id: String,
+    pub id_token: String,
+    pub refresh_token: String,
     pub name: String,
     pub email: String,
+    pub plan_type: String,
+    pub last_refresh: String,
+    pub is_sub2api_data: bool,
 }
 
 /// Parse imported account JSON text and extract access_token + account_id for each account.
@@ -1650,91 +1702,16 @@ pub fn parse_imported_accounts(raw_text: &str) -> Result<Vec<ImportedAccount>> {
     }
 
     let mut accounts = Vec::new();
-    for value in &values {
-        collect_imported_account_values(value, &mut accounts);
-    }
-
     let mut result = Vec::new();
-    for account in &accounts {
-        let credentials = account
-            .get("credentials")
-            .filter(|v| v.is_object())
-            .or_else(|| account.get("tokens").filter(|v| v.is_object()))
-            .unwrap_or(account);
+    for value in &values {
+        let is_sub2api_data = value.get("type").and_then(Value::as_str) == Some("sub2api-data")
+            || value.get("format").and_then(Value::as_str) == Some("sub2api");
+        collect_imported_account_values(value, &mut accounts);
 
-        let access_token = first_json_string(&[
-            credentials.get("access_token").and_then(Value::as_str),
-            credentials.get("accessToken").and_then(Value::as_str),
-            credentials.get("token").and_then(Value::as_str),
-            account.get("access_token").and_then(Value::as_str),
-            account.get("accessToken").and_then(Value::as_str),
-            account.get("token").and_then(Value::as_str),
-        ])
-        .unwrap_or_default();
-        if access_token.is_empty() {
-            continue;
+        for account in &accounts {
+            result.extend(parse_imported_account(account, value, is_sub2api_data)?);
         }
-
-        let explicit_account_id = first_json_string(&[
-            credentials
-                .get("chatgpt_account_id")
-                .and_then(Value::as_str),
-            credentials.get("account_id").and_then(Value::as_str),
-            credentials.get("chatgptAccountId").and_then(Value::as_str),
-            credentials.get("accountId").and_then(Value::as_str),
-            account.get("chatgpt_account_id").and_then(Value::as_str),
-            account.get("account_id").and_then(Value::as_str),
-            account.get("chatgptAccountId").and_then(Value::as_str),
-            account.get("accountId").and_then(Value::as_str),
-        ]);
-
-        let account_id = explicit_account_id
-            .clone()
-            .or_else(|| {
-                let payload = decode_jwt_payload(&access_token)?;
-                payload
-                    .get("https://api.openai.com/auth.chatgpt_account_id")
-                    .and_then(Value::as_str)
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        payload
-                            .get("https://api.openai.com/auth")?
-                            .get("chatgpt_account_id")
-                            .and_then(Value::as_str)
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty())
-                    })
-            })
-            .unwrap_or_default();
-
-        let extra = account.get("extra").filter(|v| v.is_object());
-        let name = first_json_string(&[
-            account.get("name").and_then(Value::as_str),
-            account.get("email").and_then(Value::as_str),
-        ])
-        .unwrap_or_else(|| {
-            if !account_id.is_empty() {
-                let start = account_id.len().saturating_sub(6);
-                format!("账号 {}", &account_id[start..])
-            } else {
-                "未命名账号".to_string()
-            }
-        });
-
-        let email = first_json_string(&[
-            credentials.get("email").and_then(Value::as_str),
-            account.get("email").and_then(Value::as_str),
-            extra.and_then(|e| e.get("email")).and_then(Value::as_str),
-        ])
-        .unwrap_or_default();
-
-        result.push(ImportedAccount {
-            access_token,
-            account_id,
-            name,
-            email,
-        });
+        accounts.clear();
     }
 
     if result.is_empty() {
@@ -1742,6 +1719,129 @@ pub fn parse_imported_accounts(raw_text: &str) -> Result<Vec<ImportedAccount>> {
     }
 
     Ok(result)
+}
+
+fn parse_imported_account(
+    account: &Value,
+    bundle: &Value,
+    is_sub2api_data: bool,
+) -> Result<Option<ImportedAccount>> {
+    let credentials = account
+        .get("credentials")
+        .filter(|v| v.is_object())
+        .or_else(|| account.get("tokens").filter(|v| v.is_object()))
+        .unwrap_or(account);
+
+    let access_token = first_json_string(&[
+        credentials.get("access_token").and_then(Value::as_str),
+        credentials.get("accessToken").and_then(Value::as_str),
+        credentials.get("token").and_then(Value::as_str),
+        account.get("access_token").and_then(Value::as_str),
+        account.get("accessToken").and_then(Value::as_str),
+        account.get("token").and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+    if access_token.is_empty() {
+        return Ok(None);
+    }
+
+    let explicit_account_id = first_json_string(&[
+        credentials
+            .get("chatgpt_account_id")
+            .and_then(Value::as_str),
+        credentials.get("account_id").and_then(Value::as_str),
+        credentials.get("chatgptAccountId").and_then(Value::as_str),
+        credentials.get("accountId").and_then(Value::as_str),
+        account.get("chatgpt_account_id").and_then(Value::as_str),
+        account.get("account_id").and_then(Value::as_str),
+        account.get("chatgptAccountId").and_then(Value::as_str),
+        account.get("accountId").and_then(Value::as_str),
+    ]);
+
+    let account_id = explicit_account_id
+        .clone()
+        .or_else(|| {
+            let payload = decode_jwt_payload(&access_token)?;
+            payload
+                .get("https://api.openai.com/auth.chatgpt_account_id")
+                .and_then(Value::as_str)
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    payload
+                        .get("https://api.openai.com/auth")?
+                        .get("chatgpt_account_id")
+                        .and_then(Value::as_str)
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+        })
+        .unwrap_or_default();
+
+    let extra = account.get("extra").filter(|v| v.is_object());
+    let name = first_json_string(&[
+        account.get("name").and_then(Value::as_str),
+        account.get("email").and_then(Value::as_str),
+    ])
+    .unwrap_or_else(|| {
+        if !account_id.is_empty() {
+            let start = account_id.len().saturating_sub(6);
+            format!("账号 {}", &account_id[start..])
+        } else {
+            "未命名账号".to_string()
+        }
+    });
+
+    let email = first_json_string(&[
+        credentials.get("email").and_then(Value::as_str),
+        account.get("email").and_then(Value::as_str),
+        extra.and_then(|e| e.get("email")).and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+    let plan_type = first_json_string(&[
+        credentials.get("plan_type").and_then(Value::as_str),
+        credentials.get("planType").and_then(Value::as_str),
+        credentials.get("plan").and_then(Value::as_str),
+        account.get("plan_type").and_then(Value::as_str),
+        account.get("planType").and_then(Value::as_str),
+        account.get("plan").and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+    let last_refresh = first_json_string(&[
+        credentials.get("last_refresh").and_then(Value::as_str),
+        account.get("last_refresh").and_then(Value::as_str),
+        extra
+            .and_then(|e| e.get("last_refresh"))
+            .and_then(Value::as_str),
+        bundle.get("exported_at").and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+    let id_token = first_json_string(&[
+        credentials.get("id_token").and_then(Value::as_str),
+        credentials.get("idToken").and_then(Value::as_str),
+        account.get("id_token").and_then(Value::as_str),
+        account.get("idToken").and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+    let refresh_token = first_json_string(&[
+        credentials.get("refresh_token").and_then(Value::as_str),
+        credentials.get("refreshToken").and_then(Value::as_str),
+        account.get("refresh_token").and_then(Value::as_str),
+        account.get("refreshToken").and_then(Value::as_str),
+    ])
+    .unwrap_or_default();
+
+    Ok(Some(ImportedAccount {
+        access_token,
+        account_id,
+        id_token,
+        refresh_token,
+        name,
+        email,
+        plan_type,
+        last_refresh,
+        is_sub2api_data,
+    }))
 }
 
 fn collect_imported_account_values<'a>(value: &'a Value, accounts: &mut Vec<&'a Value>) {

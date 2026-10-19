@@ -22,6 +22,6 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /terminal-navigation-layout\.js\?v=20260803b/,
+  /terminal-navigation-layout\.js\?v=20261015-scroll-geometry/,
   "terminal page should invalidate cached navigation layout code after the typing repaint fix",
 );

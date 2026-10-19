@@ -142,28 +142,32 @@ function formatTerminalAutoContinueTimePatterns(patterns) {
 // Normalize an unattended active-window string into `HH:MM-HH:MM` (24h).
 // Empty / malformed values become "" (feature disabled).
 function normalizeTerminalAutoContinueActiveWindow(value) {
+  return normalizeTerminalTimeWindow(value, true);
+}
+
+// Avoid windows use clock times on the same/cross-midnight calendar cycle;
+// unlike an all-day active window, 24:00 is not a valid endpoint here.
+function normalizeTerminalScheduledInputAvoidWindow(value) {
+  return normalizeTerminalTimeWindow(value, false);
+}
+
+function normalizeTerminalTimeWindow(value, allowNextDayEndpoint) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   const dash = raw.indexOf("-");
   if (dash <= 0) return "";
   const start = raw.slice(0, dash).trim();
   const end = raw.slice(dash + 1).trim();
-  if (!isValidHhMm(start) || !isValidHhMm(end)) return "";
+  if (!isValidHhMm(start, false) || !isValidHhMm(end, allowNextDayEndpoint)) return "";
   return `${start}-${end}`;
 }
 
-// Normalize a scheduled-input avoid-window string into `HH:MM-HH:MM` (24h).
-// Same rules as the active window: empty / malformed → "" (disabled).
-function normalizeTerminalScheduledInputAvoidWindow(value) {
-  return normalizeTerminalAutoContinueActiveWindow(value);
-}
-
-function isValidHhMm(value) {
+function isValidHhMm(value, allowNextDayEndpoint = false) {
   const match = /^(\d{2}):(\d{2})$/.exec(value);
   if (!match) return false;
   const h = Number(match[1]);
   const m = Number(match[2]);
-  return h >= 0 && h < 24 && m >= 0 && m < 60;
+  return m >= 0 && m < 60 && (h < 24 || (allowNextDayEndpoint && h === 24 && m === 0));
 }
 
 function normalizeTerminalErrorKeywords(keywords) {
@@ -287,6 +291,16 @@ function renderTerminalRenamePresetsSetting(presets) {
 
 function readTerminalRenamePresetsFromInput() {
   return parseTerminalRenamePresetsInput(terminalRenamePresetsInputEl?.value || "");
+}
+
+function renderTerminalAgentCommandsSetting(commands) {
+  if (terminalAgentCommandsInputEl) {
+    terminalAgentCommandsInputEl.value = formatTerminalAgentCommands(commands);
+  }
+}
+
+function readTerminalAgentCommandsFromInput() {
+  return parseTerminalAgentCommandsInput(terminalAgentCommandsInputEl?.value || "");
 }
 
 function normalizeAvailableUsers(users, selectedUser = DEFAULT_TERMINAL_USER) {

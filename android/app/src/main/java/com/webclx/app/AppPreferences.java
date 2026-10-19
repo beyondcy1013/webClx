@@ -8,6 +8,7 @@ final class AppPreferences {
     static final String FILE = "app_settings";
     static final String KEY_THEME_MODE = "theme.mode";
     static final String KEY_TEXT_ZOOM = "display.text_zoom";
+    static final String KEY_SCREEN_ORIENTATION = "display.screen_orientation";
     static final String KEY_START_PATH = "general.start_path";
     static final String KEY_SOURCE_MODE = "data_source.mode";
     static final String KEY_AUTO_UPDATE = "update.auto_check";
@@ -18,6 +19,9 @@ final class AppPreferences {
     static final String THEME_LIGHT = "light";
     static final String THEME_DARK = "dark";
     static final String SOURCE_AUTO = "auto";
+    static final String ORIENTATION_PORTRAIT = "portrait";
+    static final String ORIENTATION_LANDSCAPE = "landscape";
+    static final String ORIENTATION_SYSTEM = "system";
 
     private AppPreferences() {}
 
@@ -50,6 +54,15 @@ final class AppPreferences {
     static int textZoom(Context context) {
         int value = get(context).getInt(KEY_TEXT_ZOOM, 100);
         return value == 85 || value == 100 || value == 115 || value == 130 ? value : 100;
+    }
+
+    static String screenOrientation(Context context) {
+        String value = get(context).getString(KEY_SCREEN_ORIENTATION, ORIENTATION_PORTRAIT);
+        return ORIENTATION_PORTRAIT.equals(value)
+            || ORIENTATION_LANDSCAPE.equals(value)
+            || ORIENTATION_SYSTEM.equals(value)
+            ? value
+            : ORIENTATION_PORTRAIT;
     }
 
     static String startPath(Context context) {

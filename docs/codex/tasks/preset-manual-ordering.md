@@ -3,6 +3,7 @@
 Stable conclusions:
 
 - Codex_OAuth, Codex_API, and Claude_API preset tables persist manual order by rewriting the existing `Vec<Stored...Preset>` in the requested id order. Reordering must not update `saved_at`, active state, generated config files, or preset secrets.
+- The unified `/api/auth/codex-accounts` response preserves each preset vector's manual order. It must not re-sort accounts by `saved_at`, because the default Codex_API-only account table is also an ordering view.
 - Proxy presets must be stored and listed as an ordered `Vec<ProxyPreset>`. A `HashMap` loses user-controlled order and makes table order unstable across reloads.
 - Reorder APIs accept a complete id list and reject missing, duplicate, empty, or unknown ids so stale browser state cannot silently drop presets.
 - Frontend manual move buttons clear the temporary table sort state before saving, so the persisted manual order is visible immediately.

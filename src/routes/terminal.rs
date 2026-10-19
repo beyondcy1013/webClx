@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    routing::{delete, get, patch, post, put},
+    routing::{delete, get, post, put},
 };
 
 use crate::{AppState, codex_conversation_model, config_files, terminal};
@@ -26,7 +26,9 @@ pub(super) fn routes() -> Router<AppState> {
         )
         .route(
             "/api/terminal/scheduled-inputs/{task_id}",
-            patch(terminal::update_scheduled_input).delete(terminal::delete_scheduled_input),
+            get(terminal::scheduled_input_status)
+                .patch(terminal::update_scheduled_input)
+                .delete(terminal::delete_scheduled_input),
         )
         .route("/api/terminal/sessions/message", post(terminal::send_session_message))
         .route(
@@ -43,7 +45,13 @@ pub(super) fn routes() -> Router<AppState> {
                 .patch(terminal::update_session_origin)
                 .delete(terminal::delete_session),
         )
+        .route(
+            "/api/terminal/sessions/{session_id}/close",
+            post(terminal::close_session).delete(terminal::close_session),
+        )
+        .route("/api/terminal/sessions/{session_id}/group", put(terminal::update_session_group))
         .route("/api/terminal/sessions/{session_id}/input", post(terminal::send_session_input))
+        .route("/api/terminal/sessions/{session_id}/enter", post(terminal::send_session_enter))
         .route(
             "/api/terminal/sessions/{session_id}/extract-preset",
             post(terminal::extract_session_preset),
@@ -61,6 +69,10 @@ pub(super) fn routes() -> Router<AppState> {
             get(terminal::get_session_input_history),
         )
         .route(
+            "/api/terminal/sessions/{session_id}/message-delivery",
+            get(terminal::get_session_message_delivery),
+        )
+        .route(
             "/api/terminal/sessions/{session_id}/agents-doc",
             get(terminal::read_session_agents_doc).put(terminal::save_session_agents_doc),
         )
@@ -73,6 +85,7 @@ pub(super) fn routes() -> Router<AppState> {
             post(terminal::upload_paste_assets),
         )
         .route("/api/terminal/sessions/{session_id}/idle", put(terminal::idle_session))
+        .route("/api/terminal/sessions/{session_id}/hide", put(terminal::hide_session))
         .route("/api/terminal/sessions/{session_id}/restore", put(terminal::restore_session))
         .route(
             "/api/terminal/sessions/{session_id}/current-directory",
@@ -111,6 +124,16 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/terminal/resume-archives/{archive_id}/touch",
             put(terminal::touch_resume_archive),
+        )
+        .route(
+            "/api/terminal/workspace-restores",
+            get(terminal::list_workspace_restores)
+                .post(terminal::restore_terminal_workspaces)
+                .put(terminal::refresh_workspace_restores),
+        )
+        .route(
+            "/api/terminal/workspace-restores/{session_id}",
+            delete(terminal::delete_workspace_restore),
         )
         .route("/api/terminal/ws", get(terminal::terminal_ws))
 }

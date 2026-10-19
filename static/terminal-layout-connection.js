@@ -5,9 +5,12 @@
 // ── Reconnect failure tracking & automatic server re-evaluation ──────────────
 // When the WebSocket disconnects repeatedly, the current server may be
 // unreachable.  Instead of blindly retrying the same host forever, we trigger
-// TERMINAL_SERVER_PROBE.reevaluate() after a few consecutive failures to find
-// and switch to a faster reachable candidate.
+// TERMINAL_SERVER_PROBE.reevaluate() after a few consecutive failures.
+// reevaluate() itself enforces a 60s grace window: a short outage (the webClx
+// service restarting itself) resets as soon as the current origin answers
+// again, and never triggers a switch to another server.
 const RECONNECT_FAILURE_THRESHOLD = 3;
+const TERMINAL_RECONNECT_MAX_DELAY_MS = 30000;
 let terminalReconnectFailures = 0;
 let terminalServerProbeInFlight = false;
 
@@ -31,12 +34,40 @@ window.addEventListener("online", () => {
   maybeReevaluateServer("online");
 });
 
-function syncTerminalSize({ force = false } = {}) {
+function terminalLocalFitSize(context = activeTerminalContext) {
+  if (!context?.fitAddon || typeof context.fitAddon.proposeDimensions !== "function") {
+    return null;
+  }
+
+  const previousZoom = terminalHost?.style.zoom || "";
+  const previousWidth = terminalHost?.style.width || "";
+  const previousMaxWidth = terminalHost?.style.maxWidth || "";
+  if (terminalHost) {
+    terminalHost.style.zoom = "";
+    terminalHost.style.width = "";
+    terminalHost.style.maxWidth = "";
+  }
+  const proposed = context.fitAddon.proposeDimensions();
+  if (terminalHost) {
+    terminalHost.style.zoom = previousZoom;
+    terminalHost.style.width = previousWidth;
+    terminalHost.style.maxWidth = previousMaxWidth;
+  }
+  if (!proposed) {
+    return null;
+  }
+  return {
+    cols: Math.max(Math.trunc(Number(proposed.cols) || 0), 2),
+    rows: Math.max(Math.trunc(Number(proposed.rows) || 0), 2),
+  };
+}
+
+function syncTerminalSize({ force = false, size = null } = {}) {
   const context = activeTerminalContext;
   if (!context || context.term !== term) {
     return;
   }
-  const nextSize = {
+  const nextSize = size || terminalLocalFitSize(context) || {
     cols: Math.max(term.cols, 2),
     rows: Math.max(term.rows, 2),
   };
@@ -60,6 +91,154 @@ function syncTerminalSize({ force = false } = {}) {
     terminalSizeFlushTimer = null;
     flushTerminalSize();
   }, force ? 0 : TERMINAL_RESIZE_FLUSH_DELAY_MS);
+}
+
+function applyTerminalCanonicalViewportLayout(context = activeTerminalContext) {
+  if (!terminalHost || !terminalScrollShellEl || context !== activeTerminalContext) {
+    return;
+  }
+  const canonical = context?.canonicalTerminalSize;
+  const local = context?.localTerminalFitSize;
+  const overflow = Boolean(canonical && local && canonical.cols > local.cols);
+  terminalHost.style.zoom = "";
+  terminalScrollShellEl.classList.toggle("terminal-shared-grid-overflow", overflow);
+  if (!overflow) {
+    if (!state.terminalWideMode) {
+      terminalHost.style.width = "";
+      terminalHost.style.maxWidth = "";
+    }
+    return;
+  }
+
+  const dimensions = context.term?._core?._renderService?.dimensions;
+  const cellWidth = Number(dimensions?.actualCellWidth) || 0;
+  if (cellWidth <= 0) {
+    return;
+  }
+  const horizontalPadding = 8;
+  const width = Math.ceil(cellWidth * canonical.cols + horizontalPadding);
+  terminalHost.style.width = `${width}px`;
+  terminalHost.style.maxWidth = "none";
+}
+
+function terminalReflowCurrentSession() {
+  const context = activeTerminalContext;
+  if (!context || context.disposed || !context.term || context.term !== term) {
+    updateStatus("当前没有可重排的活动终端。", "warn");
+    return false;
+  }
+
+  const sessionId = String(context.sessionId || "").trim();
+  if (sessionId && sessionId !== TERMINAL_EMPTY_CONTEXT_ID) {
+    state.terminalSessionReflowIds.add(sessionId);
+    storeTerminalSessionReflowIds(state.terminalSessionReflowIds);
+  }
+
+  applyTerminalSessionReflow(context);
+  updateStatus("已按当前手机宽度重排，并记住该终端的当前视口。", "ok");
+  return true;
+}
+
+function terminalSessionReflowEnabled(context = activeTerminalContext) {
+  const sessionId = String(context?.sessionId || "").trim();
+  return Boolean(sessionId) && state.terminalSessionReflowIds.has(sessionId);
+}
+
+function applyTerminalSessionReflow(context = activeTerminalContext) {
+  if (!context || context.disposed || !context.term) {
+    return false;
+  }
+
+  const isForeground = context === activeTerminalContext;
+  if (isForeground && context.term !== term) {
+    syncActiveTerminalContextAliases(context);
+  }
+
+  // A stale canonical width can keep the PTY wider than the phone viewport.
+  // Reflow is an explicit recovery action, so ignore that canonical size and
+  // republish the local fit result once.
+  context.canonicalTerminalSize = null;
+  if (isForeground) {
+    context.lastTerminalSize = null;
+    lastTerminalSize = null;
+    terminalScrollShellEl?.classList.remove("terminal-shared-grid-overflow");
+    if (!state.terminalWideMode) {
+      terminalHost.style.width = "";
+      terminalHost.style.maxWidth = "";
+    }
+  }
+
+  const proposed = terminalLocalFitSize(context);
+  context.localTerminalFitSize = proposed;
+  if (proposed && context.term) {
+    if (context.term.cols !== proposed.cols || context.term.rows !== proposed.rows) {
+      context.term.resize(proposed.cols, proposed.rows);
+    }
+    if (isForeground) {
+      context.lastTerminalSize = proposed;
+      lastTerminalSize = proposed;
+    }
+    sendMessage({
+      type: "resize",
+      cols: proposed.cols,
+      rows: proposed.rows,
+    }, context);
+  } else if (isForeground) {
+    syncTerminalSize({ force: true });
+  }
+
+  if (isForeground) {
+    applyTerminalCanonicalViewportLayout(context);
+    syncTerminalOverlayBounds();
+    context.term.refresh(0, Math.max(context.term.rows - 1, 0));
+    syncTerminalCursorCorrection();
+  }
+
+  if (!proposed) {
+    return false;
+  }
+
+  if (isForeground) {
+    window.requestAnimationFrame(() => {
+      if (context !== activeTerminalContext || context.term !== term || context.disposed) {
+        return;
+      }
+      context.canonicalTerminalSize = null;
+      applyTerminalCanonicalViewportLayout(context);
+      syncTerminalOverlayBounds();
+      context.term.refresh(0, Math.max(context.term.rows - 1, 0));
+    });
+  }
+  return true;
+}
+
+function applyTerminalCanonicalViewportSize(size, context = activeTerminalContext) {
+  if (!context || context.disposed || !context.term) {
+    return;
+  }
+  if (terminalSessionReflowEnabled(context)) {
+    applyTerminalSessionReflow(context);
+    return;
+  }
+  const canonical = {
+    cols: Math.max(Math.trunc(Number(size?.cols) || 0), 2),
+    rows: Math.max(Math.trunc(Number(size?.rows) || 0), 2),
+  };
+  context.canonicalTerminalSize = canonical;
+  const localFitSize = context.localTerminalFitSize || terminalLocalFitSize(context);
+  const targetRows =
+    localFitSize?.rows
+      ? Math.min(canonical.rows, localFitSize.rows)
+      : canonical.rows;
+  if (context.term.cols !== canonical.cols || context.term.rows !== targetRows) {
+    context.term.resize(canonical.cols, targetRows);
+  }
+  if (context === activeTerminalContext) {
+    applyTerminalCanonicalViewportLayout(context);
+    syncTerminalOverlayBounds();
+    updateTerminalScrollBottomButton();
+    syncTerminalCursorCorrection();
+  }
 }
 
 function flushTerminalSize() {
@@ -245,9 +424,32 @@ function fitTerminal({ force = false } = {}) {
   preserveTerminalScrollDuringLayout(() => {
     syncTerminalHostHeight();
     applyTerminalWideModeLayout();
-    fitAddon.fit();
+    const context = activeTerminalContext;
+    const localFitSize = terminalLocalFitSize(context);
+    if (context) {
+      context.localTerminalFitSize = localFitSize;
+    }
+    if (terminalSessionReflowEnabled(context)) {
+      applyTerminalSessionReflow(context);
+    } else if (context?.canonicalTerminalSize) {
+      const canonical = context.canonicalTerminalSize;
+      const targetRows =
+        localFitSize?.rows
+          ? Math.min(canonical.rows, localFitSize.rows)
+          : canonical.rows;
+      if (term.cols !== canonical.cols || term.rows !== targetRows) {
+        if (targetRows === canonical.rows) {
+          term.resize(canonical.cols, canonical.rows);
+        } else {
+          term.resize(canonical.cols, targetRows);
+        }
+      }
+      applyTerminalCanonicalViewportLayout(context);
+    } else {
+      fitAddon.fit();
+    }
     syncTerminalOverlayBounds();
-    syncTerminalSize({ force });
+    syncTerminalSize({ force, size: localFitSize });
     updateTerminalScrollBottomButton();
     syncTerminalCursorCorrection();
   });
@@ -327,10 +529,40 @@ function terminalContextSocketConnecting(context) {
   return Boolean(context?.socket && context.socket.readyState === WebSocket.CONNECTING);
 }
 
-function scheduleReconnect(context = activeTerminalContext) {
+function terminalReconnectDelayMs(context) {
+  const sessionId = String(context?.sessionId || "");
+  let hash = 0;
+  for (let index = 0; index < sessionId.length; index += 1) {
+    hash = (hash * 31 + sessionId.charCodeAt(index)) >>> 0;
+  }
+  const jitter = hash % 1200;
+  const attempts = Math.max(0, Math.trunc(Number(context?.reconnectAttempts) || 0));
+  const base = !context || context === activeTerminalContext ? 1500 : 1800;
+  const scaled = base * 2 ** Math.min(attempts, 10);
+  return Math.min(TERMINAL_RECONNECT_MAX_DELAY_MS, scaled + jitter);
+}
+
+function terminalReconnectBlocked() {
+  const hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+  const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+  return hidden || offline;
+}
+
+function scheduleReconnect(context = activeTerminalContext, { immediate = false } = {}) {
   if (!context || context.disposed || context.reconnectTimer || !context.sessionId) {
     return;
   }
+
+  // While the page is hidden or the device is offline a reconnect can never
+  // succeed; defer instead of burning attempts against a dead network.  Even
+  // "immediate" resumes only run when the page can actually reach the server.
+  if (terminalReconnectBlocked()) {
+    context.reconnectDeferred = true;
+    return;
+  }
+  context.reconnectDeferred = false;
+  const delay = immediate ? 0 : terminalReconnectDelayMs(context);
+  context.reconnectAttempts = Math.max(0, Math.trunc(Number(context.reconnectAttempts) || 0)) + 1;
 
   terminalReconnectFailures++;
   const shouldProbe = terminalReconnectFailures >= RECONNECT_FAILURE_THRESHOLD;
@@ -341,13 +573,79 @@ function scheduleReconnect(context = activeTerminalContext) {
     if (context.disposed) {
       return;
     }
+    // The environment may have changed while the timer slept.
+    if (terminalReconnectBlocked()) {
+      context.reconnectDeferred = true;
+      return;
+    }
     if (shouldProbe) {
       maybeReevaluateServer("reconnect-failures-" + terminalReconnectFailures);
     }
     connectTerminal(context);
-  }, 1500);
+  }, delay);
   syncActiveTerminalContextAliases(context);
 }
+
+// Going hidden or offline cancels every sleeping reconnect timer and marks
+// the context deferred — attempts are not consumed while we cannot connect.
+function deferPendingReconnects() {
+  if (typeof forEachTerminalSessionContext !== "function") {
+    return;
+  }
+  forEachTerminalSessionContext((context) => {
+    if (!context || context.disposed) {
+      return;
+    }
+    if (context.reconnectTimer) {
+      window.clearTimeout(context.reconnectTimer);
+      context.reconnectTimer = null;
+    }
+    if (context.disconnected || context.reconnectDeferred) {
+      context.reconnectDeferred = true;
+    }
+    syncActiveTerminalContextAliases(context);
+  });
+}
+
+// Deferred and interrupted reconnects resume as soon as the page can reach the
+// network again: the active context retries immediately (a sleeping timer is
+// cancelled and re-armed at 0), background contexts keep their normal backoff.
+function resumeTerminalReconnects() {
+  if (terminalReconnectBlocked()) {
+    return;
+  }
+  if (typeof forEachTerminalSessionContext !== "function") {
+    return;
+  }
+  forEachTerminalSessionContext((context) => {
+    if (!context || context.disposed) {
+      return;
+    }
+    if (context.reconnectTimer) {
+      if (context !== activeTerminalContext) {
+        return;
+      }
+      window.clearTimeout(context.reconnectTimer);
+      context.reconnectTimer = null;
+    } else if (!context.reconnectDeferred && !context.disconnected) {
+      return;
+    }
+    context.reconnectDeferred = false;
+    scheduleReconnect(context, { immediate: context === activeTerminalContext });
+  });
+}
+
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") {
+      resumeTerminalReconnects();
+    } else {
+      deferPendingReconnects();
+    }
+  });
+}
+window.addEventListener("online", resumeTerminalReconnects);
+window.addEventListener("offline", deferPendingReconnects);
 
 function mergePendingSessionRefresh(nextRequest = {}) {
   const nextPreferredSessionId =
@@ -390,7 +688,10 @@ function scheduleSessionEventRefresh(
   nextRequest = {},
   delayMs = TERMINAL_SESSION_EVENT_REFRESH_DELAY_MS,
 ) {
-  mergePendingSessionRefresh(nextRequest);
+  mergePendingSessionRefresh({
+    ...nextRequest,
+    preserveCurrentList: true,
+  });
   if (sessionEventRefreshTimer !== null) {
     if (delayMs > 0) {
       return;
@@ -431,7 +732,25 @@ function handleServerControlMessage(
     return true;
   }
 
+  if (message?.type === "terminal_output_framing") {
+    // 服务端确认 seq 帧协议：此后二进制输出帧带 8 字节大端 seq 前缀。
+    // 该控制消息先于一切二进制输出到达，晚于它的帧才可按 seq 帧解析。
+    if (context && !context.disposed && token === context.connectionToken) {
+      context.seqFramingActive = Number(message.version) >= 2;
+    }
+    return true;
+  }
+
+  if (message?.type === "terminal_viewport_size") {
+    queueTerminalViewportSize(message, token, context);
+    return true;
+  }
+
   if (message?.type === "terminal_connection_error") {
+    if (!context || context.disposed || token !== context.connectionToken) {
+      return true;
+    }
+    context.connectionError = message.message || "终端连接失败。";
     resetTerminalBacklogReplay(context);
     resetTerminalOutputQueue(context);
     context.disconnected = true;
@@ -578,7 +897,20 @@ function connectTerminal(targetContext = null) {
     return;
   }
 
-  if (context.disconnected && context.hasLoadedOutput) {
+  // 断线重连优先尝试 seq 水位增量续传：保留现有终端缓冲区，服务端只补发
+  // 缺失 chunk，App 前后台切换不再清空终端、全量重拉历史。是否真正重建
+  // 终端推迟到 backlog_replay start 到达时决定——服务端不接受续传时才走
+  // 既有的 retainedTerm 全量回放路径。
+  const resumeWanted =
+    context.disconnected &&
+    context.hasLoadedOutput &&
+    !context.outputStreamGap &&
+    Number(context.lastOutputSeq) > 0 &&
+    Boolean(context.outputInstanceId);
+  context.pendingDeltaReplay = resumeWanted;
+  context.seqFramingActive = false;
+  context.deltaReplayActive = false;
+  if (context.disconnected && context.hasLoadedOutput && !resumeWanted) {
     resetTerminalContextInstance(context);
   }
   resetTerminalBacklogReplay(context);
@@ -586,6 +918,7 @@ function connectTerminal(targetContext = null) {
   const token = ++context.connectionToken;
   context.disconnected = false;
   context.initialReplayPending = true;
+  context.connectionError = "";
   syncActiveTerminalContextAliases(context);
   if (isForeground) {
     bindSessionPageScrollRestoreToConnection(context.sessionId, token);
@@ -615,9 +948,15 @@ function connectTerminal(targetContext = null) {
     context.everConnected = true;
     context.disconnected = false;
     state.hasConnectedOnce = true;
-    resetTerminalReconnectFailures();
+    // Reconnect backoff resets in endTerminalBacklogReplay once a replay has
+    // actually completed — a bare socket open that flaps closed again must keep
+    // growing the delay instead of resetting it.
+    if (typeof TERMINAL_SERVER_PROBE !== "undefined") {
+      TERMINAL_SERVER_PROBE.notifyServerReachable();
+    }
     syncActiveTerminalContextAliases(context);
     sendTerminalContextVisibility(context, context === activeTerminalContext);
+    flushTerminalInputQueue(context);
     if (context !== activeTerminalContext) {
       return;
     }
@@ -649,7 +988,19 @@ function connectTerminal(targetContext = null) {
     if (context.disposed || token !== context.connectionToken) {
       return;
     }
-    const bytes = new Uint8Array(buffer);
+    let bytes = new Uint8Array(buffer);
+    if (context.seqFramingActive) {
+      if (bytes.byteLength < 8) {
+        return;
+      }
+      context.lastOutputSeq = Number(
+        new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, false),
+      );
+      bytes = bytes.subarray(8);
+      if (bytes.byteLength === 0) {
+        return;
+      }
+    }
     queueTerminalOutput(bytes, token, context);
   });
 

@@ -19,13 +19,26 @@ function renderCodexCommonConfig(result = {}) {
   if (codexCommonSandboxFullAccessInputEl) {
     codexCommonSandboxFullAccessInputEl.checked = Boolean(result.sandbox_full_access);
   }
+  if (codexCommonAnimationsDisabledInputEl) {
+    codexCommonAnimationsDisabledInputEl.checked = Boolean(result.animations_disabled);
+  }
+  if (codexCommonAltScreenDisabledInputEl) {
+    codexCommonAltScreenDisabledInputEl.checked = Boolean(result.alt_screen_disabled);
+  }
+  if (codexCommonDaemonDisabledInputEl) {
+    codexCommonDaemonDisabledInputEl.checked = result.daemon_disabled !== false;
+  }
   if (codexCommonConfigPathEl) {
     codexCommonConfigPathEl.textContent = result.config_file || "~/.codex/config.toml";
   }
 }
 
 async function loadCodexCommonConfig() {
-  if (!codexCommonApprovalNeverInputEl || !codexCommonSandboxFullAccessInputEl) {
+  if (
+    !codexCommonApprovalNeverInputEl ||
+    !codexCommonSandboxFullAccessInputEl ||
+    !codexCommonAnimationsDisabledInputEl
+  ) {
     return;
   }
   setButtonBusy(codexCommonConfigRefreshButtonEl, true, "读取中…");
@@ -45,7 +58,11 @@ async function loadCodexCommonConfig() {
 }
 
 async function saveCodexCommonConfig() {
-  if (!codexCommonApprovalNeverInputEl || !codexCommonSandboxFullAccessInputEl) {
+  if (
+    !codexCommonApprovalNeverInputEl ||
+    !codexCommonSandboxFullAccessInputEl ||
+    !codexCommonAnimationsDisabledInputEl
+  ) {
     return;
   }
   updateStatus(codexCommonConfigStatusEl, "正在保存当前配置…", "info");
@@ -59,6 +76,13 @@ async function saveCodexCommonConfig() {
       body: JSON.stringify({
         approval_never: codexCommonApprovalNeverInputEl.checked,
         sandbox_full_access: codexCommonSandboxFullAccessInputEl.checked,
+        animations_disabled: codexCommonAnimationsDisabledInputEl.checked,
+        alt_screen_disabled: codexCommonAltScreenDisabledInputEl
+          ? codexCommonAltScreenDisabledInputEl.checked
+          : null,
+        daemon_disabled: codexCommonDaemonDisabledInputEl
+          ? codexCommonDaemonDisabledInputEl.checked
+          : null,
       }),
     });
     renderCodexCommonConfig(result);
@@ -202,6 +226,10 @@ async function loadSettings() {
       settings.default_terminal_rename_presets || DEFAULT_TERMINAL_RENAME_PRESETS,
       DEFAULT_TERMINAL_RENAME_PRESETS,
     );
+    state.defaultTerminalAgentCommands = normalizeTerminalAgentCommands(
+      settings.default_terminal_agent_commands || DEFAULT_TERMINAL_AGENT_COMMANDS,
+      DEFAULT_TERMINAL_AGENT_COMMANDS,
+    );
     state.terminalFunctionCommands = ensureBuiltInTerminalFunctionCommands(
       normalizeTerminalFunctionCommands(
         Array.isArray(settings.terminal_function_commands)
@@ -237,6 +265,14 @@ async function loadSettings() {
         : state.defaultTerminalRenamePresets,
       Array.isArray(settings.terminal_rename_presets) ? null : state.defaultTerminalRenamePresets,
     );
+    state.terminalAgentCommands = normalizeTerminalAgentCommands(
+      Array.isArray(settings.terminal_agent_commands)
+        ? settings.terminal_agent_commands
+        : state.defaultTerminalAgentCommands,
+      Array.isArray(settings.terminal_agent_commands)
+        ? null
+        : state.defaultTerminalAgentCommands,
+    );
     state.terminalQuickStartDefaultKey = normalizeTerminalQuickStartDefaultKey(
       typeof settings.terminal_quick_start_default_key === "string"
         ? settings.terminal_quick_start_default_key
@@ -251,6 +287,9 @@ async function loadSettings() {
       workspaceShowHiddenInputEl.checked = state.showDotEntries;
     }
     state.showAllWorkspaceSessions = Boolean(settings.show_all_workspace_sessions);
+    state.terminalNewSessionBehavior = WebClxNewTerminal.normalizeBehavior(
+      settings.terminal_new_session_behavior,
+    );
     state.desktopTerminalSoftKeyboardEnabled = Boolean(
       settings.desktop_terminal_soft_keyboard_enabled,
     );
@@ -287,6 +326,8 @@ async function loadSettings() {
     );
     state.terminalAutoContinueRespectManualInterrupt =
       settings.terminal_auto_continue_respect_manual_interrupt !== false;
+    // Retain the legacy field without exposing a bypass for the agent guard.
+    state.terminalAutoCompactSkipCodebuddy = true;
     state.terminalAutoContinueTimePatterns = normalizeTerminalAutoContinueTimePatterns(
       settings.terminal_auto_continue_time_patterns || DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS,
     );
@@ -338,6 +379,13 @@ async function loadSettings() {
           : settings.default_session_ttl_days ?? DEFAULT_SESSION_TTL_DAYS;
       state.sessionTtlDays = Math.min(365, Math.max(1, Number(rawDays) || DEFAULT_SESSION_TTL_DAYS));
     }
+    {
+      const rawMinimum =
+        typeof settings.webui_password_min_length === "number"
+          ? settings.webui_password_min_length
+          : settings.default_webui_password_min_length ?? DEFAULT_WEBUI_PASSWORD_MIN_LENGTH;
+      state.webuiPasswordMinLength = Math.max(0, Math.trunc(Number(rawMinimum) || 0));
+    }
     state.favoritePaths = settings.favorite_paths;
     const savedWorkspaceHistory = normalizeWorkspaceHistoryItems(settings.workspace_history);
     const cachedWorkspaceHistory = readWorkspaceHistory();
@@ -365,11 +413,6 @@ async function loadSettings() {
       settings.preset_sync_remote_url_history,
     );
     presetSyncManager.renderPresetSyncRemoteUrlHistory();
-    state.desktopRemoteUrl = normalizeDesktopRemoteUrl(settings.desktop_remote_url);
-    state.desktopRemoteUrlHistory = normalizeDesktopRemoteUrlHistory(
-      settings.desktop_remote_url_history,
-    );
-    applyDesktopRemoteUrl(state.desktopRemoteUrl);
     state.codexApiAutoProxyMatchProviderIds = normalizeCodexApiAutoProxyMatchProviderIds(
       settings.codex_api_auto_proxy_match_provider_ids,
     );
@@ -383,6 +426,9 @@ async function loadSettings() {
       settings.terminal_workspace_icon_path,
       DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
     );
+    state.terminalGroupManagerEmoji = window.localStorage.getItem("webclx:terminal-group-manager-emoji") || "👑";
+    state.terminalGroupExecutorEmojiMode = window.localStorage.getItem("webclx:terminal-group-executor-emoji-mode") === "fixed" ? "fixed" : "random";
+    state.terminalGroupExecutorEmoji = window.localStorage.getItem("webclx:terminal-group-executor-emoji") || "⚙️";
     state.terminalUserHome = settings.terminal_user_home || "";
     state.serverVersion =
       typeof settings.server_version === "string" && settings.server_version.trim()
@@ -421,6 +467,7 @@ async function loadSettings() {
       terminalDefaultEnvInputEl.value = formatTerminalDefaultEnvVars(state.terminalDefaultEnvVars);
     }
     renderTerminalRenamePresetsSetting(state.terminalRenamePresets);
+    renderTerminalAgentCommandsSetting(state.terminalAgentCommands);
     clearTerminalQuickCommandEditor();
     showDotEntriesInputEl.checked = settings.show_dot_entries;
     if (workspaceShowHiddenInputEl) {
@@ -441,7 +488,13 @@ async function loadSettings() {
     if (sessionTtlDaysInputEl) {
       sessionTtlDaysInputEl.value = String(state.sessionTtlDays);
     }
+    if (webuiPasswordMinLengthInputEl) {
+      webuiPasswordMinLengthInputEl.value = String(state.webuiPasswordMinLength);
+    }
     showAllWorkspaceSessionsInputEl.checked = state.showAllWorkspaceSessions;
+    if (terminalNewSessionBehaviorInputEl) {
+      terminalNewSessionBehaviorInputEl.value = state.terminalNewSessionBehavior;
+    }
     desktopTerminalSoftKeyboardInputEl.checked = state.desktopTerminalSoftKeyboardEnabled;
     if (terminalSoftKeyboardScaleInputEl) {
       terminalSoftKeyboardScaleInputEl.value = formatTerminalSoftKeyboardScale(
@@ -496,6 +549,10 @@ async function loadSettings() {
       terminalAutoContinueRespectManualInterruptInputEl.checked =
         state.terminalAutoContinueRespectManualInterrupt;
     }
+    if (terminalAutoCompactSkipCodebuddyInputEl) {
+      terminalAutoCompactSkipCodebuddyInputEl.checked =
+        state.terminalAutoCompactSkipCodebuddy;
+    }
     if (terminalAutoContinueTimePatternsInputEl) {
       terminalAutoContinueTimePatternsInputEl.value = formatTerminalAutoContinueTimePatterns(
         state.terminalAutoContinueTimePatterns,
@@ -529,6 +586,10 @@ async function loadSettings() {
     if (terminalWorkspaceIconPathInputEl) {
       terminalWorkspaceIconPathInputEl.value = state.terminalWorkspaceIconPath;
     }
+    if (terminalGroupManagerEmojiInputEl) terminalGroupManagerEmojiInputEl.value = state.terminalGroupManagerEmoji;
+    if (terminalGroupExecutorEmojiModeEl) terminalGroupExecutorEmojiModeEl.value = state.terminalGroupExecutorEmojiMode;
+    if (terminalGroupExecutorEmojiInputEl) terminalGroupExecutorEmojiInputEl.value = state.terminalGroupExecutorEmoji;
+    if (terminalGroupExecutorEmojiFieldEl) terminalGroupExecutorEmojiFieldEl.hidden = state.terminalGroupExecutorEmojiMode !== "fixed";
     directorySessionListEl?.workspaceIconSelectController?.sync();
     sessionsSessionListEl?.workspaceIconSelectController?.sync();
     setThemeModeInputs(state.themeMode);
@@ -592,8 +653,10 @@ async function saveSettings(
   nextTerminalCommandCollections,
   nextTerminalToolEntries,
   nextTerminalRenamePresets,
+  nextTerminalAgentCommands,
   nextShowDotEntries,
   nextShowAllWorkspaceSessions,
+  nextTerminalNewSessionBehavior,
   nextDesktopTerminalSoftKeyboardEnabled,
   nextTerminalSoftKeyboardScale,
   nextTerminalFloatingButtonOffsetVh,
@@ -607,6 +670,7 @@ async function saveSettings(
   nextTerminalAutoContinueBackoffFactor,
   nextTerminalAutoContinueBackoffMaxMinutes,
   nextTerminalAutoContinueRespectManualInterrupt,
+  nextTerminalAutoCompactSkipCodebuddy,
   nextTerminalAutoContinueTimePatterns,
   nextTerminalAutoContinueActiveWindow,
   nextTerminalScheduledInputAvoidWindow,
@@ -617,6 +681,7 @@ async function saveSettings(
   nextCompileCommandTimeoutSecs,
   nextCompileMaxConcurrency,
   nextSessionTtlDays,
+  nextWebuiPasswordMinLength,
   nextClaudeModelOptions,
   nextCodexDefaultConfigEntries,
   nextCodexApiAutoProxyMatchProviderIds,
@@ -655,8 +720,10 @@ async function saveSettings(
         terminal_command_collections: nextTerminalCommandCollections,
         terminal_tool_entries: nextTerminalToolEntries,
         terminal_rename_presets: nextTerminalRenamePresets,
+        terminal_agent_commands: nextTerminalAgentCommands,
         show_dot_entries: nextShowDotEntries,
         show_all_workspace_sessions: nextShowAllWorkspaceSessions,
+        terminal_new_session_behavior: nextTerminalNewSessionBehavior,
         desktop_terminal_soft_keyboard_enabled: nextDesktopTerminalSoftKeyboardEnabled,
         terminal_soft_keyboard_scale: nextTerminalSoftKeyboardScale,
         terminal_floating_button_offset_vh: nextTerminalFloatingButtonOffsetVh,
@@ -671,6 +738,7 @@ async function saveSettings(
         terminal_auto_continue_backoff_max_minutes: nextTerminalAutoContinueBackoffMaxMinutes,
         terminal_auto_continue_respect_manual_interrupt:
           nextTerminalAutoContinueRespectManualInterrupt,
+        terminal_auto_compact_skip_codebuddy: nextTerminalAutoCompactSkipCodebuddy,
         terminal_auto_continue_time_patterns: nextTerminalAutoContinueTimePatterns,
         terminal_auto_continue_active_window: nextTerminalAutoContinueActiveWindow,
         terminal_scheduled_input_avoid_window: nextTerminalScheduledInputAvoidWindow,
@@ -683,6 +751,7 @@ async function saveSettings(
         compile_max_concurrency: nextCompileMaxConcurrency,
         compile_environment: parseCompileEnvironmentInput(compileEnvironmentInputEl?.value || ""),
         session_ttl_days: nextSessionTtlDays,
+        webui_password_min_length: nextWebuiPasswordMinLength,
         workspace_history: state.workspaceHistory,
         claude_model_options: nextClaudeModelOptions,
         codex_default_config_entries: nextCodexDefaultConfigEntries,

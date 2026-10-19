@@ -15,6 +15,253 @@ function syncAutoContinueHandledErrors() {
   });
 }
 
+function terminalRecentLinesContainCompact(sessionId, lineCount = 20) {
+  const context = ensureTerminalSessionCache()?.get?.(sessionId);
+  const buffer = context?.term?.buffer?.active;
+  if (!buffer || typeof buffer.length !== "number" || typeof buffer.getLine !== "function") {
+    return false;
+  }
+  const start = Math.max(0, buffer.length - Math.max(1, Math.trunc(lineCount)));
+  for (let index = start; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    const text = line?.translateToString?.(true) || "";
+    if (/\/compact\b/i.test(text)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function terminalRecentLinesContainCompacted(sessionId, lineCount = 20) {
+  const context = ensureTerminalSessionCache()?.get?.(sessionId);
+  const buffer = context?.term?.buffer?.active;
+  if (!buffer || typeof buffer.length !== "number" || typeof buffer.getLine !== "function") return false;
+  const start = Math.max(0, buffer.length - Math.max(1, Math.trunc(lineCount)));
+  for (let index = start; index < buffer.length; index += 1) {
+    const text = buffer.getLine(index)?.translateToString?.(true) || "";
+    if (/Context compacted|上下文已压缩|上下文压缩完成/i.test(text)) return true;
+  }
+  return false;
+}
+
+function terminalSessionHasRecentUserInput(sessionId, now = Date.now()) {
+  const sentAt = Number(state.terminalUserInputAt?.get(sessionId) || 0);
+  return Number.isFinite(sentAt) && sentAt > 0 && now - sentAt < 60000;
+}
+
+function terminalRecentLinesContainQueuedInput(sessionId, lineCount = 20) {
+  const context = ensureTerminalSessionCache()?.get?.(sessionId);
+  const buffer = context?.term?.buffer?.active;
+  if (!buffer || typeof buffer.length !== "number" || typeof buffer.getLine !== "function") return false;
+  const start = Math.max(0, buffer.length - Math.max(1, Math.trunc(lineCount)));
+  for (let index = start; index < buffer.length; index += 1) {
+    const text = buffer.getLine(index)?.translateToString?.(true) || "";
+    if (text.includes("Messages to be submitted at end of turn") || text.includes("Queued follow-up inputs")) return true;
+  }
+  return false;
+}
+
+function syncAutoCompactCompletionStatuses() {
+  Array.from(state.autoCompactCompactingSessionIds).forEach((sessionId) => {
+    const latest = state.sessions.find((session) => session?.id === sessionId);
+    if (latest && !isSessionCompactCapableAgent(latest)) {
+      state.autoCompactCompactingSessionIds.delete(sessionId);
+      return;
+    }
+    if (!terminalRecentLinesContainCompacted(sessionId, 20)) return;
+    state.autoCompactCompactingSessionIds.delete(sessionId);
+    state.autoCompactStatusSessionIds.add(sessionId);
+    storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
+  });
+}
+
+function terminalOutputLineCount(sessionId) {
+  const context = ensureTerminalSessionCache()?.get?.(sessionId);
+  const length = context?.term?.buffer?.active?.length;
+  return typeof length === "number" && Number.isFinite(length) ? length : null;
+}
+
+// AGY does not support /compact. Identify AGY terminals by their reported
+// activity agent or by the terminal name containing "agy" (case-insensitive).
+function isSessionAgyTerminal(session) {
+  const agent = String(session?.activity_agent || "").toLowerCase();
+  if (agent.includes("agy")) return true;
+  const name = String(session?.name || "").toLowerCase();
+  return name === "agy" || name.startsWith("agy ") || name.startsWith("agy-");
+}
+
+function isSessionCompactCapableAgent(session) {
+  // These agents must not receive webClx-generated /compact, regardless of
+  // legacy settings or a previously enabled per-session compact toggle.
+  const agent = String(session?.activity_agent || "").toLowerCase();
+  return !agent.includes("cline") && !agent.includes("agy")
+    && !agent.includes("antigravity") && !agent.includes("codebuddy")
+    && !isSessionAgyTerminal(session);
+}
+
+function terminalCompactCommandAllowed(command, sessionId) {
+  if (String(command || "").trim().split(/\s+/)[0] !== "/compact") return true;
+  const session = state.sessions?.find((item) => item?.id === sessionId);
+  if (isSessionCompactCapableAgent(session)) return true;
+  updateStatus(`${session?.activity_agent || "AGY"} 终端禁止由 webClx 发送 /compact。`, "warn");
+  return false;
+}
+
+function maybeAutoCompactCompletedSession(session) {
+  if (!session?.id || !state.autoCompactSessionIds.has(session.id)) return false;
+  // Check before scheduling and again at send time after agent detection.
+  if (!isSessionCompactCapableAgent(session) || isSessionAgyTerminal(session)) return false;
+  // A terminal that is currently open is already being viewed. Its backend
+  // activity can briefly lag behind the viewed acknowledgement, so never
+  // inject /compact into the user's active terminal.
+  if (session.id === state.activeSessionId) {
+    state.autoCompactHandledSessions.delete(session.id);
+    const activeTimer = state.autoCompactScheduledTimers.get(session.id);
+    if (activeTimer) {
+      window.clearTimeout(activeTimer);
+      state.autoCompactScheduledTimers.delete(session.id);
+    }
+    return false;
+  }
+  const completed = sessionActivityState(session) === "completed" || sessionActivityLabel(session) === "待查看";
+  if (!completed) {
+    return false;
+  }
+  // Auto-typed /compact is deliberately absent from terminal history. Its
+  // completion output is therefore the reliable nearby-output guard after the
+  // compacted status has been cleared by viewing the terminal.
+  if (terminalSessionHasRecentUserInput(session.id)) return false;
+  if (terminalRecentLinesContainQueuedInput(session.id, 20)) return false;
+  if (terminalRecentLinesContainCompacted(session.id, 20)) {
+    state.autoCompactHandledSessions.add(session.id);
+    const completedTimer = state.autoCompactScheduledTimers.get(session.id);
+    if (completedTimer) {
+      window.clearTimeout(completedTimer);
+      state.autoCompactScheduledTimers.delete(session.id);
+    }
+    return false;
+  }
+  const lastSent = state.autoCompactLastSent.get(session.id);
+  if (lastSent) {
+    const currentLineCount = terminalOutputLineCount(session.id);
+    const linesSinceCompact = currentLineCount === null
+      ? 0
+      : Math.max(0, currentLineCount - Number(lastSent.lineCount || currentLineCount));
+    if (linesSinceCompact < 20) {
+      state.autoCompactHandledSessions.add(session.id);
+      return false;
+    }
+    state.autoCompactLastSent.delete(session.id);
+    state.autoCompactHandledSessions.delete(session.id);
+  }
+  if (terminalRecentLinesContainCompact(session.id, 20)) {
+    state.autoCompactHandledSessions.add(session.id);
+    return false;
+  }
+  if (state.autoCompactHandledSessions.has(session.id)) return false;
+  state.autoCompactHandledSessions.add(session.id);
+  const sessionLabel = autoContinueSessionLabel(session);
+  updateStatus(`${sessionLabel}处于“待查看”，持续 5 秒后再进入压缩倒计时。`, "info");
+  const timerId = window.setTimeout(() => {
+    state.autoCompactScheduledTimers.delete(session.id);
+    const latest = state.sessions.find((item) => item?.id === session.id);
+    if (
+      !latest
+      || session.id === state.activeSessionId
+      || !state.autoCompactSessionIds.has(session.id)
+      || !isSessionCompactCapableAgent(latest)
+      || (sessionActivityState(latest) !== "completed" && sessionActivityLabel(latest) !== "待查看")
+    ) {
+      state.autoCompactHandledSessions.delete(session.id);
+      return;
+    }
+    updateStatus(`${sessionLabel}已持续“待查看”5 秒，2 秒后自动压缩。`, "info");
+    const sendTimerId = window.setTimeout(() => {
+      state.autoCompactScheduledTimers.delete(session.id);
+      resolveAutoCompactAfterDelay(session.id, sessionLabel);
+    }, 2000);
+    state.autoCompactScheduledTimers.set(session.id, sendTimerId);
+  }, 5000);
+  state.autoCompactScheduledTimers.set(session.id, timerId);
+  return true;
+}
+
+function resolveAutoCompactAfterDelay(sessionId, sessionLabel) {
+  const session = state.sessions.find((item) => item?.id === sessionId);
+  if (!session) {
+    state.autoCompactHandledSessions.delete(sessionId);
+    return;
+  }
+  Promise.resolve()
+    .then(() => {
+      const latest = state.sessions.find((item) => item?.id === sessionId);
+      if (
+        !state.autoCompactSessionIds.has(sessionId)
+        || sessionId === state.activeSessionId
+        || !latest
+        || (sessionActivityState(latest) !== "completed" && sessionActivityLabel(latest) !== "待查看")
+      ) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        return null;
+      }
+      // Re-check the live agent type after the delay; a session can finish its
+      // first turn only after the process detector has identified Cline.
+      if (!isSessionCompactCapableAgent(latest) || isSessionAgyTerminal(latest)) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        return null;
+      }
+      if (terminalSessionHasRecentUserInput(sessionId)) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        return null;
+      }
+      if (terminalRecentLinesContainQueuedInput(sessionId, 20)) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        return null;
+      }
+      if (terminalRecentLinesContainCompacted(sessionId, 20)) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        state.autoCompactLastSent.delete(sessionId);
+        storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+        return null;
+      }
+      return sendTerminalAutoTypedInput("/compact", {
+        sessionId,
+        submitEnters: 1,
+        throwOnError: true,
+      });
+    })
+    .then((sent) => {
+      if (sent === null) return;
+      if (!sent) {
+        state.autoCompactHandledSessions.delete(sessionId);
+        return;
+      }
+      state.autoCompactLastSent.set(sessionId, {
+        lineCount: terminalOutputLineCount(sessionId),
+        sentAt: Date.now(),
+      });
+      storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+      state.autoCompactCompactingSessionIds.add(sessionId);
+      updateStatus(`${sessionLabel}压缩中。`, "info");
+    })
+    .catch((error) => {
+      state.autoCompactHandledSessions.delete(sessionId);
+      updateStatus(error.message || `${sessionLabel}自动压缩失败。`, "warn");
+    });
+  return true;
+}
+
+function maybeAutoCompactCompletedSessions() {
+  syncAutoCompactCompletionStatuses();
+  let sent = false;
+  state.sessions
+    .filter((session) => session?.id && state.autoCompactSessionIds.has(session.id))
+    .forEach((session) => {
+      sent = maybeAutoCompactCompletedSession(session) || sent;
+    });
+  return sent;
+}
+
 function autoContinueHandledKey(entry) {
   if (!entry) {
     return "";
@@ -189,8 +436,8 @@ function maybeAutoContinueErroredSession(session = activeSession()) {
       if (result?.compact_sent) {
         updateStatus(
           keyword
-            ? `检测到${sessionLabel}错误“${keyword}”，已发送 /compact 并继续。`
-            : `检测到${sessionLabel}上下文窗口已满，已发送 /compact 并继续。`,
+            ? `检测到${sessionLabel}错误“${keyword}”，已发送 /compact。`
+            : `检测到${sessionLabel}上下文窗口已满，已发送 /compact。`,
           "ok",
         );
         return;
@@ -213,6 +460,7 @@ function maybeAutoContinueErroredSession(session = activeSession()) {
 }
 
 function maybeAutoContinueErroredSessions() {
+  maybeAutoCompactCompletedSessions();
   let sent = false;
   const params = new URLSearchParams(window.location.search);
   const embeddedAgent = params.get("embedded") === "agent";

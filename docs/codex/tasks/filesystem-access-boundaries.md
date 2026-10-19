@@ -23,3 +23,9 @@ cargo test --workspace filesystem::tests
 ```
 
 在 webClx 终端中必须通过编译 API 排队运行该命令，不能直接本地编译。
+
+## 新建终端浏览入口的失效路径
+
+新建终端点击“浏览”时，若原路径已不存在，`terminal-specified-task.js` 自动用无 `path` 参数的 `/api/entries` 回到服务当前默认工作区。仅首次打开允许一次回退；网络、认证错误和默认目录读取失败仍显示错误。加载期间清空可确认路径，避免确认失效的旧目录。两处 HTML 加载器同步更新版本；运行时静态资源的可重放差异保存在 `scripts/patches/terminal-browse-default-fallback.patch`。
+
+验证：`node --test tests/terminal-specified-task.test.mjs` 覆盖路径失效回退、网络错误不回退、默认目录失败不循环及选中路径更新。

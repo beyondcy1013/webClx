@@ -41,6 +41,7 @@ pub const DEFAULT_TERMINAL_AUTO_CONTINUE_INTERVAL_SECONDS: u32 = 60;
 pub const DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_FACTOR: f64 = 1.5;
 pub const DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES: u32 = 20;
 pub const DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT: bool = true;
+pub const DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY: bool = true;
 pub const DEFAULT_TERMINAL_ACTIVITY_AGENT_DISPLAY: TerminalActivityAgentDisplay =
     TerminalActivityAgentDisplay::Hidden;
 pub const DEFAULT_TERMINAL_COMPLETION_BELL_ENABLED: bool = true;
@@ -89,10 +90,11 @@ pub const MIN_SESSION_TTL_DAYS: u32 = 1;
 pub const MAX_SESSION_TTL_DAYS: u32 = 365;
 const SELECTED_MODEL_CAPACITY_ERROR_KEYWORD: &str =
     "Selected model is at capacity. Please try a different model.";
+const MODEL_BUSY_529_ERROR_KEYWORD: &str = "该模型当前访问量过大，请您稍后再试";
 const NONFATAL_MCP_STARTUP_SUMMARY: &str = "MCP startup incomplete";
 /// Context window exhaustion: Codex prints this when the conversation no longer
-/// fits. Sending "继续" alone would re-trigger it, so the auto-continue flow
-/// must fire `/compact` first and only then send "继续".
+/// fits. Sending "继续" alone would re-trigger it, so the recovery flow sends
+/// `/compact` and waits for compaction to finish without starting another turn.
 pub const CONTEXT_WINDOW_EXHAUSTED_ERROR_KEYWORD: &str =
     "ran out of room in the model's context window";
 /// OpenAI cybersecurity safety block: the assistant refuses to render a reply
@@ -103,6 +105,11 @@ pub const OPENAI_CYBERSECURITY_BLOCK_TITLE_KEYWORD: &str = "This content can't b
 /// differently across fonts/terminals) for robustness.
 pub const OPENAI_CYBERSECURITY_BLOCK_PHRASE_KEYWORD: &str =
     "extra caution with cybersecurity requests";
+/// OpenRouter server-tool failures are printed by Codex as a JSON error body.
+/// The requested tool name is stable even when surrounding request details
+/// change, so match that fragment and retry the turn.
+pub const OPENROUTER_WEB_SEARCH_ERROR_KEYWORD: &str =
+    "Server tool \\\"openrouter:web_search\\\" failed";
 const WORKSPACE_ROOT_LIMIT: &str = "/home";
 const SETTINGS_FILE_NAME: &str = "webclx-settings.json";
 const MAX_WORKSPACE_HISTORY_ITEMS: usize = 50;
@@ -125,6 +132,10 @@ const MAX_TERMINAL_COMMAND_COLLECTION_ITEMS: usize = 40;
 const MAX_TERMINAL_COMMAND_COLLECTION_ITEM_LABEL_LEN: usize = 32;
 const MAX_TERMINAL_COMMAND_COLLECTION_ITEM_COMMAND_LEN: usize = 1000;
 const MAX_TERMINAL_RENAME_PRESETS: usize = 20;
+const MAX_TERMINAL_AGENT_COMMANDS: usize = 20;
+const MAX_TERMINAL_AGENT_KEY_LEN: usize = 32;
+const MAX_TERMINAL_AGENT_LABEL_LEN: usize = 24;
+const MAX_TERMINAL_AGENT_COMMAND_LEN: usize = 1000;
 const MAX_TERMINAL_RENAME_PRESET_LEN: usize = 24;
 const MAX_TERMINAL_DEFAULT_ENV_VARS: usize = 64;
 const MAX_TERMINAL_DEFAULT_ENV_KEY_LEN: usize = 128;
@@ -212,8 +223,10 @@ pub struct SettingsManager {
     terminal_command_collections: Arc<RwLock<Vec<TerminalCommandCollection>>>,
     terminal_tool_entries: Arc<RwLock<Vec<TerminalToolEntry>>>,
     terminal_rename_presets: Arc<RwLock<Vec<String>>>,
+    terminal_agent_commands: Arc<RwLock<Vec<TerminalAgentCommand>>>,
     show_dot_entries: Arc<RwLock<bool>>,
     show_all_workspace_sessions: Arc<RwLock<bool>>,
+    terminal_new_session_behavior: Arc<RwLock<String>>,
     desktop_terminal_soft_keyboard_enabled: Arc<RwLock<bool>>,
     terminal_soft_keyboard_scale: Arc<RwLock<f32>>,
     terminal_floating_button_offset_vh: Arc<RwLock<f32>>,
@@ -228,6 +241,7 @@ pub struct SettingsManager {
     terminal_auto_continue_backoff_factor: Arc<RwLock<f64>>,
     terminal_auto_continue_backoff_max_minutes: Arc<RwLock<u32>>,
     terminal_auto_continue_respect_manual_interrupt: Arc<RwLock<bool>>,
+    terminal_auto_compact_skip_codebuddy: Arc<RwLock<bool>>,
     terminal_auto_continue_time_patterns: Arc<RwLock<Vec<String>>>,
     terminal_auto_continue_active_window: Arc<RwLock<String>>,
     terminal_scheduled_input_avoid_window: Arc<RwLock<String>>,
@@ -363,7 +377,8 @@ pub struct CompileEnvVar {
 }
 
 /// Action taken when an error keyword is detected. "continue" sends "继续",
-/// "compact_then_continue" sends "/compact" then "继续", "mark_only" shows the
+/// "compact_then_continue" is the legacy key for sending only "/compact",
+/// "mark_only" shows the
 /// error without auto-sending any command.
 pub const TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE: &str = "continue";
 pub const TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE: &str = "compact_then_continue";
@@ -388,6 +403,16 @@ pub struct TerminalDefaultEnvVar {
     key: String,
     #[serde(default)]
     value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TerminalAgentCommand {
+    key: String,
+    label: String,
+    #[serde(default)]
+    new_command: String,
+    #[serde(default)]
+    resume_command: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -475,6 +500,7 @@ pub struct SettingsResponse {
     terminal_command_collections: Vec<TerminalCommandCollection>,
     terminal_tool_entries: Vec<TerminalToolEntry>,
     terminal_rename_presets: Vec<String>,
+    terminal_agent_commands: Vec<TerminalAgentCommand>,
     default_terminal_quick_commands: Vec<TerminalQuickCommand>,
     default_terminal_quick_start_default_key: String,
     default_terminal_default_env_vars: Vec<TerminalDefaultEnvVar>,
@@ -483,10 +509,12 @@ pub struct SettingsResponse {
     default_terminal_command_collections: Vec<TerminalCommandCollection>,
     default_terminal_tool_entries: Vec<TerminalToolEntry>,
     default_terminal_rename_presets: Vec<String>,
+    default_terminal_agent_commands: Vec<TerminalAgentCommand>,
     host_name: String,
     server_listen_addr: String,
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
+    terminal_new_session_behavior: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -501,6 +529,7 @@ pub struct SettingsResponse {
     terminal_auto_continue_backoff_factor: f64,
     terminal_auto_continue_backoff_max_minutes: u32,
     terminal_auto_continue_respect_manual_interrupt: bool,
+    terminal_auto_compact_skip_codebuddy: bool,
     terminal_auto_continue_time_patterns: Vec<String>,
     terminal_auto_continue_active_window: String,
     terminal_scheduled_input_avoid_window: String,
@@ -567,9 +596,13 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     terminal_rename_presets: Option<Vec<String>>,
     #[serde(default)]
+    terminal_agent_commands: Option<Vec<TerminalAgentCommand>>,
+    #[serde(default)]
     show_dot_entries: Option<bool>,
     #[serde(default)]
     show_all_workspace_sessions: Option<bool>,
+    #[serde(default)]
+    terminal_new_session_behavior: Option<String>,
     #[serde(default)]
     desktop_terminal_soft_keyboard_enabled: Option<bool>,
     #[serde(default)]
@@ -598,6 +631,8 @@ pub struct SaveSettingsRequest {
     terminal_auto_continue_backoff_max_minutes: Option<u32>,
     #[serde(default)]
     terminal_auto_continue_respect_manual_interrupt: Option<bool>,
+    #[serde(default)]
+    terminal_auto_compact_skip_codebuddy: Option<bool>,
     #[serde(default)]
     terminal_auto_continue_time_patterns: Option<Vec<String>>,
     #[serde(default)]
@@ -685,8 +720,10 @@ pub struct SaveSettingsResponse {
     terminal_command_collections: Vec<TerminalCommandCollection>,
     terminal_tool_entries: Vec<TerminalToolEntry>,
     terminal_rename_presets: Vec<String>,
+    terminal_agent_commands: Vec<TerminalAgentCommand>,
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
+    terminal_new_session_behavior: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -701,6 +738,7 @@ pub struct SaveSettingsResponse {
     terminal_auto_continue_backoff_factor: f64,
     terminal_auto_continue_backoff_max_minutes: u32,
     terminal_auto_continue_respect_manual_interrupt: bool,
+    terminal_auto_compact_skip_codebuddy: bool,
     terminal_auto_continue_time_patterns: Vec<String>,
     terminal_auto_continue_active_window: String,
     terminal_scheduled_input_avoid_window: String,
@@ -805,10 +843,14 @@ struct SettingsFile {
     terminal_tool_entries: Vec<TerminalToolEntry>,
     #[serde(default = "default_terminal_rename_presets")]
     terminal_rename_presets: Vec<String>,
+    #[serde(default = "default_terminal_agent_commands")]
+    terminal_agent_commands: Vec<TerminalAgentCommand>,
     #[serde(default = "default_show_dot_entries")]
     show_dot_entries: bool,
     #[serde(default = "default_show_all_workspace_sessions")]
     show_all_workspace_sessions: bool,
+    #[serde(default)]
+    terminal_new_session_behavior: Option<String>,
     #[serde(default = "default_desktop_terminal_soft_keyboard_enabled")]
     desktop_terminal_soft_keyboard_enabled: bool,
     #[serde(default = "default_terminal_soft_keyboard_scale")]
@@ -837,6 +879,8 @@ struct SettingsFile {
     terminal_auto_continue_backoff_max_minutes: u32,
     #[serde(default = "default_terminal_auto_continue_respect_manual_interrupt")]
     terminal_auto_continue_respect_manual_interrupt: bool,
+    #[serde(default = "default_terminal_auto_compact_skip_codebuddy")]
+    terminal_auto_compact_skip_codebuddy: bool,
     #[serde(default = "default_terminal_auto_continue_time_patterns")]
     terminal_auto_continue_time_patterns: Vec<String>,
     #[serde(default = "default_terminal_auto_continue_active_window")]
@@ -925,8 +969,10 @@ struct LoadedSettings {
     terminal_command_collections: Vec<TerminalCommandCollection>,
     terminal_tool_entries: Vec<TerminalToolEntry>,
     terminal_rename_presets: Vec<String>,
+    terminal_agent_commands: Vec<TerminalAgentCommand>,
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
+    terminal_new_session_behavior: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -941,6 +987,7 @@ struct LoadedSettings {
     terminal_auto_continue_backoff_factor: f64,
     terminal_auto_continue_backoff_max_minutes: u32,
     terminal_auto_continue_respect_manual_interrupt: bool,
+    terminal_auto_compact_skip_codebuddy: bool,
     terminal_auto_continue_time_patterns: Vec<String>,
     terminal_auto_continue_active_window: String,
     terminal_scheduled_input_avoid_window: String,
@@ -1041,6 +1088,10 @@ fn default_terminal_auto_continue_respect_manual_interrupt() -> bool {
     DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT
 }
 
+fn default_terminal_auto_compact_skip_codebuddy() -> bool {
+    DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY
+}
+
 fn default_terminal_auto_continue_time_patterns() -> Vec<String> {
     vec![
         "限额将在 {time} 重置".to_string(),
@@ -1063,6 +1114,7 @@ fn default_terminal_error_keywords() -> Vec<String> {
         "stream disconnected before completion:".to_string(),
         "Concurrency limit exceeded for user, please retry later".to_string(),
         SELECTED_MODEL_CAPACITY_ERROR_KEYWORD.to_string(),
+        MODEL_BUSY_529_ERROR_KEYWORD.to_string(),
         CONTEXT_WINDOW_EXHAUSTED_ERROR_KEYWORD.to_string(),
         "API Error: Request rejected (429)".to_string(),
         "已达到 5 小时的使用上限".to_string(),
@@ -1079,6 +1131,7 @@ fn default_terminal_error_keywords() -> Vec<String> {
         "404 Not Found".to_string(),
         OPENAI_CYBERSECURITY_BLOCK_TITLE_KEYWORD.to_string(),
         OPENAI_CYBERSECURITY_BLOCK_PHRASE_KEYWORD.to_string(),
+        OPENROUTER_WEB_SEARCH_ERROR_KEYWORD.to_string(),
     ]
 }
 
@@ -1507,6 +1560,58 @@ fn default_terminal_command_collections() -> Vec<TerminalCommandCollection> {
 
 fn default_terminal_rename_presets() -> Vec<String> {
     vec!["完结".to_string(), "复用对话".to_string()]
+}
+fn default_terminal_agent_commands() -> Vec<TerminalAgentCommand> {
+    vec![
+        TerminalAgentCommand {
+            key: "codex".to_string(),
+            label: "Codex".to_string(),
+            new_command: "codex".to_string(),
+            resume_command: "codex --resume {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "claude".to_string(),
+            label: "Claude".to_string(),
+            new_command: "claude".to_string(),
+            resume_command: "claude --resume {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "codebuddy".to_string(),
+            label: "CodeBuddy".to_string(),
+            new_command: "codebuddy".to_string(),
+            resume_command: "codebuddy --resume {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "devin".to_string(),
+            label: "Devin".to_string(),
+            new_command: "devin".to_string(),
+            resume_command: "devin --resume {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "agy".to_string(),
+            label: "agy".to_string(),
+            new_command: "agy".to_string(),
+            resume_command: "agy".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "cline".to_string(),
+            label: "Cline".to_string(),
+            new_command: "cline".to_string(),
+            resume_command: "cline --id {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "opencode".to_string(),
+            label: "OpenCode".to_string(),
+            new_command: "opencode".to_string(),
+            resume_command: "opencode --session {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "other".to_string(),
+            label: "其它".to_string(),
+            new_command: String::new(),
+            resume_command: String::new(),
+        },
+    ]
 }
 
 fn default_terminal_tool_entries() -> Vec<TerminalToolEntry> {
@@ -2153,6 +2258,88 @@ fn sanitize_terminal_rename_presets(presets: &[String]) -> Vec<String> {
 
     sanitized
 }
+fn sanitize_terminal_agent_commands(
+    commands: &[TerminalAgentCommand],
+) -> Vec<TerminalAgentCommand> {
+    let mut seen_keys = HashSet::new();
+    let mut sanitized = Vec::new();
+
+    for command in commands {
+        if sanitized.len() >= MAX_TERMINAL_AGENT_COMMANDS {
+            break;
+        }
+        let Some(key) = sanitize_terminal_agent_key(&command.key) else {
+            continue;
+        };
+        if !seen_keys.insert(key.clone()) {
+            continue;
+        }
+        let is_preset_agent = key == "codex" || key == "claude";
+        let is_other = key == "other";
+        let new_command = sanitize_terminal_agent_command_line(&command.new_command);
+        let resume_command = sanitize_terminal_agent_command_line(&command.resume_command);
+        if !is_preset_agent && !is_other && new_command.is_empty() {
+            continue;
+        }
+        let label = sanitize_terminal_agent_label(&command.label).unwrap_or_else(|| key.clone());
+        sanitized.push(TerminalAgentCommand {
+            key,
+            label,
+            new_command,
+            resume_command,
+        });
+    }
+
+    sanitized
+}
+
+fn sanitize_terminal_agent_key(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > MAX_TERMINAL_AGENT_KEY_LEN
+        || !trimmed.chars().enumerate().all(|(index, character)| {
+            if index == 0 {
+                character == '_' || character.is_ascii_alphabetic()
+            } else {
+                character == '_'
+                    || character == '-'
+                    || character.is_ascii_digit()
+                    || character.is_ascii_alphabetic()
+            }
+        })
+    {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn sanitize_terminal_agent_label(raw: &str) -> Option<String> {
+    let trimmed: String = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&trimmed, MAX_TERMINAL_AGENT_LABEL_LEN))
+}
+
+fn sanitize_terminal_agent_command_line(raw: &str) -> String {
+    let trimmed: String = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect();
+    if !trimmed.contains("{session_id}") {
+        return truncate_chars(&trimmed, MAX_TERMINAL_AGENT_COMMAND_LEN);
+    }
+    let without_placeholder = trimmed.replace("{session_id}", "");
+    if without_placeholder.contains('{') || without_placeholder.contains('}') {
+        return String::new();
+    }
+    truncate_chars(&trimmed, MAX_TERMINAL_AGENT_COMMAND_LEN)
+}
 
 fn sanitize_terminal_function_command_key(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -2522,6 +2709,17 @@ fn sanitize_show_full_path(raw: Option<bool>) -> bool {
     raw.unwrap_or(default_show_full_path())
 }
 
+pub fn default_terminal_new_session_behavior() -> String {
+    "dialog".to_string()
+}
+
+fn sanitize_terminal_new_session_behavior(raw: Option<String>) -> String {
+    match raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some("direct") => "direct".to_string(),
+        _ => "dialog".to_string(),
+    }
+}
+
 /// Migrate legacy path_display_prefix to show_full_path: if a non-empty prefix
 /// was configured (user wanted abbreviated paths), show_full_path = false.
 fn migrate_path_display_prefix_to_show_full_path(legacy: &Option<String>) -> Option<bool> {
@@ -2646,6 +2844,14 @@ fn sanitize_terminal_auto_continue_time_patterns(patterns: &[String]) -> Vec<Str
 /// Normalize the active-window string into `HH:MM-HH:MM` form (24h).
 /// Empty is allowed (feature disabled). Malformed values become empty.
 pub fn normalize_terminal_auto_continue_active_window(value: &str) -> String {
+    normalize_time_window(value, true)
+}
+
+pub fn normalize_terminal_scheduled_input_avoid_window(value: &str) -> String {
+    normalize_time_window(value, false)
+}
+
+fn normalize_time_window(value: &str, allow_next_day_endpoint: bool) -> String {
     let raw = value.trim();
     if raw.is_empty() {
         return String::new();
@@ -2654,17 +2860,13 @@ pub fn normalize_terminal_auto_continue_active_window(value: &str) -> String {
         return String::new();
     };
     let (start, end) = (start.trim(), end.trim());
-    if !is_valid_hhmm(start) || !is_valid_hhmm(end) {
+    if !is_valid_hhmm(start, false) || !is_valid_hhmm(end, allow_next_day_endpoint) {
         return String::new();
     }
     format!("{start}-{end}")
 }
 
-pub fn normalize_terminal_scheduled_input_avoid_window(value: &str) -> String {
-    normalize_terminal_auto_continue_active_window(value)
-}
-
-fn is_valid_hhmm(value: &str) -> bool {
+fn is_valid_hhmm(value: &str, allow_next_day_endpoint: bool) -> bool {
     let Some((h, m)) = value.split_once(':') else {
         return false;
     };
@@ -2672,7 +2874,8 @@ fn is_valid_hhmm(value: &str) -> bool {
         && m.len() == 2
         && h.chars().all(|c| c.is_ascii_digit())
         && m.chars().all(|c| c.is_ascii_digit())
-        && h.parse::<u32>().is_ok_and(|v| v < 24)
+        && h.parse::<u32>()
+            .is_ok_and(|v| v < 24 || (allow_next_day_endpoint && v == 24 && m == "00"))
         && m.parse::<u32>().is_ok_and(|v| v < 60)
 }
 

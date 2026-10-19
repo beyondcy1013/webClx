@@ -44,7 +44,7 @@ const outputPipeline = readFileSync(
   "utf8",
 );
 assert.match(terminalHtml, /terminal-synchronized-output\.js\?v=20260805a/);
-assert.match(terminalHtml, /terminal-output-scroll\.js\?v=20260807a/);
+assert.match(terminalHtml, /terminal-output-scroll\.js\?v=20260928resume/);
 assert.match(
   terminalHtml,
   /terminal-synchronized-output\.js[^\n]*[\s\S]*terminal-codex-status-output\.js[^\n]*[\s\S]*terminal-output-scroll\.js/,

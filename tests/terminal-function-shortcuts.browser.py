@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
 CHROMIUM = "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome"
 SESSION_ID = "shortcut-session"
+TERMINAL_NAME = "Shortcut Terminal 20260813001234567890"
 RESUME_ID = "123e4567-e89b-12d3-a456-426614174000"
 INTERRUPTED_RESUME_ID = "019f8d03-c14d-7712-b5ac-2a63ebd7af36"
 INTERRUPTED_RESUME_OUTPUT = "\r\n".join(
@@ -59,7 +60,7 @@ async def main():
         sessions = [
             {
                 "id": SESSION_ID,
-                "name": "Shortcut Terminal",
+                "name": TERMINAL_NAME,
                 "path": "webClx",
                 "display_path": "/webClx",
                 "idle": False,
@@ -109,7 +110,7 @@ async def main():
                                 "label": "本项目部署脚本",
                                 "action": "deploy_project",
                                 "command": "",
-                                "shortcut": "Ctrl+B",
+                                "shortcut": "^B",
                             },
                         ],
                         "terminal_slash_commands": [
@@ -374,7 +375,7 @@ async def main():
         ).count()
         assert await page.locator(
             '#terminal-project-command-select option[value="deploy_project"]'
-        ).get_attribute("data-shortcut") == "Ctrl+B"
+        ).get_attribute("data-shortcut") == "^B"
 
         soft_keyboard_state = await page.locator("body").get_attribute(
             "data-terminal-soft-keyboard"
@@ -387,61 +388,52 @@ async def main():
         await page.set_viewport_size({"width": 390, "height": 700})
         await page.evaluate(
             """() => {
-              window.__escapeMenuInputs = [];
+              window.__escapeKeyInputs = [];
               window.__originalSendTerminalInput = sendTerminalInput;
               sendTerminalInput = (data) => {
-                window.__escapeMenuInputs.push(data);
+                window.__escapeKeyInputs.push(data);
                 return true;
               };
             }"""
         )
-        await page.locator("#terminal-escape-command-button").click()
-        escape_menu_layout = await page.evaluate(
+        escape_key_layout = await page.evaluate(
             """() => {
               const trigger = document.getElementById('terminal-escape-command-button');
-              const menu = document.getElementById('terminal-escape-command-menu');
               const triggerStyle = getComputedStyle(trigger);
-              const menuRect = menu.getBoundingClientRect();
-              const items = Array.from(menu.querySelectorAll('button')).map((button) => {
-                const rect = button.getBoundingClientRect();
-                const style = getComputedStyle(button);
-                return {
-                  label: button.textContent.trim(),
-                  height: rect.height,
-                  fontSize: style.fontSize,
-                };
-              });
               return {
-                nativeSelectCount: document.querySelectorAll('#terminal-escape-command-select').length,
-                expanded: trigger.getAttribute('aria-expanded'),
+                action: trigger.getAttribute('data-action'),
+                label: trigger.getAttribute('aria-label'),
+                menuCount: document.querySelectorAll('#terminal-escape-command-menu').length,
                 triggerFontSize: triggerStyle.fontSize,
-                menuLeft: menuRect.left,
-                menuRight: menuRect.right,
-                clientWidth: document.documentElement.clientWidth,
                 scrollWidth: document.documentElement.scrollWidth,
-                items,
+                clientWidth: document.documentElement.clientWidth,
               };
             }"""
         )
-        assert escape_menu_layout["nativeSelectCount"] == 0, escape_menu_layout
-        assert escape_menu_layout["expanded"] == "true", escape_menu_layout
-        assert [item["label"] for item in escape_menu_layout["items"]] == ["Esc", "^C"], escape_menu_layout
-        assert all(abs(item["height"] - 28) <= 0.1 for item in escape_menu_layout["items"]), escape_menu_layout
-        assert all(
-            item["fontSize"] == escape_menu_layout["triggerFontSize"]
-            for item in escape_menu_layout["items"]
-        ), escape_menu_layout
-        assert escape_menu_layout["menuLeft"] >= 0, escape_menu_layout
-        assert escape_menu_layout["menuRight"] <= escape_menu_layout["clientWidth"], escape_menu_layout
-        assert escape_menu_layout["scrollWidth"] <= escape_menu_layout["clientWidth"] + 1, escape_menu_layout
+        assert escape_key_layout["action"] == "escape_ctrl_c", escape_key_layout
+        assert "长按" in escape_key_layout["label"], escape_key_layout
+        assert escape_key_layout["menuCount"] == 0, escape_key_layout
+        assert escape_key_layout["scrollWidth"] <= escape_key_layout["clientWidth"] + 1, escape_key_layout
 
-        await page.locator('#terminal-escape-command-menu [data-sequence="escape"]').click()
-        await page.evaluate("async () => { await mobileKeySendQueue; }")
         await page.locator("#terminal-escape-command-button").click()
-        await page.locator('#terminal-escape-command-menu [data-sequence="ctrl_c"]').click()
         await page.evaluate("async () => { await mobileKeySendQueue; }")
-        escape_menu_inputs = await page.evaluate("window.__escapeMenuInputs")
-        assert escape_menu_inputs == ["\u001b", "\u0003"], escape_menu_inputs
+        escape_key_inputs = await page.evaluate("window.__escapeKeyInputs")
+        assert escape_key_inputs == ["\u0003"], escape_key_inputs
+
+        await page.evaluate("() => { window.__escapeKeyInputs = []; }")
+        escape_button = page.locator("#terminal-escape-command-button")
+        escape_box = await escape_button.bounding_box()
+        assert escape_box is not None
+        await page.mouse.move(
+            escape_box["x"] + escape_box["width"] / 2,
+            escape_box["y"] + escape_box["height"] / 2,
+        )
+        await page.mouse.down()
+        await page.wait_for_timeout(620)
+        await page.mouse.up()
+        await page.evaluate("async () => { await mobileKeySendQueue; }")
+        escape_key_inputs = await page.evaluate("window.__escapeKeyInputs")
+        assert escape_key_inputs == ["\u001b"], escape_key_inputs
         await page.evaluate(
             """() => {
               sendTerminalInput = window.__originalSendTerminalInput;
@@ -543,12 +535,48 @@ async def main():
                 break
             await page.wait_for_timeout(10)
         assert len(deploy_payloads) == 1, deploy_payloads
-        assert deploy_payloads[0]["project_dir"] == "/home/codes/webClx"
+        assert deploy_payloads[0]["project_dir"] == "/home/codes/tools/webClx"
         assert deploy_payloads[0]["source_terminal_id"] == SESSION_ID
+
+        await page.locator("#terminal-slash-command-button").click()
+        await page.locator(
+            '#terminal-slash-command-menu [data-key="copy_resume_id"]'
+        ).click()
+        copy_resume_overlay = page.locator("#terminal-copy-resume-overlay")
+        await copy_resume_overlay.wait_for(state="visible")
+        assert await copy_resume_overlay.locator("textarea").input_value() == INTERRUPTED_RESUME_ID
+        await copy_resume_overlay.get_by_role("button", name="复制", exact=True).click()
+        await page.wait_for_function(
+            f"() => window.__shortcutCopiedText === '{INTERRUPTED_RESUME_ID}'"
+        )
+        await page.wait_for_function(
+            f"() => document.getElementById('terminal-status')?.textContent === "
+            f"'已复制终端文本中的 Session ID：{INTERRUPTED_RESUME_ID}'"
+        )
+
+        await page.locator("#terminal-slash-command-button").click()
+        await page.locator(
+            '#terminal-slash-command-menu [data-key="current_resume_id"]'
+        ).click()
+        await copy_resume_overlay.wait_for(state="visible")
+        current_resume_command = f"codex resume {INTERRUPTED_RESUME_ID}"
+        assert await copy_resume_overlay.locator("textarea").input_value() == current_resume_command
+        await copy_resume_overlay.get_by_role("button", name="复制", exact=True).click()
+        await page.wait_for_function(
+            f"() => window.__shortcutCopiedText === '{current_resume_command}'"
+        )
+        await page.wait_for_function(
+            f"() => document.getElementById('terminal-status')?.textContent === "
+            f"'已复制：{current_resume_command}'"
+        )
 
         await page.keyboard.press("Control+Alt+S")
         await page.wait_for_function(
             f"() => window.__shortcutCopiedText === '{INTERRUPTED_RESUME_ID}'"
+        )
+        await page.wait_for_function(
+            f"() => document.getElementById('terminal-status')?.textContent === "
+            f"'已提取并复制 Session ID：{INTERRUPTED_RESUME_ID}'"
         )
 
         await page.evaluate(
@@ -568,17 +596,21 @@ async def main():
         ).click()
         await page.wait_for_function(
             """() => window.__shortcutCopiedText ===
-              '调用codex对话数据库skill读取session id为 '
+              '调用codex db维护skill读取session id为 '
               + '019f8d03-c14d-7712-b5ac-2a63ebd7af36'
-              + '并回答我的问题 '"""
+              + '并接受指令：'"""
         )
         copy_id_and_ask_inputs = await page.evaluate("window.__copyIdAndAskInputs")
         assert copy_id_and_ask_inputs == [], copy_id_and_ask_inputs
         copy_id_and_ask_clipboard = await page.evaluate("window.__shortcutCopiedText")
         assert copy_id_and_ask_clipboard == (
-            "调用codex对话数据库skill读取session id为 "
-            f"{INTERRUPTED_RESUME_ID}并回答我的问题 "
+            "调用codex db维护skill读取session id为 "
+            f"{INTERRUPTED_RESUME_ID}并接受指令："
         ), copy_id_and_ask_clipboard
+        await page.wait_for_function(
+            f"() => document.getElementById('terminal-status')?.textContent === "
+            f"'已复制 Session 提问文字：{INTERRUPTED_RESUME_ID}'"
+        )
         await page.evaluate(
             """() => {
               sendTerminalInputToSession = window.__originalSendTerminalInputToSession;
@@ -694,8 +726,28 @@ async def main():
             }"""
         )
 
+        await page.set_viewport_size({"width": 390, "height": 500})
         await page.keyboard.press("Control+Alt+T")
-        await page.wait_for_function("() => window.__shortcutCopiedText === 'Shortcut Terminal'")
+        await page.wait_for_function(
+            f"() => window.__shortcutCopiedText === '{TERMINAL_NAME}'"
+        )
+        await page.wait_for_function(
+            f"() => document.getElementById('terminal-status')?.textContent === "
+            f"'已复制终端名：{TERMINAL_NAME}'"
+        )
+        copy_status_layout = await page.locator("#terminal-status").evaluate(
+            """status => ({
+              text: status.textContent,
+              clientWidth: status.clientWidth,
+              scrollWidth: status.scrollWidth,
+              viewportWidth: document.documentElement.clientWidth,
+              rect: status.getBoundingClientRect().toJSON(),
+            })"""
+        )
+        assert copy_status_layout["text"] == f"已复制终端名：{TERMINAL_NAME}", copy_status_layout
+        assert copy_status_layout["scrollWidth"] <= copy_status_layout["clientWidth"] + 1, copy_status_layout
+        assert copy_status_layout["rect"]["left"] >= 0, copy_status_layout
+        assert copy_status_layout["rect"]["right"] <= copy_status_layout["viewportWidth"] + 1, copy_status_layout
 
         assert not page_errors, page_errors
         await browser.close()
@@ -705,8 +757,8 @@ async def main():
             {
                 "shortcuts": shortcuts,
                 "soft_keyboard_toggled": True,
-                "escape_menu_layout": escape_menu_layout,
-                "escape_menu_inputs": [ord(value) for value in escape_menu_inputs],
+                "escape_key_layout": escape_key_layout,
+                "escape_key_inputs": [ord(value) for value in escape_key_inputs],
                 "function_menu_layout": function_menu_layout,
                 "compact_project_menu": compact_project_menu,
                 "compact_tools_menu": compact_tools_menu,
@@ -716,10 +768,12 @@ async def main():
                 "fab_mobile_layout": fab_layout,
                 "deploy_payloads": len(deploy_payloads),
                 "session_copied": INTERRUPTED_RESUME_ID,
+                "current_resume_command_copied": current_resume_command,
                 "copy_id_and_ask_inputs": copy_id_and_ask_inputs,
                 "copy_id_and_ask_clipboard": copy_id_and_ask_clipboard,
                 "resume_command": auto_typed_payloads[0]["command_line"],
-                "terminal_name_copied": "Shortcut Terminal",
+                "terminal_name_copied": TERMINAL_NAME,
+                "copy_status_layout": copy_status_layout,
                 "page_errors": page_errors,
             },
             ensure_ascii=False,

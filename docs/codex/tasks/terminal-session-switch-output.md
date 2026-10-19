@@ -5,7 +5,7 @@ Date: 2026-05-18
 ## Symptoms
 
 - Switching terminal conversations from the dropdown could leave the visible terminal showing another session's fast-scrolling output.
-- Returning to a terminal session forced the replayed history to the bottom instead of preserving the last scroll position for that session.
+- Originally, replay always forced the bottom and lost manual reading positions. Current policy: selecting a different terminal intentionally opens at bottom; same-session reconnect/layout preserves the current reading intent.
 - Long Codex output could appear to lose visible lines when output was written faster than the browser terminal could render.
 - Typing several characters or moving the cursor could appear several seconds late when high-frequency terminal output or replay had built up small browser-side write/input units.
 - Creating a new terminal could show text from an older terminal above the fresh prompt.
@@ -36,7 +36,9 @@ High-volume live output could also disappear from browser history before reconne
 - Server-side websocket handling must read input independently from output/backlog sending. Sending the initial backlog before entering the socket receive loop can queue typed input behind a large history replay, even if the frontend interrupts its local replay queue.
 - Initial websocket replay must use a bounded tmux snapshot, not `capture-pane -S -` over the full `history-limit`. Full 100000-line history with ANSI escapes can keep xterm in hidden replay for 10+ seconds; user input still reaches the PTY, but its echo cannot be shown until the initial write drains.
 - Save scroll metrics per session id before changing sessions and on user scroll events.
-- On backlog replay end, restore the selected session's saved scroll position; only default to bottom when no saved position exists.
+- Selecting a different terminal resets its saved position and follow intent to
+  bottom. Same-session reconnect and replay completion still respect the current
+  saved intent, including manual history reading after selection.
 - Wrap xterm layout fitting in scroll preservation: capture the active session's current position, suppress layout-induced scroll saves, then restore immediately and on the next frame. This prevents mobile IME/visualViewport resize events from overwriting a user's saved scroll location.
 - If the page itself was at the bottom before a dropdown session switch, preserve that page-bottom state across asynchronous xterm replacement, websocket open, and backlog replay settle stages. Bind the restore to the selected session and new connection token, and cancel it only on explicit user scroll input.
 - Treat bottom restoration as an idempotent request. If the xterm logical viewport or page is already within its bottom tolerance, synchronize its DOM projection and controls without calling `term.scrollToBottom()` or `window.scrollTo()` again. Cached dropdown switches can otherwise execute the replay anchor, layout preservation, and page restore paths repeatedly even though the selected terminal is already displayed correctly.
@@ -54,7 +56,7 @@ High-volume live output could also disappear from browser history before reconne
 - Both explicit new-terminal creation and ordinary dropdown switching must replace the xterm instance before connecting the target session. Rebuild `term` and `fitAddon`, re-register xterm event handlers, dispose the previous term after the new one is mounted, and invalidate pending write callbacks. `term.reset()` does not cancel bytes already handed to xterm's internal write queue; on a busy source terminal that queue can block WebSocket frame handling for several seconds even when the backend responds in under 200 ms.
 - Batch small interactive input bursts before sending them over the websocket. Ordinary typed characters and cursor-key escape sequences can share a short client-side flush window; Enter, Ctrl+C/Ctrl+D, explicit flushes, and large paste payloads should still flush immediately.
 - Merge adjacent websocket binary output chunks before each `term.write()` when they belong to the same connection token and replay/live phase. Do not merge across control frames, token changes, or the replay end marker, or session switching and scroll restoration can regress. Keep live-output merge chunks much smaller than replay chunks; large live `term.write()` batches can make normal input echo and Codex text-entry effects appear seconds late while xterm drains output.
-- When a hidden/backgrounded terminal page becomes visible again, refresh layout, focus, bottom scroll, and cursor correction repeatedly while browser rendering settles, but do not trim queued live output.
+- When a hidden/backgrounded terminal page becomes visible again, refresh layout and cursor correction while preserving scroll/focus intent as rendering settles; do not trim queued live output.
 - Coalesce terminal resize messages for a short window before sending them over the same websocket as input. Layout/visualViewport churn can otherwise enqueue resize frames ahead of user input and delay when the backend writes that input to the PTY.
 - Do not ignore `session_list_changed: connected/opened` just because the event's session id already matches the active session. On fresh terminal creation, that is the normal success path; use it to clear a still-visible `正在连接...` status and trigger an immediate forced session-list refresh so connected/activity state does not wait for the slower passive poll or require a manual session switch.
 
@@ -125,7 +127,8 @@ Current pattern:
   xterm writes cannot be redirected by a later `activeSessionId` change.
 - Background output continues writing to the hidden session xterm. A context that
   was following the bottom stays at the bottom and is restored there immediately
-  when selected again; an intentional scrolled-up position remains preserved.
+  when selected again. Selecting any different session now resets a scrolled-up
+  position to bottom; manual reading remains preserved while it stays selected.
 - Each cached socket reports whether its xterm is currently visible. Hidden
   sockets continue receiving output, but the backend must not acknowledge that
   output as viewed until the session is selected again. Legacy clients that do
@@ -152,8 +155,93 @@ python3 tests/terminal-session-cache.browser.py
 The browser test loads the source static bundle with mocked terminal APIs and real
 xterm.js. It verifies one WebSocket per visited session, background output capture,
 DOM instance reuse, bottom restoration, visibility transitions, a nonblank canvas,
-and one visible xterm on desktop and mobile. Deploy the whole `static/` directory;
-the running service does not read frontend files directly from the source tree.
+and one visible xterm on desktop and mobile. The running service reads the tracked
+source `static/` directory through `/home/bin/webclx/static`; verify that absolute
+symlink and bump changed script versions without copying assets or restarting.
+
+## Cached Scroll Intent And Write Completion (2026-10-14)
+
+Dropdown switching could save an intermediate viewport during layout or an
+unfinished xterm write as a new reading position. Switching also cleared the
+viewport listener reference before rebinding, leaving the previous terminal's
+scroll listener attached. The write completion callback independently restored
+its pre-write follow decision, overwriting input or scrolling performed while
+the write was pending. Replay and input settle timers could then undo a newer
+choice to read history.
+
+Keep `followOutput` as the per-session follow intent. When switching during a
+layout/write/replay, preserve that intent and the last saved reading position.
+Write completion reads the current intent without assigning an old decision.
+Explicit input and the bottom button enable following; wheel/touch/top-button
+scrolling records the user's position even during layout suppression. Stamp
+scroll snapshots and input settle callbacks with the session's intent revision
+so newer gestures cancel older restores. Replay bottom anchors only run while
+the selected session still follows output. Rebind scroll listeners using the
+previous viewport reference and reject events from any other viewport.
+
+Verification uses production helpers in `tests/terminal-scroll-intent.test.mjs`
+and real xterm in `tests/terminal-session-cache.browser.py`. The browser holds a
+real write completion, types, switches away, then releases it: the old code
+turns following off; the fix preserves it. It also covers background output and
+grid changes, top/bottom buttons during switching, input followed by manual
+scrolling, native wheel/touch gestures, replay restoration, and agreement
+between DOM and buffer positions.
+Desktop, touch viewport, Android DOM renderer, and reconnect runs pass. Use
+`WEBCLX_TEST_CHROMIUM=/opt/google/chrome/chrome` on this host. A separate existing
+`terminal-touch-selection-policy.test.mjs` assertion expects the absent
+`terminalCanScrollTouchPixels` helper and fails identically against HEAD; its
+touch eligibility contract is outside this scroll-restoration fix.
+Native touch also exposes the unchanged bundled xterm's passive-touchstart
+`preventDefault` warning (`cancelEvents: true`). The browser test requires that
+exact known warning and reports it separately; other console errors still fail.
+
+### Switch Always Opens At Bottom (2026-10-14)
+
+The latest user policy requires every dropdown switch to display the target's
+latest output, even when it was previously left at the top or in the middle.
+`activateTerminalSessionContext()` resets the target's saved position and
+`followOutput` only when the active context changes. Its scroll intent revision
+invalidates older layout/input restores, and a retained reconnect frame also
+scrolls to bottom. Cached output, connections, and xterm instances stay intact.
+Same-session reconnects preserve manual reading; scrolling up after selection
+still disables follow until the next selection, input, or bottom button action.
+
+`tests/terminal-session-cache.browser.py` covers immediate and settled bottom
+positions, subsequent live output, native wheel/touch history followed by a
+switch, and manual history reading during replay without a session switch.
+
+## Bounded Background Preconnect (2026-08-14)
+
+Symptom: the first dropdown switch to an unvisited active session still showed
+`正在连接`, even though revisiting an already cached session was immediate.
+
+Current pattern:
+
+- After the session list selects its foreground target, and when a session selector is
+  hovered, opened, or focused, schedule background WebSocket connections for likely targets.
+- Create background contexts through `terminalSessionCache.getOrCreate()` without invoking the
+  activation callback. Background creation must not change `activeTerminalContext` or send a
+  false visibility update for the current foreground session.
+- Keep at most four automatically managed preconnect targets and stagger handshakes by 300 ms.
+  Recheck active, idle, deleted, hidden-page, and existing-socket state when each delayed task runs.
+- Reuse `connectTerminal(context)` unchanged. Its foreground guards suppress status, fit, focus,
+  and startup actions for background contexts; selecting an open context uses the existing cached
+  switch path and sends the foreground resize then.
+- Hidden sockets still receive their initial backlog and live output so their xterm buffers are
+  ready when selected. The four-session bound therefore limits real WebSocket, DOM, replay, and
+  render work, not merely heartbeat connections.
+- The bound applies to automatic preconnect ownership. Contexts that the user has actually visited
+  continue following the existing per-session cache lifecycle and are disposed only when the
+  session is idled, removed, pruned, or the page unloads.
+
+Verification:
+
+```bash
+node --test tests/terminal-background-preconnect.test.mjs tests/terminal-session-cache.test.mjs
+python3 tests/terminal-session-cache.browser.py
+WEBCLX_TEST_MOBILE=1 python3 tests/terminal-session-cache.browser.py
+WEBCLX_TEST_RECONNECT=1 python3 tests/terminal-session-cache.browser.py
+```
 
 ## Reconnect Replay Keeps The Last Complete Frame (2026-07-27)
 
@@ -200,6 +288,16 @@ without changing normal activity ordering; entering the history tab moves its
 existing option to the top and selects it. Verify the full `cd` round trip with
 `python3 tests/terminal_live_cwd_workspace_history.browser.py`.
 
+Top-level pages such as `/downloads` and `/agent-profiles` link to `/workspace`
+without a `path` query. On that entry path, workspace startup must read the
+browser's global current-terminal preference, query the same live-cwd endpoint,
+and set `state.currentPath` before the first directory load. Keep the initial
+URL terminal ID separate from mutable session-list selection state: the early
+workspace-tab session refresh can otherwise replace it with a root-directory
+terminal before live cwd restoration finishes. Explicit `path` links continue
+to select their requested directory unless they also carry a terminal session.
+Verify with `tests/workspace-current-terminal-directory.browser.py`.
+
 ## Shared Session Viewport Arbitration (2026-07-20)
 
 Symptom: when desktop and mobile browsers viewed the same terminal session, the
@@ -218,10 +316,17 @@ Current pattern:
   disconnects, or leaves the session, the next widest visible client takes over.
 - If no sized visible client remains, keep the last PTY size. This avoids a
   disconnect/reconnect window resetting the pane to a default size.
-- Each xterm instance still fits its own browser viewport. Only PTY size is
-  shared. A single interactive process cannot generate two independent TUI
-  layouts at once, so mobile may show the desktop-width layout while both are
-  open, but it no longer changes the desktop layout.
+- Each xterm uses the canonical PTY grid so ANSI cursor addressing remains
+  consistent across clients. A single interactive process has one TUI layout.
+- Clients whose canonical grid exceeds their local width keep native font size and
+  use horizontal scrolling; desktop and Android therefore render at the same scale.
+  When the canonical grid fits locally again, explicit width is cleared.
+- Local fit measurement temporarily clears zoom and canonical width, then
+  restores both. Only these native local dimensions are reported to the server,
+  preventing scaling from feeding back into shared PTY size arbitration.
+- `tests/terminal-mobile-scale.browser.py` verifies real xterm geometry, native
+  dimension reporting, ANSI grid preservation, rotation, horizontal scrolling and reset.
+  The shared-session live test additionally requires valid local session auth.
 
 Verification:
 
@@ -269,7 +374,7 @@ Root cause: the 64 KiB merge ceiling coalesced a full Codex TUI redraw (20-40 Ki
 
 Mobile was unaffected because it typically renders with a smaller viewport and the same write completes in fewer frames, so the oscillation window is much shorter.
 
-Fix: in `scheduleTerminalCursorCorrection` ([terminal-cursor-correction.js](/home/codes/webClx/static/terminal-cursor-correction.js)), added a `terminalOutputWriteInFlight` guard. While a write is in flight, `onRender`-triggered cursor correction scheduling is skipped. `drainTerminalOutputQueue`'s write callback already calls `syncTerminalCursorCorrection()` synchronously once the write completes and `terminalOutputWriteInFlight` is false, so the final stable-state correction still happens exactly once. This eliminates the oscillation feedback loop without losing cursor correction accuracy.
+Fix: in `scheduleTerminalCursorCorrection` ([terminal-cursor-correction.js](/home/codes/tools/webClx/static/terminal-cursor-correction.js)), added a `terminalOutputWriteInFlight` guard. While a write is in flight, `onRender`-triggered cursor correction scheduling is skipped. `drainTerminalOutputQueue`'s write callback already calls `syncTerminalCursorCorrection()` synchronously once the write completes and `terminalOutputWriteInFlight` is false, so the final stable-state correction still happens exactly once. This eliminates the oscillation feedback loop without losing cursor correction accuracy.
 
 Reuse note: any future change that increases `term.write()` batch sizes (merge ceilings, coalescing timers) must account for multi-frame rendering. The `terminalOutputWriteInFlight` guard pattern should remain on any code path where `onRender` can trigger DOM or theme mutations based on buffer-state inspection.
 
@@ -321,7 +426,7 @@ Fix:
 
 - Snapshot session ids/live handles under a short read or write section, run tmux `/proc`/working/error probes without the manager lock, then reacquire the write lock only to merge observations and build response DTOs.
 - Capture viewed-state fingerprints outside the manager write lock. Use a monotonic probe sequence so a slower, older concurrent scan cannot overwrite a newer fingerprint observation.
-- Limit only `capture_tmux_initial_pane_snapshot` to the latest 800 lines. Keep tmux `history-limit=100000`, full text capture (`-S -`), search/error diagnostics, and live backlog recovery unchanged.
+- Limit only `capture_tmux_initial_pane_snapshot` to the latest 100 lines on page refresh or reconnect. Keep tmux `history-limit=100000`, full text capture (`-S -`), search/error diagnostics, and live backlog recovery unchanged.
 
 Regression coverage:
 
@@ -430,3 +535,253 @@ node --test tests/terminal-initial-path-session.test.mjs
 node --test tests/terminal-navigation-session-return.test.mjs
 node --test tests/workspace-terminal-fresh-link.test.mjs
 ```
+
+## 工作流等待首屏超时（2026-09-11）
+
+- 首屏就绪原先要求 `outputWriteInFlight=false`，把后续实时输出也算作未完成回放；繁忙终端可能始终错过就绪轮询。现在分别记录 `outputReplayWriteInFlight`，只等待回放写入、回放结束标记和待回放队列，不等待实时输出空闲。写入回调仍受 connection token / write id 保护，重置队列时同步重置回放写入状态。
+- 服务端 `terminal_connection_error` 按当前连接 token 保存错误，工作流直接返回原始原因；新连接清除旧错误。超时提示区分上下文、连接、回放开始与回放写入阶段，未增加超时阈值。
+- `node --test tests/terminal-tool-readiness.test.mjs` 覆盖繁忙实时写入、排队/中断回放、旧连接回调、服务端报错及阶段提示。backlog、session-cache、preset-command-matrix 检查通过；扩展检查中的 session-switch-output（旧全局 input queue 正则）和 switch-performance-contract（tmux list-panes 正则）仍有既有失败，不在本次修改范围。
+- 静态模块与 HTML 缓存版本同步更新，运行目录 HTTP 内容逐文件核对。尚未做真实浏览器全链路超时复现；后端 10 秒阻塞任务超时、tmux 子进程期限及锁范围优化仍需单独处理，不能据此前端修复认定已解决。
+
+### WebSocket 重连首屏异步快照（2026-09-11）
+
+- `handle_registered_socket` 原先在 Tokio 工作线程直接执行同步 `tmux capture-pane`，慢子进程会拖住其它连接。重连首屏改用 Tokio 异步进程，最多 4 个并发，排队和执行共享 3 秒期限；超时或取消通过 `kill_on_drop` 子进程守卫终止并由 Tokio 回收，不留下 `spawn_blocking` 后台任务。
+- 首屏读取失败向浏览器发送真实 `terminal_connection_error`，不再把失败伪装成成功回放。关闭的会话使用已有缓冲；存活会话快照成功但为空时保留有界缓冲逻辑。日志记录 session ID、快照耗时和字节数。
+- 保持订阅 → 快照 → 序号边界 → 回放顺序、100 行首屏及完整历史查询不变。同步 attach 初始化和管理器全局锁仍待后续优化，此改动只覆盖 WebSocket 首屏读取。
+- Node backlog/readiness 6 项通过；Rust 增加子进程返回码、执行超时、排队超时测试，并将已有首屏边界测试改为 async。编译 API 请求 `170641-18d438fab25ed3f8` 已完成：`cargo check --locked` 和 5 项 Rust 回归全部通过（存在编译警告）。部署请求 `171053-18d438fab25ed3fa` 于 17:11 完成：服务 active/running，运行进程、安装文件与 release 产物 SHA-256 一致，认证探针 HTTP 200。重启后 6 条首屏捕获日志成功（记录为 0ms，可能命中内存初始快照，不代表异步 tmux 或浏览器端到端耗时）。前次部署因缺少匹配的 Playwright Chromium 在替换二进制前中止；补齐浏览器后门禁通过，未跳过检查。
+
+## DA1/DA2 响应残留成键盘输入（2026-09-12）
+
+现象：终端输出中出现 `ESC[c` 或 `ESC>c` 查询后，随后键盘输入会残留 `0;276;0c`。根因是输入侧自动响应过滤器只识别 `ESC[?...c` 与 `ESC>...c`，而当前 xterm 对普通 DA1/DA2 返回无前缀的 `ESC[0;276;0c`；过滤器把它当作未匹配字符透传给 PTY。
+
+修复：响应匹配改为允许普通 CSI 参数（`ESC[...c`），保留原有 `?` / `>` 形式；浏览器回归模拟查询 `ESC[c` 后逐字符输入 `ESC[0;276;0c`，确认只发送后续 `a`，并确认待过滤计数归零。已确认 `/home/codes/tools/webClx/static` 仍指向 `/home/bin/webclx/static`，静态文件即时生效，不需要重建或重启。
+
+回归覆盖：
+
+```bash
+node tests/terminal-entry-script-syntax.test.mjs
+python3 tests/terminal-device-attribute.browser.py
+```
+
+## 输入热路径与持久化锁（2026-09-15）
+
+- 普通键盘输入原先在异步 WebSocket 任务中同步取得管理器写锁，提交历史时还持锁序列化整个 registry 并写盘。磁盘或其他会话操作变慢时，会阻塞输入并占住 Tokio 工作线程；现场曾记录会话路径查询耗时 2741 ms。
+- 所有 registry 保存入口现在先释放管理器锁。独立写入互斥量串行化保存，获得写入权后再读取最新内存快照，随即释放状态读锁，再编码和原子替换文件，避免乱序保存覆盖新状态。
+- WebSocket 输入在 blocking 线程中记录内存历史，落盘使用每个管理器至多一个合并任务，输入不等待磁盘。正常关闭仍同步保存最新状态；异常强杀可能丢失尚未落盘的最近输入。
+- 会话路径查询、已读状态的 tmux 探测和稳定边界保存移到 blocking 线程。超过 100 ms 的输入记录 `capture_ms`、`pty_write_ms` 和 `total_ms`，不记录输入内容。通用任务超时提示同时列出锁、磁盘与 tmux，避免误导为 tmux 未安装；此次未改变 blocking 任务的取消语义。
+- 输入历史达到 500 条后，新增条目会挤出最旧条目，不能用长度变化判断是否需要保存；改为使用实际提交事件。
+- 回归入口：`cargo test terminal_persistence_`（阻塞写入时输入继续、状态锁可用、最新历史保存，以及容量上限提交检测）、`cargo test terminal_input_history_`；Node 输出状态持久化、已读确认、会话切换测试。
+- 这次覆盖持久化及异步运行线程的阻塞。部分旧的 tmux 清理/恢复路径仍在管理器锁内执行，主机资源竞争和浏览器网络/渲染也需结合新耗时日志继续定位，不能将本次改动当作所有卡顿来源均已消除。
+- 部署验收：请求 `214923-18d5818caf07fa20` 于 2026-09-15 21:52 完成。`cargo check` 与 7 项输入历史/持久化 Rust 回归此前通过；默认级别 Clippy 和 release 构建通过，既有告警保留（严格 `-D warnings` 未通过）。运行进程、安装文件与 release 产物 SHA-256 均为 `f4019da66f0ccccdfd23f407557f1d835a88745554c64ef76eecbe5af41178e8`，服务 active/running，`/api/auth/session` 返回 HTTP 200。
+- 部署后通过真实会话 API 创建 `s5805`，确认 pane 为 `runuser -u root -- /bin/bash -l`。回放结束后连续发送 15 条带唯一输出标记的命令，loopback WebSocket 输入至命令输出中位数 40.98 ms、最大 111.07 ms；会话删除成功，API 与隔离 tmux 均无残留。该测量不包含远端网络及浏览器渲染，也没有可比较的旧版本延迟基线。
+
+## 长文本粘贴完整性（2026-09-16）
+
+`terminal-input-transport.js` 原先对已连接输入也使用 65,536 字符重连队列，
+截断长文本时丢掉 bracketed paste 的结束标记，导致 Agent 停留在粘贴状态。
+`terminal-paste.js` 忽略发送结果，又显示成功、关闭弹窗或追加回车。
+
+现在连接正常的大输入先发送既有按键队列，再通过单个 WebSocket 消息完整发送；
+断线队列容量不足时整条拒绝，不截断任何输入。粘贴弹窗使用要求在线的即时发送，
+失败保留草稿、不入重连队列、不追加回车；若只有回车失败，提示勿重复粘贴。
+单行文本保留 xterm 的 bracketed-paste 模式，多行仍强制包裹结束标记。
+发送成功只表示浏览器 WebSocket 接受了完整消息，不表示 Agent 已执行；网络在此之后
+断开仍需核对终端实际内容，不应自动重发。
+
+验证：`node tests/terminal-input-reconnect.test.mjs` 覆盖超过 65 KB 的中文/emoji/多行、
+旧输入顺序、离线溢出、socket 异常及弹窗失败路径；
+`node tests/terminal-paste-safety.test.mjs` 检查粘贴入口约束。
+线上两个 JS 的 HTTP 内容已与实体文件逐字节核对，HTTP 静态 HTML 引用 `20260916a` 版本（页面路由需浏览器登录）。
+已打开页面需刷新加载新脚本，无需重启服务。
+
+`static` 是指向 `/home/bin/webclx/static` 的已跟踪符号链接，内部实体文件不在 Git 中。
+本次运行时改动存于 `scripts/patches/terminal-paste-integrity.patch` 以便审查和重放，
+不创建第二份静态目录。重放前先确认符号链接和补丁适用性，勿覆盖较新的运行时修改。
+
+## 会话清理的锁外探测（2026-09-17）
+
+- 列表、自动继续扫描、改名、删除及创建前清理统一使用 `manager/cleanup.rs`：短锁快照、锁外 tmux 状态探测、短锁合并；移除的 PTY 客户端在释放全局状态锁后 kill/wait。
+- `has-session` 复用同步有界命令封装，单命令预算 2 秒、stdout+stderr 合计 64 KiB，超时或未知错误返回 Unknown 并保留会话。扫描复用最多 4 个工作线程，不将单命令期限表述为整轮期限。
+- 清理使用既有每会话启动锁的 try_lock，跳过创建/重连中的会话。新建会话在发布 reservation 前取得同一启动锁；合并前核对创建时间、路径和 live Arc 身份，避免过期 Missing 结果删除替换后的会话。
+- 回归 `terminal::manager::cleanup::tests` 覆盖阻塞探测期间状态锁/输入可用、Unknown 保留、Missing 删除、启动跳过及过期结果丢弃；有界子进程回收沿用 `terminal::tmux::command_output::tests`。
+- 此项修复清理路径的全局锁放大。旧的无指定 ID 创建/attach、显式删除及其它 tmux 调用仍需独立审计；外层 10 秒 timeout 不取消已运行 blocking 任务，主机调度/磁盘压力仍可能造成超时。部署及测试结果以对应队列回调为准。
+- 上线验收：修复提交 `3aba800`，部署请求 `122328-18d5ffa787aad963` 于 2026-09-17 12:26:53 完成并重启。3 项清理回归、6 项有界子进程测试及 5 项部署 Rust 门禁通过；安装审计仅修改二进制，无缺失文件。构建/安装/运行 SHA256 均为 `6651602ace60f16d67267c50c5c3d12d1927e873039f6ff040941eda3d20126a`。服务 active/running，认证、全会话列表和当前目录接口均 HTTP 200；列表单次 267 ms（23 会话），不作为受控性能收益证据；验收时重启后无 error 级 journal。集中证据目录 `/home/bin/webclx/compile/runs/20260917T122333-4127425-1743/`。
+
+## 按会话锁定移动端重排（2026-09-18）
+
+共享会话的 PTY 宽度仍由最宽可见客户端决定。手机单独查看某个曾被桌面撑宽的终端时，
+服务端 canonical 宽度会继续触发 `terminal-shared-grid-overflow`，历史输出只能横向拖动；
+TUI 的 ANSI 坐标也不能在 xterm 内自动重新换行。
+
+终端工具菜单中的“重排当前终端”现在不只是单次动作：该会话会记入浏览器本地的
+`webclx:terminal-session-reflow-sessions`。切换、重连或收到新的 canonical 宽度后，
+只要仍启用本地 fit，就按该终端上下文的手机视口重新 resize xterm 并发送同一尺寸给 PTY，
+随后清掉 overflow 布局，避免后端 canonical 覆盖用户选择。其他终端和桌面客户端不受影响；
+删除会话上下文后如需恢复共享宽度，可在桌面端开启宽屏模式重建该终端的本地偏好。
+
+验证：
+
+```bash
+node --test tests/terminal-session-reflow.test.mjs
+node --test tests/terminal-session-switch-output.test.mjs
+```
+
+## xterm 自动应答被当作用户输入截断回放（2026-09-24）
+
+症状：打开或刷新长期运行的 Agent 终端后，屏幕停在陈旧中间帧：输入框不可见（在
+可视区之下），或输入框跑到顶部、下方大片空白；`tmux refresh-client` 后立即正常。
+
+根因：接入回放的 backlog 中含有 TUI 发出的终端查询（OSC 10/11 颜色、DA、焦点上报
+模式等）。xterm.js 通过与按键相同的 `onData` 自动应答（`\e[O`、`\e]10;rgb:…\e\\`、
+`\e]11;rgb:…\e\\`），`sendTerminalInput` 把它们视为用户输入并调用
+`interruptTerminalBacklogReplayForInput()`，回放被截断（实测 62 段中丢 58 段），陈旧
+应答还被写入 Agent PTY。
+
+修复：`static/terminal-report-filter.js` 识别纯终端报告序列；`terminal.js` 的 onData
+对这类序列不记用户输入、不打断回放，初始回放未稳定前直接丢弃，稳定后以
+`sendTerminalInput(data, { terminalReport: true })` 转发；`terminal-input-transport.js`
+仅在非 `terminalReport` 时打断回放和刷新输入可见性。
+
+验证：
+
+```bash
+node tests/terminal-report-filter.test.mjs
+node tests/terminal-input-reconnect.test.mjs
+node tests/terminal-backlog-replay.test.mjs
+```
+
+后续：接入主回放已改为每次连接即时抓取 tmux `capture-pane` 快照 + 抓取水位线之后的
+live chunk + 强制 `tmux refresh-client` 整屏重绘兜底，不再整段重放 attach 以来的字节流
+（src/terminal/websocket.rs、src/terminal/tmux.rs）。
+
+## 断线重连 seq 水位增量续传（2026-09-28）
+
+症状：手机浏览器/PWA 切到其它 App 再切回时，页面恢复可见会立刻"终端清空并
+拉取历史消息"，同时系统键盘状态跳动（hide/show）。回归路径：`visibilitychange`/
+`focus` → `refreshSessionsAfterPageResume()` → socket 已被系统挂起或关闭 →
+`scheduleReconnect()` → `connectTerminal()` 对 `disconnected && hasLoadedOutput`
+的上下文调用 `resetTerminalContextInstance()` 重建 xterm（helper textarea 重建导致
+焦点与系统键盘抖动），服务端对每个新 socket 又总是即时抓 tmux 快照做全量回放。
+
+修复（seq 水位续传协议）：
+
+- `TerminalSession` 持有随机 `output_instance_id`（限 2^53 内，JSON 精度安全），
+  每个输出 chunk 本来就有单调递增 `seq`；backlog 是连续流。
+- 新客户端在 `/api/terminal/ws` 查询参数里带 `seq_framed=1`；服务端先回
+  `terminal_output_framing` 控制帧再发任何二进制，之后每条二进制输出帧带
+  8 字节大端 seq 前缀。旧客户端不带参数即收不到协商帧，服务端保持裸帧；
+  新客户端连旧服务端时永远等不到协商帧，也就不会剥帧——双向兼容。
+- 客户端在 backlog_replay `start` 控制帧里记录 `instance`，并累计
+  `lastOutputSeq`；重连且缓冲区可信（`hasLoadedOutput && !outputStreamGap`）
+  时带 `resume_seq`+`resume_instance`。
+- 服务端 `delta_replay_chunks()` 仅在实例匹配、`resume_seq <= current_output_seq`
+  且 backlog 首块恰为 `resume_seq+1`（连续无缺口）时接受续传；此时跳过 tmux
+  快照抓取与 `refresh-client`，只按 seq 补发缺失 chunk（`start` 带
+  `"delta":true`）。任一条件不满足回退全量快照回放。
+- 客户端把"是否重建终端"推迟到 `start` 到达：`pendingDeltaReplay` 时收到
+  `delta:true` 则保留原缓冲区，缺失字节按 live 输出路径追加（不清屏、不强制
+  滚底、不换 textarea，键盘不跳）；收到非 delta 的 `start` 才调用
+  `resetTerminalContextInstance()`，与旧路径等价（retainedTerm 保旧画面至回放
+  结束再切换）。
+- `interruptTerminalBacklogReplayForInput()` 丢弃回放字节时置
+  `outputStreamGap`，缓冲不再可信，后续重连回退全量；一次未打断的回放结束
+  后清除该标记。delta 开始时必须清掉 `backlogReplayInterrupted`——delta 字节
+  是缺失输出的唯一副本，`queueTerminalOutput` 的打断丢弃会永久丢内容。
+- delta 回放不置 `backlogReplayActive`：缺失 chunk 走 live 输出语义（用户滚动
+  位置保留、自动应答按已稳定通道发送），回放 `end` 走轻量收尾。
+
+验证：
+
+```bash
+cargo test delta_replay_chunks
+node tests/terminal-backlog-replay.test.mjs
+```
+
+## 直开新终端后的输入焦点（2026-09-29）
+
+症状：终端页“新开”配置为直接创建时，点击按钮后按钮获得焦点；新终端连接、首屏
+回放和默认命令启动完成后，焦点仍留在“新开”按钮上。用户直接按方向键/输入键时，
+键盘事件先到页面控件而不是 xterm 输入区。
+
+根因：普通会话切换有 `focusTerminalAfterSessionSwitch()` 在 select 关闭后反复把焦点
+交还 xterm；直开新终端走 `createSession({ enableQuickStart: true })`，连接 open 阶段
+的 `focusTerminalIfAllowed()` 可能仍被按钮点击后的移动端 action-focus gate 拦住，
+而回放结束路径没有针对“新开按钮仍持有焦点”的恢复逻辑。
+
+修复：新增 `focusTerminalAfterNewTerminalLaunch(sessionId, sourceControl)`。创建请求
+成功并启动目标会话连接后登记目标 session id；仅当该 id 仍是活动会话、socket 已打开、
+首屏回放已完全 settle 时，释放 action-focus gate 并调用 `term.focus()`。恢复窗口覆盖
+ 0/80/280/800ms，可穿过字体 fit、回放队列和 3 秒快速启动链路；若期间用户聚焦了其它
+控件，则保留用户焦点。浏览器测试同时验证新会话 helper textarea 获得焦点且方向键不切
+换会话。
+
+验证：
+
+```bash
+node --test tests/terminal-new-launch-focus.test.mjs
+python3 tests/terminal-new-launch-focus.browser.py
+python3 tests/terminal-session-switch-focus.browser.py
+node tests/terminal-session-cache.test.mjs
+```
+
+## 滚动几何与用户意图区分（2026-10-15）
+
+切换到不同终端必须立即到底并恢复跟随；之后手动阅读历史应保持位置，输入或跳底按钮重新跟随。同会话重连、IME 和布局变化不改变用户意图。运维入口为 `.agents/skills/webclx-ops/subskills/webclx-terminal-scroll/SKILL.md`。
+
+本次真实 Chromium/xterm 排障复现两条独立故障链：
+
+- 桌面接到共享 canonical 80 行时，本地只能显示约 33 行。旧代码仅限制触屏端行数，造成 canvas 1920px 高于 viewport 806px；即使 `viewportY === baseY`，最后一行仍不可见。`terminal-layout-connection.js` 的尺寸通知与 fit 两处统一限制到本地可见行数，保留 canonical 元数据和列数。测试用 ANSI 定位 canonical 最后一行，确认最后一行实际可见。
+- xterm 异步 scroll area 刷新短暂缩小时，浏览器原生夹紧 `scrollTop`，随后 xterm 把夹紧读成用户滚动，webClx 又保存 `followOutput=false`。旧代码在实际 DOM 高度缩到 1px 后，逻辑位置从底部变为 0，后续输出继续停顶。新增 capture 监听 `repairTerminalViewportScrollArea`，在 xterm 消费事件前按缓冲区修复不足的滚动区域；原来的 bubble 监听继续在 xterm 更新位置后保存意图，保留真实滚动条操作。
+
+另在 `captureTerminalScrollSnapshotForSession` 校验活动 context 所属 session，避免选择入口已更新页面 ID、旧 context 尚未切换时错误标记快照。没有 ANSI 或布局事件证据时，不把“回答后跳顶”直接归因于 CodeBuddy 或消息对话框。
+
+回归入口 `tests/terminal-session-cache.browser.py` 同时断言逻辑位置、follow、DOM scrollTop/max 和 canvas/viewport 几何，覆盖活动共享尺寸、最后一行、快速切换、清历史重绘、DOM 收缩、原生滚动条阅读和后续输出。矩阵包括桌面 canvas、触屏、Android DOM 和同会话重连；这是浏览器模拟数据回归，不等于真实登录 CodeBuddy 的交互验收。
+
+复现证据：集中日志请求 `205123-18deb48836feaeb3`（共享行数裁剪）、`205330-18deb48836feaeb4`（DOM 收缩丢失跟随）、`205548-18deb48836feaeb7`（capture 修复恢复跟随）。静态资源从运行目录链接即时读取，需刷新页面以获取新缓存键。
+
+最终验证：请求 `210007-18deb48836feaebc`（2026-10-15 21:00:12–21:01:36）通过三模块语法检查、七项 Node 回归及上述四类浏览器矩阵。四类均在 DOM 收缩修复、手动阅读保持和跳底恢复后满足 `viewportY=baseY=123`、`scrollTop=domMax=2952`；HTTP 三模块哈希与源码一致。滚动子技能已随整个 `webclx-ops` 同步至 Codex、Claude、Cursor、Gemini、ZCode、Devin、WorkBuddy、Kiro 和 Grok。
+
+### 后台输出与显示前定位
+
+2026-10-16 用户明确要求后台新增输出也相应滚到底部，替代 2026-10-15 的“后台不强制滚动”策略。`drainTerminalOutputQueue` 写入完成及 `endTerminalBacklogReplay` 结束后，非活动 context 通过 `followBackgroundTerminalOutput` 滚动所属 xterm、启用 `followOutput` 并保存底部意图；不得调用依赖全局 term 的前台滚动函数。前台手动阅读仍保持位置，`scheduleTerminalRenderRefresh` 仍只为活动 context 安排额外刷新。
+
+`activateTerminalContext` 保留显示前定位：在 `setTerminalContextRenderVisibility(context, true)` 前将新 term 和 retained term 定位到底部；显示后再同步 DOM。没有新输出的后台终端切回也到底；同会话前台重连不重置阅读意图。
+
+浏览器回归三轮各 200 行后台输出：每轮先在 A 阅读历史，再切到 B 阅读历史；等待末行标记进入 A 缓冲区后，在切回前断言 A 已到底、follow 与保存意图均为底部，B 的历史位置不变；继续检查解除 hidden 前与切回后的底部状态。旧代码复现请求 `205100-18debef697f8f6aa`：后台 `viewportY=9`、`baseY=320`、`followOutput=false`。之前请求 `211116-18deb5f45ecf1533` 只验旧策略，不能作为新语义的验收证据。缓存键更新为 `20261016-background-bottom`。
+
+验证请求 `205201-18debef697f8f6ad`（2026-10-16 20:52:06–20:53:42）通过两模块语法检查、五项 Node 回归及桌面、触屏、Android DOM、重连四类浏览器矩阵，覆盖上述后台新增输出滚底与前台历史隔离断言。两模块 HTTP 哈希与源码一致；更新后的滚动子技能已同步至各 Agent 配置目录。
+
+## 终端结束改为隐藏专区落盘与直接关闭选项（2026-10-13）
+
+需求演进：
+1. 隐藏的终端不应混在“闲置终端”中，增加独立的“隐藏专区”下拉菜单；会话模型增加 `hidden: bool`，从闲置（`idle`）中完全分离。
+2. 结束终端对话框逻辑规范：
+   - **点“否”或倒计时结束**：正常关闭终端（调用 `POST /api/terminal/sessions/{id}/close` 销毁会话与进程，不进入闲置或隐藏）。
+   - **点“是”**：需要后台 Agent 处理经验落盘，才将终端转入“隐藏专区”（`PUT /api/terminal/sessions/{id}/hide`），落盘 prompt 末尾附带自毁关闭命令（`webclx terminal close ...` 或调用 `/close` API），落盘完成后终端自动自毁退出。
+   - **点“取消”或按 Esc**：中止结束操作，保持当前终端状态不变。
+3. 后端增加终端自毁与关闭 API：`POST/DELETE /api/terminal/sessions/{session_id}/close`，对 loopback 访问免除外部鉴权令牌，支持终端内脚本与 CLI（`webclx close <id>` / `webclx terminal close <id>`）调用。
+
+验证：
+
+```bash
+node --test tests/terminal-experience-save.test.mjs
+node --test tests/terminal-session-delete-safety.test.mjs
+node --test tests/terminal-archives-and-idle.test.mjs
+python3 tests/terminal-experience-save.browser.py
+cargo test --bin webclx cli::tests session_hide_tests
+```
+
+
+## 结束终端后的下拉闪烁与点击丢失（2026-10-17）
+
+“结束”先隐藏再关闭的流程曾先清空活动选择，串行等待两次 `loadSessions`；叠加连接与会话事件刷新，造成数秒重复渲染。`workspace-project-icons.js` 的每次 `sync` 又无条件重建触发器、图标和菜单按钮；刷新夹在 pointerdown/pointerup 之间时，原按钮已移除，点击无法提交。
+
+隐藏成功后直接从本地现有会话选择同工作区优先的下一个终端，不等待列表请求；关闭完成仅更新本地列表。隐藏请求完成时重新检查当前选择，保留用户期间主动切换的终端。下拉渲染按内容签名跳过无变化刷新；展开期间延迟重建直到关闭，选择时核对目标仍存在且可用。
+
+验证：`python3 tests/workspace_project_icons.browser.py` 在同一次鼠标按下/松开之间插入五次刷新，旧代码失败于按钮被移除，新代码保持焦点并成功切换；`python3 tests/terminal-experience-save.browser.py` 在桌面 1440×1000、移动 375×812 覆盖隐藏失败、关闭失败、落盘和延迟关闭期间通过真实下拉切换至第三终端，关闭完成后仍保持选择。另通过 selection-race、delete-safety、experience-save、workspace-project-icons 与 idle-session-icons Node 回归及两模块语法检查。运行目录静态链接保持指向源码，HTML 缓存键已更新，无需重启服务；浏览器拦截 API 验证不等同于操作真实用户终端。
+
+### 关闭与后续工作并行（2026-10-17）
+
+结束事务不再禁用全局“新开 / 结束 / 落盘并结束”按钮，仅按目标 session ID 防止重复提交。同一终端隐藏与关闭仍按顺序执行；用户可以在请求期间操作其他终端。后台成功或失败通过现有 `terminal-status-toast` 提示（`pointer-events: none`），不获取焦点；结束完成不再自动返回上一页，避免打断用户已经展开的新工作。隐藏失败不关闭目标；关闭失败保留隐藏终端供重试。
+
+验证：`tests/terminal-experience-save.browser.py` 在桌面与移动尺寸故意挂起 close 响应，检查三个动作按钮可用、重复目标不重复发送、真实下拉切换和真实“新开”对话框可在关闭完成前操作；释放响应后对话框和焦点保持不变。另通过 selection-race、delete-safety、experience-save Node 回归及语法检查。静态缓存键为 `20261017-background-close`，无需重建或重启。

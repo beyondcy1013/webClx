@@ -165,6 +165,9 @@ pub struct PresetTerminalEnvVar {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAuthPreset {
+    /// Inert source metadata for account interchange; never applied at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interchange_source: Option<serde_json::Value>,
     pub id: String,
     pub name: String,
     pub saved_at: u64,
@@ -187,6 +190,9 @@ pub struct StoredAuthPreset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredApiPreset {
+    /// Inert source metadata for account interchange; never applied at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interchange_source: Option<serde_json::Value>,
     pub id: String,
     pub name: String,
     pub saved_at: u64,
@@ -228,11 +234,16 @@ pub struct StoredApiPreset {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_mode: Option<ApiAccessMode>,
     #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
     pub switch_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredClaudePreset {
+    /// Inert source metadata for account interchange; never applied at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interchange_source: Option<serde_json::Value>,
     pub id: String,
     pub name: String,
     pub saved_at: u64,
@@ -314,13 +325,25 @@ pub struct AuthPresetDetails {
     pub hourly_reset_time: Option<u64>,
     pub weekly_percentage: Option<u64>,
     pub weekly_reset_time: Option<u64>,
+    /// `/wham/usage` 一并返回的可兑换额度重置点数（available_count）。
+    pub reset_credit_count: Option<u64>,
+    /// Codex 点数余额；上游以字符串承载精度，无限账户记为 "∞"。
+    pub codex_points: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CurrentAuthMode {
+    #[default]
+    None,
+    Auth,
+    Api,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum CurrentAuthMode {
-    None,
-    Auth,
+pub enum CodexAccountKind {
+    Oauth,
     Api,
 }
 
@@ -379,6 +402,39 @@ pub struct ApiPresetListResponse {
     pub current_config_error: Option<String>,
     pub upstream_proxy: UpstreamProxySettings,
     pub presets: Vec<ApiPresetSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodexAccountListResponse {
+    pub current_mode: CurrentAuthMode,
+    pub accounts: Vec<CodexAccountSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodexAccountSummary {
+    pub kind: CodexAccountKind,
+    pub id: String,
+    pub name: String,
+    pub active: bool,
+    pub saved_at: u64,
+    pub switch_count: u64,
+    pub account: Option<String>,
+    pub model: Option<String>,
+    pub endpoint: Option<String>,
+    pub favorite: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CodexAccountApplyResponse {
+    pub ok: bool,
+    pub kind: CodexAccountKind,
+    pub id: String,
+    pub name: String,
+    pub local_config_file: Option<String>,
+    /// True when a running Codex app-server daemon was restarted so new
+    /// sessions load the applied auth/config instead of its cached state.
+    #[serde(default)]
+    pub codex_daemon_restarted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -498,6 +554,7 @@ pub struct ApiPresetSummary {
     pub account_id: Option<String>,
     pub saved_at: u64,
     pub active: bool,
+    pub favorite: bool,
     pub switch_count: u64,
 }
 
@@ -671,8 +728,8 @@ pub struct SaveClaudePresetResponse {
 #[derive(Debug, Serialize)]
 pub struct ApplyAuthPresetResponse {
     pub ok: bool,
-    /// The request is recorded behind an active temporary preset lease and
-    /// will be applied after that lease restores its snapshot.
+    /// Legacy compatibility field. Normal apply writes immediately and this
+    /// value is always false; no pending-switch queue exists.
     #[serde(default)]
     pub deferred: bool,
     pub preset_id: String,
@@ -684,6 +741,9 @@ pub struct ApplyAuthPresetResponse {
     /// local config was found for the given project path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_config_file: Option<String>,
+    /// See [`CodexAccountApplyResponse::codex_daemon_restarted`].
+    #[serde(default)]
+    pub codex_daemon_restarted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -699,6 +759,9 @@ pub struct ApplyApiPresetResponse {
     /// See [`ApplyAuthPresetResponse::local_config_file`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_config_file: Option<String>,
+    /// See [`CodexAccountApplyResponse::codex_daemon_restarted`].
+    #[serde(default)]
+    pub codex_daemon_restarted: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -723,6 +786,9 @@ pub struct ApplyCurrentAuthResponse {
     pub auth_file: String,
     pub config_file: String,
     pub account_id: String,
+    /// See [`CodexAccountApplyResponse::codex_daemon_restarted`].
+    #[serde(default)]
+    pub codex_daemon_restarted: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -738,9 +804,12 @@ pub enum CodexOAuthSessionStatus {
 pub struct CodexOAuthSession {
     pub id: String,
     pub status: CodexOAuthSessionStatus,
+    pub flow: CodexOAuthFlow,
     pub verification_url: String,
     pub authorize_url: String,
     pub user_code: String,
+    pub code_verifier: Option<String>,
+    pub state: Option<String>,
     pub poll_interval_seconds: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -751,11 +820,19 @@ pub struct CodexOAuthSession {
     pub suggested_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexOAuthFlow {
+    Device,
+    Browser,
+}
+
 #[derive(Debug, Serialize)]
 pub struct CodexOAuthSessionResponse {
     pub(crate) ok: bool,
     pub(crate) session_id: String,
     pub(crate) status: CodexOAuthSessionStatus,
+    pub(crate) flow: CodexOAuthFlow,
     pub(crate) verification_url: String,
     pub(crate) authorize_url: String,
     pub(crate) user_code: String,
@@ -779,6 +856,50 @@ pub(crate) struct CodexUsageResponse {
     pub(crate) rate_limit: Option<CodexRateLimit>,
     #[serde(default)]
     pub(crate) plan_type: Option<String>,
+    #[serde(default)]
+    pub(crate) rate_limit_reset_credits: Option<CodexRateLimitResetCredits>,
+    #[serde(default)]
+    pub(crate) credits: Option<CodexCredits>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexRateLimitResetCredits {
+    #[serde(default)]
+    pub(crate) available_count: Option<u64>,
+}
+
+/// `/wham/usage` 的 Codex 点数余额；上游用可空字符串表示余额以保持精度。
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexCredits {
+    #[serde(default)]
+    pub(crate) unlimited: bool,
+    #[serde(default)]
+    pub(crate) balance: Option<String>,
+}
+
+/// 额度重置兑换结果（`/wham/rate-limit-reset-credits/consume`）。
+#[derive(Debug, Serialize)]
+pub struct CodexResetCreditResult {
+    pub code: String,
+    pub windows_reset: u64,
+}
+
+/// Codex 邀请资格（`/backend-api/referrals/invite/eligibility`）。
+#[derive(Debug, Serialize)]
+pub struct CodexReferralInfo {
+    pub program_id: String,
+    pub should_show: bool,
+    pub available_invites: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<String>,
+    pub requires_confirmation: bool,
+    /// 不可邀请时的上游原因（例如套餐不支持推荐）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ineligible_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

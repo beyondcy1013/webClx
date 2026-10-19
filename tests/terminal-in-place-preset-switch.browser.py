@@ -1,6 +1,12 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
+import time
+from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
@@ -11,6 +17,40 @@ CHROMIUM = os.environ.get(
     "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome",
 )
 RESUME_ID = "019f2350-db5f-7cf0-b476-1cf14855b05d"
+
+
+def local_session_cookie():
+    secret_file = os.environ.get("WEBCLX_SESSION_SECRET_FILE", "").strip()
+    credentials_file = os.environ.get("WEBCLX_CREDENTIALS_FILE", "").strip()
+    if not secret_file and not credentials_file:
+        return None
+    if not secret_file or not credentials_file:
+        raise RuntimeError("both local session files are required")
+    hostname = (urlparse(BASE_URL).hostname or "").lower()
+    if hostname not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("refusing to derive a local session cookie for a non-loopback URL")
+    secret_path = Path(secret_file)
+    credentials_path = Path(credentials_file)
+    if secret_path.stat().st_mode & 0o077 or credentials_path.stat().st_mode & 0o077:
+        raise RuntimeError("local session inputs must be owner-only files")
+    secret = secret_path.read_bytes()
+    credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
+    username = str(credentials.get("username", "")).strip()
+    if len(secret) < 32 or not username:
+        raise RuntimeError("local session inputs are invalid")
+    payload = json.dumps(
+        {"user": username, "exp": int(time.time()) + 300},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    signature = hmac.new(secret, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+    return {
+        "name": "webclx_session",
+        "value": f"{payload_b64}.{signature}",
+        "url": BASE_URL,
+        "httpOnly": True,
+        "sameSite": "Strict",
+    }
 
 
 async def dialog_geometry(page):
@@ -58,7 +98,14 @@ async def main():
             headless=True,
             args=["--no-sandbox", "--disable-gpu"],
         )
-        page = await browser.new_page(viewport={"width": 1440, "height": 900})
+        context = await browser.new_context(viewport={"width": 1440, "height": 900})
+        await context.add_init_script(
+            "localStorage.setItem('webclx:locale', 'zh-CN');"
+        )
+        session_cookie = local_session_cookie()
+        if session_cookie:
+            await context.add_cookies([session_cookie])
+        page = await context.new_page()
         page.on(
             "console",
             lambda message: console_errors.append(message.text)
@@ -85,13 +132,13 @@ async def main():
         options = await page.locator(
             "#terminal-project-command-select option"
         ).all_text_contents()
-        assert "永久切换预设" in options
-        assert "指定（临时）" in options
-        assert "指定预设+fork（持久切换）" in options
-        assert "指定预设+resume（持久切换）" in options
-        assert "原地切换预设+恢复" in options
-        assert "原地切换预设新会话" in options
-        assert "指定预设终端" in options
+        assert "永久" in options
+        assert "临时" in options
+        assert "临时/新终端/fork" in options
+        assert "临时/新终端/resume" in options
+        assert "临时/原地/resume" in options
+        assert "临时/原地/新对话" in options
+        assert "临时/新终端/新对话" in options
 
         await page.click("#terminal-project-command-button")
         await page.click(
@@ -142,6 +189,18 @@ async def main():
                     }},
                 }};
                 window.__inPlacePresetCalls = [];
+                window.__persistDetectedSession = true;
+                const originalRequestJson = requestJson;
+                requestJson = async (endpoint, options) => {{
+                    if (endpoint === '/api/terminal/codex-conversations') {{
+                        return {{
+                            conversations: window.__persistDetectedSession
+                                ? [{{ session_id: '{RESUME_ID}' }}]
+                                : [],
+                        }};
+                    }}
+                    return originalRequestJson(endpoint, options);
+                }};
                 waitForTerminalToolSessionReady = async (sessionId) => {{
                     window.__inPlacePresetCalls.push(['ready', sessionId]);
                 }};
@@ -231,9 +290,53 @@ async def main():
             f"webclx run api '{selected_preset}' -- codex resume {RESUME_ID}",
             source_session_id,
             True,
+        ], calls
+
+        await page.evaluate(
+            "() => {"
+            " window.__inPlacePresetCalls = [];"
+            " window.__persistDetectedSession = false;"
+            "}"
+        )
+        await page.click("#terminal-project-command-button")
+        await page.click(
+            "#terminal-project-command-menu "
+            "button[data-project-action='switch_preset_in_terminal']"
+        )
+        await page.wait_for_selector("#terminal-in-place-preset-dialog[open]")
+        await page.wait_for_function(
+            "() => Boolean(document.querySelector('#terminal-in-place-preset-select').value)"
+        )
+        assert await page.locator("#terminal-in-place-preset-title").inner_text() == "终端内临时切换预设（新会话）"
+        assert (
+            await page.locator("#terminal-in-place-preset-session").input_value()
+            == "新会话（当前 Session 尚未持久化）"
+        )
+        assert "尚无可恢复的对话记录" in await page.locator(
+            "#terminal-status"
+        ).inner_text()
+        await page.evaluate("() => { terminalInPlacePresetTarget.agentExited = true; }")
+        await page.click("#terminal-in-place-preset-submit")
+        await page.wait_for_function(
+            "() => !document.querySelector('#terminal-in-place-preset-dialog').open"
+        )
+        unpersisted_calls = await page.evaluate("() => window.__inPlacePresetCalls")
+        unpersisted_preset = await page.locator(
+            "#terminal-in-place-preset-select"
+        ).input_value()
+        assert unpersisted_calls[2] == [
+            "resume",
+            f"webclx run api '{unpersisted_preset}' -- codex",
+            source_session_id,
+            True,
         ]
 
-        await page.evaluate("() => { window.__inPlacePresetCalls = []; }")
+        await page.evaluate(
+            "() => {"
+            " window.__inPlacePresetCalls = [];"
+            " window.__persistDetectedSession = true;"
+            "}"
+        )
         await page.click("#terminal-project-command-button")
         menu_actions = await page.locator(
             "#terminal-project-command-menu button[data-project-action]"
@@ -248,7 +351,7 @@ async def main():
         await page.wait_for_function(
             "() => Boolean(document.querySelector('#terminal-in-place-preset-select').value)"
         )
-        assert await page.locator("#terminal-in-place-preset-title").inner_text() == "原地切换预设新会话"
+        assert await page.locator("#terminal-in-place-preset-title").inner_text() == "终端内临时切换预设（新会话）"
         assert await page.locator("#terminal-in-place-preset-session").input_value() == "新会话（不恢复）"
         assert await page.locator("#terminal-in-place-preset-submit").inner_text() == "切换并新建"
         await page.evaluate("() => { terminalInPlacePresetTarget.agentExited = true; }")
@@ -270,7 +373,7 @@ async def main():
             source_session_id,
             True,
         ]
-        assert "resume" not in new_session_calls[2][1]
+        assert " resume " not in new_session_calls[2][1]
 
         await browser.close()
 

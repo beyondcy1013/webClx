@@ -239,6 +239,25 @@ function bindPresetFormEventHandlers() {
   renderAuthOauthSession(null);
   updateAuthOauthStatus("");
 
+  if (authOauthStartButton) {
+    authOauthStartButton.addEventListener("click", startAuthOauthSession);
+  }
+  if (authOauthBrowserStartButton) {
+    authOauthBrowserStartButton.addEventListener("click", startAuthBrowserOauthSession);
+  }
+  if (authOauthExchangeButton) {
+    authOauthExchangeButton.addEventListener("click", exchangeAuthBrowserOauthSession);
+  }
+  if (authOauthCopyCodeButton) {
+    authOauthCopyCodeButton.addEventListener("click", copyAuthOauthUserCode);
+  }
+  if (authOauthCopyUrlButton) {
+    authOauthCopyUrlButton.addEventListener("click", copyAuthOauthAuthorizeUrl);
+  }
+  if (authOauthUrlDisplayEl) {
+    authOauthUrlDisplayEl.addEventListener("click", copyAuthOauthAuthorizeUrl);
+  }
+
   authAddConfigOverrideButton.addEventListener("click", () => {
     addConfigOverrideRow(authConfigOverrideControls);
   });
@@ -278,70 +297,6 @@ function bindPresetFormEventHandlers() {
     });
   }
 
-  if (apiAccountImportFileButton && apiAccountImportFileInputEl) {
-    apiAccountImportFileButton.addEventListener("click", () => {
-      apiAccountImportFileInputEl.click();
-    });
-    apiAccountImportFileInputEl.addEventListener("change", () => {
-      const sourceFiles = Array.from(apiAccountImportFileInputEl.files || []);
-      apiAccountImportFileInputEl.value = "";
-      apiManager.importApiAccountsFromFiles(sourceFiles);
-    });
-  }
-
-  if (apiAccountImportTextButton) {
-    apiAccountImportTextButton.addEventListener("click", () => {
-      if (apiAccountImportTextEl) apiAccountImportTextEl.value = "";
-      if (apiAccountImportStatusEl) {
-        updateStatus(apiAccountImportStatusEl, "", "muted");
-      }
-      if (typeof apiAccountImportDialogEl.showModal === "function") {
-        if (!apiAccountImportDialogEl.open) {
-          apiAccountImportDialogEl.showModal();
-        }
-      } else {
-        apiAccountImportDialogEl.setAttribute("open", "");
-      }
-      window.requestAnimationFrame(() => {
-        apiAccountImportTextEl?.focus();
-      });
-    });
-  }
-
-  if (apiAccountImportCancelButton) {
-    apiAccountImportCancelButton.addEventListener("click", () => {
-      if (apiAccountImportDialogEl.open) {
-        apiAccountImportDialogEl.close();
-      }
-    });
-  }
-
-  if (apiAccountImportFormEl) {
-    apiAccountImportFormEl.addEventListener("submit", (event) => {
-      event.preventDefault();
-      const rawText = apiAccountImportTextEl?.value || "";
-      apiManager.importApiAccountsFromText(rawText);
-    });
-  }
-
-  if (authOauthStartButton) {
-    authOauthStartButton.addEventListener("click", () => {
-      startAuthOauthSession();
-    });
-  }
-
-  if (authOauthCopyCodeButton) {
-    authOauthCopyCodeButton.addEventListener("click", copyAuthOauthUserCode);
-  }
-
-  authRefreshAllQuotaButton.addEventListener("click", () => {
-    refreshAllAuthPresetQuotas();
-  });
-
-  if (authTestAllPresetsButton) {
-    authTestAllPresetsButton.addEventListener("click", testAllAuthPresets);
-  }
-
   apiSavePresetButton.addEventListener("click", () => {
     saveApiPreset();
   });
@@ -354,19 +309,9 @@ function bindPresetFormEventHandlers() {
     applyEditingApiPreset();
   });
 
-  if (apiAddPresetButton) {
-    apiAddPresetButton.addEventListener("click", () => {
-      startNewApiPreset();
-    });
-  }
-
   apiClearInputButton.addEventListener("click", () => {
-    resetApiPresetForm(state.editingApiPresetId ? "已取消编辑。" : "输入内容已清空。", "muted");
+    apiManager.cancelApiPresetEdit();
   });
-
-  if (apiTestAllPresetsButton) {
-    apiTestAllPresetsButton.addEventListener("click", testAllApiPresets);
-  }
 
   claudeSavePresetButton.addEventListener("click", () => {
     saveClaudePreset();
@@ -381,7 +326,7 @@ function bindPresetFormEventHandlers() {
   });
 
   claudeClearInputButton.addEventListener("click", () => {
-    resetClaudePresetForm(state.editingClaudePresetId ? "已取消编辑。" : "输入内容已清空。", "muted");
+    claudeManager.cancelClaudePresetEdit();
   });
 
   if (claudeTestAllPresetsButton) {

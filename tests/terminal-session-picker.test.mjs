@@ -29,6 +29,9 @@ function createSelect() {
 
 function createOption() {
   return {
+    classList: {
+      toggle() {},
+    },
     dataset: {},
     selected: false,
     textContent: "",

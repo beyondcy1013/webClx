@@ -1,5 +1,58 @@
 let terminalDesignateForkRunning = false;
 
+async function openTerminalNewSessionDialog(trigger = null, sourcePath = state.currentPath, options = {}) {
+  const sessionAction = options.sessionAction || "new";
+  const sessionId = String(options.sessionId || "").trim();
+  let questionSessionId = String(options.questionSessionId || "").trim();
+  const titleBySessionAction = {
+    fork: "Fork 会话",
+    resume: "进入会话",
+    new: "新开终端",
+    ask: "临时/新终端/提问",
+  };
+  await openTerminalSpecifiedTaskDialog(trigger, {
+    agent: options.agent || "codex",
+    launchTerminal: options.launchTerminal,
+    lockAgent: Boolean(sessionId),
+    mode: "fixed",
+    resetPreset: true,
+    resetTask: true,
+    sessionAction,
+    sessionId,
+    terminalName: options.terminalName,
+    questionSessionId,
+    showSessionField: Boolean(sessionId),
+    temporary: options.temporary === undefined ? false : options.temporary,
+    sourceTerminalName: options.sourceTerminalName,
+    sourcePath,
+    title: titleBySessionAction[sessionAction] || "新开终端",
+    updatePageStatus: options.updatePageStatus,
+  });
+
+  // 先显示对话框，再读取 Session。读取链可能需要等待终端输出，不能阻塞对话框打开。
+  if (sessionAction === "ask" && !questionSessionId) {
+    const sourceSessionId = String(state.activeSessionId || "").trim();
+    const sourceContext = typeof activeTerminalContext === "object" ? activeTerminalContext : null;
+    if (!sourceSessionId || sourceContext?.sessionId !== sourceSessionId) {
+      updateStatus("当前终端尚未连接，无法提问。", "warn");
+      return;
+    }
+    updateStatus("正在读取当前 Session…", "info");
+    try {
+      const detected = await detectAgentResumeIdComplete(sourceSessionId, sourceContext);
+      questionSessionId = String(detected?.resumeId || "").trim();
+      if (!questionSessionId) {
+        throw new Error("没找到当前会话 ID，无法提问。");
+      }
+      terminalSpecifiedTaskSetQuestionSessionId(questionSessionId);
+      syncTerminalSpecifiedTaskImportedTitle();
+      updateStatus(`已读取 Session：${questionSessionId}`, "ok");
+    } catch (error) {
+      updateStatus(error?.message || "读取当前 Session 失败。", "warn");
+    }
+  }
+}
+
 // 指定预设与“高级复制”共用屏幕 -> /status -> 后端完整探测链。
 async function detectTerminalDesignateResumeId(sourceSessionId, sourceContext) {
   return detectAgentResumeIdComplete(sourceSessionId, sourceContext);
@@ -23,20 +76,21 @@ async function openTerminalDesignatePresetDialog({
     : "new";
   // 对话框标题跟随实际命名动作，避免 resume 入口被显示为 fork。
   const titleByNamingAction = {
-    fork: "指定预设+fork（临时）",
-    resume: "指定预设+resume（临时）",
-    new: "指定预设临时终端",
+    fork: "指定预设+fork",
+    resume: "指定预设+resume",
+    new: "指定预设终端",
   };
   const dialogOptions = {
     agent: specifiedPresetAgent(program),
     lockAgent: Boolean(normalizedSessionId),
     mode: "fixed",
     resetTask: true,
+    temporary: true,
     sessionAction: resolvedNamingAction,
     sessionId: normalizedSessionId,
     showSessionField: true,
     sourcePath: String(cwd ?? state.currentPath),
-    title: titleByNamingAction[resolvedNamingAction] || "指定预设临时终端",
+    title: titleByNamingAction[resolvedNamingAction] || "指定预设终端",
   };
   if (sourceTerminalName !== undefined) {
     dialogOptions.sourceTerminalName = sourceTerminalName;

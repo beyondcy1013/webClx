@@ -1,3 +1,5 @@
+import os
+import shutil
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -8,7 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_workspace_icon_select_interaction() -> None:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        browser = playwright.chromium.launch(
+            executable_path=os.environ.get("WEBCLX_TEST_CHROMIUM", shutil.which("chromium") or "/home/third_party/browser-tools/bin/chromium"),
+            headless=True,
+        )
         page = browser.new_page(viewport={"width": 375, "height": 720})
         page.route(
             "http://icons.test/**",
@@ -56,7 +61,23 @@ def test_workspace_icon_select_interaction() -> None:
         assert beta_option.evaluate(
             "element => getComputedStyle(element).backgroundColor"
         ) != "rgba(0, 0, 0, 0)"
-        beta_option.click()
+        # A session-list refresh between press and release used to destroy the
+        # pressed button, reload icons, lose focus, and swallow the click.
+        beta_option.focus()
+        beta_option.hover()
+        page.mouse.down()
+        page.evaluate("""() => {
+          window.pressedOption = document.activeElement;
+          const select = document.querySelector('#sessions');
+          for (let i = 0; i < 5; i++) {
+            select.options[1].textContent = `Alpha 刷新 ${i}`;
+            select.workspaceIconSelectController.sync();
+          }
+        }""")
+        page.wait_for_timeout(100)
+        assert page.evaluate("window.pressedOption.isConnected"), "refresh destroyed pressed menu item"
+        assert page.evaluate("document.activeElement === window.pressedOption"), "refresh stole menu focus"
+        page.mouse.up()
         assert page.locator("#sessions").input_value() == "beta"
         assert page.evaluate("window.changeCount") == 1
         assert "Beta 终端" in trigger.inner_text()
@@ -75,7 +96,10 @@ def test_workspace_icon_select_interaction() -> None:
 
 def test_workspace_icon_select_escapes_scrolling_toolbar() -> None:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
+        browser = playwright.chromium.launch(
+            executable_path=os.environ.get("WEBCLX_TEST_CHROMIUM", shutil.which("chromium") or "/home/third_party/browser-tools/bin/chromium"),
+            headless=True,
+        )
         page = browser.new_page(viewport={"width": 375, "height": 720})
         page.route(
             "http://icons.test/**",
@@ -116,16 +140,19 @@ def test_workspace_icon_select_escapes_scrolling_toolbar() -> None:
         fallback_icons = page.locator(
             ".workspace-icon-select-menu .workspace-project-text-icon"
         ).all_inner_texts()
-        assert fallback_icons[0] == fallback_icons[1]
+        assert fallback_icons[0] != fallback_icons[1]
         assert fallback_icons[0] != fallback_icons[2]
+        assert fallback_icons[1] != fallback_icons[2]
         fallback_hues = page.locator(
             ".workspace-icon-select-menu .workspace-project-icon"
         ).evaluate_all(
             "elements => elements.map(element => "
             "element.style.getPropertyValue('--workspace-project-icon-hue'))"
         )
-        assert fallback_hues[0] == fallback_hues[1] == "210"
-        assert fallback_hues[2] == "347.508"
+        assert fallback_hues[0] == "210"
+        assert fallback_hues[1] == "347.508"
+        print("fallback_hues:", fallback_hues)
+        assert len(set(fallback_hues)) == 3
         geometry = page.evaluate(
             """
             () => {

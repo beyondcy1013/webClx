@@ -17,9 +17,10 @@
 - Codex_API 的自动代理匹配规则只属于 Codex_API。不要因为 Claude_API 的 provider 看起来像国内模型、chat 模型、或和 Codex_API 的自动代理 provider 相似，就把 Claude_API 也强行走本地中转。
 - Codex_API 的自动代理匹配只负责编辑器默认建议。用户手动取消“本机入口”并保存后，`apply_upstream_proxy_on_switch=false` 是权威值；后端不得再按 provider、Base URL 或 model 把它改回 `true`。
 - Codex_API 的协议转换同样以预设显式选择为准。保存为 `responses_proxy=direct` 表示上游原生支持 Responses，后端不得再按 provider、Base URL 或 model 强制推断为 Chat → Responses；缺少该字段的旧预设才允许兼容推断。
+- Codex_API 的所有 provider（包括 webClx 本机中继和协议转换入口）都必须设置 `requires_openai_auth=true`，只从 Codex `auth.json` 载入认证。最终 base URL 指向本机 webClx 时，认证文件写入 `webclx-local-api-proxy:<preset_id>`；Codex 在进程启动时把它载入内存，运行中请求据此固定到原预设，后续共享认证文件切换只影响新进程。网关不得要求新会话依赖全局 active 预设来识别路由。
 - 编辑已有 Codex_API 预设时，前端必须把已保存的“本机入口”值视为用户选择；自动匹配可以提示风险，但不得在打开编辑器或再次保存时把直连 `false` 改回 `true`。自动勾选只适用于尚未形成已保存选择的新建表单。
 - Codex 和 Claude 只读取终端用户真实 HOME 下的共享配置。不得创建配置副本、安装配置 wrapper，或设置配置目录重定向环境变量。
-- `webclx use` 与 `webclx run` 只操作终端用户真实 HOME 下的共享配置，并把当前 cwd 传给 apply 以同步实际生效的项目级配置。二者都是持久 apply；`webclx run` 不得在固定延时后恢复旧预设。真正的一次性隔离任务可由原生任务后端保存和恢复配置，但必须有可验证的任务生命周期，不能把交互式终端启动当成定时恢复任务。
+- `webclx use` 与 `webclx run` 只操作终端用户真实 HOME 下的共享配置，并把当前 cwd 传给配置切换逻辑，以同步实际生效的项目级配置。`webclx use` 是永久切换；`webclx run` 是临时启动事务，必须保存原配置、应用目标预设、原生启动 Agent，在检测到启动信号后数秒恢复原配置，信号不可用（如不在 tmux 内）或限时未出现时以固定数秒兜底恢复。启动信号只用于确定恢复时机，不得因信号缺失或启动异常杀死 Agent；也不得等到 Agent 退出才恢复。
 - 本地代理模式必须保留路由身份。新写入的占位凭据应带预设 id，例如 `webclx-local-api-proxy:<preset_id>`、`webclx-local-claude-proxy:<preset_id>`，让已经运行的进程固定到启动时的预设。
 - 旧通用 token 只是兼容路径。允许按请求体 `model` 推断预设，再 fallback 到 active preset；但新配置写入必须优先使用 preset-scoped token。
 
@@ -38,7 +39,7 @@
 当一个问题看起来需要跨越路由边界才能解决时，应该修边界的责任方：
 
 - 空终端重新启动 Claude 没读到新账号：修终端环境清理或启动命令准备，让新进程读取当前配置文件。
-- 指定 Agent 启动时有人同时切换预设：串行完成 apply，并让当前 Agent 到达可验证的启动就绪状态后，下一次启动才可改写共享配置；目标预设保持生效，不通过私有配置目录绕开，也不靠固定延时猜测配置已经读完。
+- 临时指定 Agent 启动期间有人同时切换预设：共享配置保持开放，普通 apply 最后一次写入决定之后的新进程读取结果。`webclx run` 不持有生命周期租约、不排队其它切换；它只在自身启动链中验证目标配置已被 Agent 读取，然后立即恢复自己记住的原预设。
 - 当前状态显示不对：修状态推导或 summary 逻辑，不要为了让显示匹配而改预设配置。
 - API 账号、Base URL、provider 与 model 出现跨预设混配：把当前凭据和配置文件写入视为同一个串行切换操作；命令行切换、手动切换和编辑活动预设不得并发交错写入。
 - 应用 API 预设必须在同一串行写锁内回读所有目标用户的 `auth.json` 和 `config.toml`，核对凭据身份、Base URL、wire API 和全部有效 config overrides；任一目标不匹配时 apply 必须失败，不能先报告成功再等待后续列表刷新发现混配。
@@ -49,7 +50,7 @@
 - API 预设的 `terminal_env` 不得覆盖 HOME 或任何配置目录变量，`terminal_startup_script` 禁用，避免形成配置文件之外的第二配置源。普通终端网络环境来自终端全局设置与当前应用代理，需要改变时新建终端。
 - 已创建的终端保留创建时的网络环境；切换预设不会在终端内生成受保护脚本或热刷新环境。需要新预设 `terminal_env` 或应用代理时必须新建终端。模型、provider、base URL 和凭据仍以进程启动时读取的当前用户 `auth.json` / `config.toml` 为准。
 - 应用 API 预设时必须把 `upstream_proxy.active_api_proxy_preset_id` 同步为当前预设 id；该字段是旧裸 token 的 fallback 身份，不能因为 scoped token 已覆盖新会话就长期停留在上一个本地代理预设。直连预设应用不得关闭 `codex_api_proxy_enabled`，避免中断仍依赖本地代理的旧会话。
-- 普通手输的裸 `codex` 读取当前用户共享 `auth.json` / `config.toml`。webClx 自动生成直接的 `codex resume` / `codex fork` 命令时，必须在发送命令前读取目标终端用户当前 `config.toml` 的顶级 `model`，并通过 Codex 官方 `--model` 参数传入；`webclx run` 则必须携带 cwd、等目标预设完整应用后，使用 apply 返回的实际配置文件读取 model 并注入其包裹的 resume/fork。不得在预设应用前用旧配置提前注入，也不生成临时 `run.sh`。
+- 普通手输的裸 `codex` 读取当前用户共享 `auth.json` / `config.toml`。webClx 自动生成直接的 `codex resume` / `codex fork` 命令时，必须在发送命令前读取目标终端用户当前 `config.toml` 的顶级 `model`，并通过 Codex 官方 `--model` 参数传入；`webclx run` 则必须携带 cwd、等目标预设完整应用后，使用 apply 返回的实际配置文件读取 model 并注入其包裹的 resume/fork。resume 可以在启动前迁移源 rollout 的历史模型；fork 不得改写源 rollout，必须让 Codex 官方 fork 在 `--model` 覆盖下投影新会话，避免线程存储因源文件缩短或替换而失败。不得在预设应用前用旧配置提前注入，也不生成临时 `run.sh`。
 - 快捷启动环境刷新与预设测试构造网络环境时，必须保留 webClx 服务进程实际传给新终端的 `NO_PROXY` / `no_proxy` 基线，再按用户 shell、终端默认值、预设和当前应用代理依次覆盖。不能因为净化后的 shell 探针只读取 `.bashrc` 而把服务级直连白名单当成“未配置”，否则 LAN 上游会在测试或实际 Codex 启动时误走程序代理。
 - 启动时清理旧 `.terminal-command-env/` 目录；普通终端路径不得再次创建该目录或写入代理凭据。
 - Codex CLI 不支持把 `https://` 代理 URL 直接用于 Responses WebSocket 或 HTTPS transport。HTTPS 程序代理用于终端 Codex 时，必须改写为绑定 loopback 的本地 HTTP 代理入口，由 webClx 透明地以 TLS、原始域名和 SNI 连接对应 HTTPS 代理，并在桥接层替换真实 Basic Auth；桥接身份必须固定到代理预设 id，不能动态跟随后续 active 代理。
@@ -59,7 +60,7 @@
 - Responses 对话探针不能只凭 HTTP 2xx 判成功。必须完整读取响应体，并确认 SSE 收到 `response.completed`（或非流式 JSON 明确标记 `status=completed`）；HTTP 200 后断流、缺少终止事件或响应体读取失败都必须显示为测试失败。
 - Responses 可用性探针的输出预算必须容纳推理模型的内部 reasoning token；预算过低会让实际可用的模型以 `response.incomplete` 正常结束并被误判失败。当前短探针使用 128 tokens，同时仍严格要求 `response.completed`。
 - 测试某个预设必须经过本地代理：给这次测试请求带显式 preset id、header 或 scoped token，不要改全局 active state。
-- 跨模型核验必须串行取得同一全局租约。每个请求保存原配置、应用目标预设并在结束后恢复；请求失败、取消或超时同样必须恢复，不能并发运行不同预设。
+- 跨模型核验请求各自保存原预设、应用目标预设，并在目标 Agent 启动确认后立即恢复。请求可并发运行不同预设；webClx 不通过全局租约改变共享配置最后写入者决定新启动进程配置的事实。
 - access-token-only Codex_OAuth 凭据可以缺少 `id_token` 与 `refresh_token`；内部兼容空值，但写入 `auth.json` 或规范化 JSON 时必须省略空字段。保留 `"id_token": ""` 会让 Codex 把空串当 JWT 解析并报 `invalid ID token format`。
 - Codex_OAuth 多账号文本必须先复用单账号规范化函数完成全量校验，再逐项调用既有单账号保存 API。该流程不是服务端事务；中途请求失败时页面必须报告已保存数量并保留原输入，不能显示整体成功。
 - Codex_API 的账号文件导入支持标准 `auth.json`、CPA 多文件扁平账号、sub2api `accounts[]`、JSON 数组/流，以及 `.zip`、`.tar`、`.tar.gz`、`.tgz`、`.gz` 递归嵌套归档。多个文件必须在同一个 multipart 请求中共同解析并一次性持久化可用账号；单个坏 JSON 可以在响应 `errors` 中报告，但归档层级、条目数、展开大小或路径安全检查失败时必须拒绝整批导入。当前边界为整批上传 32 MiB、展开 128 MiB、2048 个条目、12 层嵌套，并且不得把归档内容写入文件系统。

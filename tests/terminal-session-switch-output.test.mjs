@@ -62,6 +62,32 @@ assert.match(
 
 assert.match(
   outputScrollJs,
+  /function queueTerminalViewportSize\(size, token, context = activeTerminalContext\) \{[\s\S]*context\.outputQueue\.push\(\{ kind: "viewport_size", size: \{ cols, rows \}, token \}\);[\s\S]*drainTerminalOutputQueue\(context\);[\s\S]*\}/,
+  "shared viewport size changes should use the terminal output queue so resize controls cannot overtake xterm writes",
+);
+assert.match(
+  outputScrollJs,
+  /const viewportCanvasDifference = Math\.max\(viewportHeight - canvasHeight, 0\);[\s\S]*const desiredBufferHeight =\s*\n\s*Math\.round\(rowHeight \* buffer\.length\) \+ viewportCanvasDifference;/,
+  "a shared canvas taller than the local viewport must not reduce the terminal scroll area",
+);
+assert.match(
+  outputScrollJs,
+  /if \(nextItem\.kind === "viewport_size"\) \{[\s\S]*applyTerminalCanonicalViewportSize\(nextItem\.size, context\);[\s\S]*drainTerminalOutputQueue\(context\);[\s\S]*return;[\s\S]*\}/,
+  "queued canonical viewport changes should be applied between complete xterm writes",
+);
+assert.match(
+  layoutConnectionJs,
+  /if \(message\?\.type === "terminal_viewport_size"\) \{[\s\S]*queueTerminalViewportSize\(message, token, context\);[\s\S]*return true;[\s\S]*\}/,
+  "the websocket control path should queue the backend's canonical terminal grid",
+);
+assert.match(
+  layoutConnectionJs,
+  /function fitTerminal\(\{ force = false \} = \{\}\) \{[\s\S]*terminalLocalFitSize\(context\)[\s\S]*context\?\.canonicalTerminalSize[\s\S]*term\.resize\(canonical\.cols, canonical\.rows\)[\s\S]*syncTerminalSize\(\{ force, size: localFitSize \}\)/,
+  "local layout measurement must not resize a shared xterm away from the backend's canonical grid",
+);
+
+assert.match(
+  outputScrollJs,
   /function queueTerminalOutput\(bytes, token, context = activeTerminalContext\) \{[\s\S]*transformTerminalSynchronizedOutput\(bytes, context\)[\s\S]*const replay = context\.backlogReplayActive && !context\.backlogReplayEndQueued;[\s\S]*replay[\s\S]*transformTerminalCodexStatusOutput\(synchronizedBytes, context\)[\s\S]*: synchronizedBytes;[\s\S]*context\.outputQueue\.push\(\{ kind: "output", bytes: transformedBytes, token, replay \}\);[\s\S]*if \([\s\S]*replay \|\|[\s\S]*context !== activeTerminalContext \|\|[\s\S]*document\.visibilityState === "hidden"[\s\S]*\) \{[\s\S]*drainTerminalOutputQueue\(context\);[\s\S]*\} else \{[\s\S]*scheduleTerminalOutputDrain\(context\);[\s\S]*\}[\s\S]*\}/,
   "live websocket bytes should preserve synchronized Codex coordinates while backlog output may be compacted",
 );
@@ -157,7 +183,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /const TERMINAL_INPUT_FLUSH_DELAY_MS = 8;[\s\S]*const TERMINAL_LIVE_OUTPUT_COALESCE_MS = 8;[\s\S]*let terminalInputQueue = \[\];[\s\S]*let terminalInputFlushTimer = null;/,
+  /const TERMINAL_INPUT_FLUSH_DELAY_MS = 8;[\s\S]*const TERMINAL_LIVE_OUTPUT_COALESCE_MS = 8;[\s\S]*pendingInputQueue: \[\],[\s\S]*inputFlushTimer: null/,
   "terminal input should keep a short client-side queue so bursts of typed characters do not become one websocket message per key",
 );
 
@@ -171,11 +197,11 @@ const sendTerminalInputTrimLive = terminalJs.indexOf(
   sendTerminalInputStart,
 );
 const sendTerminalInputFlushCondition = terminalJs.indexOf(
-  "if (options.flush || data.length >= 1024 || /[\\r\\n\\u0003\\u0004]/.test(data))",
+  "if (terminalContextSocketOpen(context) &&",
   sendTerminalInputStart,
 );
-const sendTerminalInputFlush = terminalJs.indexOf("flushTerminalInputQueue();", sendTerminalInputStart);
-const sendTerminalInputQueue = terminalJs.indexOf("queueTerminalInput(data);", sendTerminalInputStart);
+const sendTerminalInputFlush = terminalJs.indexOf("  return flushTerminalInputQueue(context) && sendMessage({ type: \"input\", data }, context);", sendTerminalInputStart);
+const sendTerminalInputQueue = terminalJs.indexOf("  return queueTerminalInput(data, context);\n}", sendTerminalInputStart);
 assert.ok(
   sendTerminalInputStart >= 0 &&
     sendTerminalInputInterrupt > sendTerminalInputStart &&
@@ -423,7 +449,9 @@ assert.ok(
     terminalJs.indexOf("fetchedSessions.push(previousActive);", activeAwaitingConfirmationAnchor) > activeAwaitingConfirmationAnchor &&
     terminalJs.indexOf("state.pendingCreatedSessionIds.delete(activeId);", activeAwaitingConfirmationAnchor) >
       terminalJs.indexOf("fetchedSessions.push(previousActive);", activeAwaitingConfirmationAnchor) &&
-    terminalJs.indexOf("state.sessions = sortSessionsByRecentActivity(fetchedSessions);", activeAwaitingConfirmationAnchor) >
+    terminalJs.indexOf("const mergedFetchedSessions = mergeTerminalSessionRecentOpenTimes(", activeAwaitingConfirmationAnchor) >
+      terminalJs.indexOf("state.pendingCreatedSessionIds.delete(activeId);", activeAwaitingConfirmationAnchor) &&
+    terminalJs.indexOf("state.sessions = sortSessionsByRecentActivity(mergedFetchedSessions);", activeAwaitingConfirmationAnchor) >
       terminalJs.indexOf("state.pendingCreatedSessionIds.delete(activeId);", activeAwaitingConfirmationAnchor),
   "loadSessions should carry over only a locally created session awaiting confirmation, then trust later server lists",
 );

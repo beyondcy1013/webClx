@@ -5,7 +5,7 @@ set -euo pipefail
 
 ROOT="/home/codes"
 CACHE_ROOT="/data/cargo-target/webclx-compile/cargo-target"
-QUEUE_DIR="/home/codes/webClx/.webclx-compile-queue"
+QUEUE_DIR="/home/codes/tools/webClx/.webclx-compile-queue"
 APPLY=false
 
 usage() {

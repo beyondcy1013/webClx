@@ -30,3 +30,23 @@ for test_file in tests/*.test.mjs; do node "$test_file" || exit 1; done
 cargo test terminal -- --nocapture
 cargo test
 ```
+
+## Codex 备用屏幕不积累 scrollback（2026-09-26）
+
+现象：部分 Codex 终端在 webClx 独立页只能看到当前一屏，向上翻几乎没有历史。
+
+根因：Codex TUI 默认进入 tmux alternate screen（`alternate_on=1`、
+`history_size≈0`），输出从不写入 scrollback；`capture-pane -S -N` 首屏回放只能
+拿到当前屏幕。devin/agy/codebuddy 等非全屏程序不受影响。已丢失的历史无法找回。
+
+修复：在终端用户真实 `~/.codex/config.toml` 的 `[tui]` 段加
+`alternate_screen = "never"`（字符串枚举，布尔 `false` 会被拒：
+`invalid type: unit variant, expected string only`）。等价于每次启动加
+`--no-alt-screen`，resume/fork 同样受 config 覆盖。验证：新开 tmux 里
+`codex --no-daemon` 后 `alternate_on=0`，transcript 滚动即积累
+`history_size`；`--strict-config` 只查字段名，不校验该枚举取值，须以实际启动为准。
+
+该开关已并入 Codex 公共配置：`src/config_files.rs` 的
+`codex-common-config` API 增加 `alt_screen_disabled`（Option，旧前端不携带时
+保持现状），设置页"Codex 公共配置"对话框与账号工具栏均有"内联模式"勾选。
+取消勾选仅当当前值恰为 `"never"` 时移除该键，保留用户手写的其他取值。

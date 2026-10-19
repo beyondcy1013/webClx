@@ -10,6 +10,7 @@ use auth_core::{
     local_proxy_claude_token_for_preset_id,
 };
 use axum::{
+    Json,
     body::{Body, to_bytes},
     extract::{ConnectInfo, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
@@ -53,6 +54,7 @@ fn active_fallback_warning_only_matches_legacy_bare_tokens() {
 async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
     let (base_url, requests) = spawn_openai_chat_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-deepseek-chat".to_string(),
         name: "DeepSeek Chat".to_string(),
         saved_at: 0,
@@ -73,6 +75,7 @@ async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -114,6 +117,7 @@ async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
 async fn codex_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
     let (base_url, requests) = spawn_openai_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-local-proxy".to_string(),
         name: "Local Proxy Preset".to_string(),
         saved_at: 0,
@@ -134,6 +138,7 @@ async fn codex_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -169,6 +174,7 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
     let (active_base_url, active_requests) = spawn_openai_mock_server().await;
     let (test_base_url, test_requests) = spawn_openai_mock_server().await;
     let active_preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-active-minimax".to_string(),
         name: "Active MiniMax".to_string(),
         saved_at: 0,
@@ -189,9 +195,11 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let test_preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test-deepseek".to_string(),
         name: "Test DeepSeek".to_string(),
         saved_at: 0,
@@ -212,6 +220,7 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_presets_and_proxy_settings(
@@ -247,6 +256,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
     let (old_base_url, old_requests) = spawn_openai_mock_server().await;
     let (new_base_url, new_requests) = spawn_openai_mock_server().await;
     let old_preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-old-local".to_string(),
         name: "Old Local Proxy".to_string(),
         saved_at: 0,
@@ -267,9 +277,11 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let new_preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-new-local".to_string(),
         name: "New Local Proxy".to_string(),
         saved_at: 0,
@@ -290,6 +302,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_presets_and_proxy_settings(
@@ -326,6 +339,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
 async fn claude_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
     let (base_url, requests) = spawn_anthropic_mock_server().await;
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-local-proxy".to_string(),
         name: "Claude Local Proxy Preset".to_string(),
         saved_at: 0,
@@ -381,6 +395,7 @@ async fn claude_proxy_route_uses_preset_id_from_local_proxy_x_api_key() {
     let (old_base_url, old_requests) = spawn_anthropic_mock_server().await;
     let (new_base_url, new_requests) = spawn_anthropic_mock_server().await;
     let old_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-old-local".to_string(),
         name: "Old Claude Local Proxy".to_string(),
         saved_at: 0,
@@ -402,6 +417,7 @@ async fn claude_proxy_route_uses_preset_id_from_local_proxy_x_api_key() {
         switch_count: 0,
     };
     let new_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-new-local".to_string(),
         name: "New Claude Local Proxy".to_string(),
         saved_at: 0,
@@ -455,6 +471,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
     let (minimax_base_url, minimax_requests) = spawn_anthropic_mock_server().await;
     let (glm_base_url, glm_requests) = spawn_anthropic_mock_server().await;
     let minimax_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-minimax".to_string(),
         name: "MiniMax".to_string(),
         saved_at: 0,
@@ -476,6 +493,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
         switch_count: 0,
     };
     let glm_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-glm".to_string(),
         name: "GLM".to_string(),
         saved_at: 0,
@@ -530,6 +548,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
 async fn claude_openai_chat_conversion_routes_messages_to_chat_completions() {
     let (base_url, requests) = spawn_openai_chat_mock_server().await;
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-openai-chat".to_string(),
         name: "OpenAI Chat For Claude".to_string(),
         saved_at: 0,
@@ -598,6 +617,7 @@ async fn claude_openai_chat_conversion_routes_messages_to_chat_completions() {
 async fn claude_openai_responses_conversion_routes_messages_to_responses() {
     let (base_url, requests) = spawn_openai_responses_mock_server().await;
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-openai-responses".to_string(),
         name: "OpenAI Responses For Claude".to_string(),
         saved_at: 0,
@@ -667,6 +687,7 @@ async fn claude_proxy_route_uses_request_model_before_active_fallback() {
     let (minimax_base_url, minimax_requests) = spawn_anthropic_mock_server().await;
     let (glm_base_url, glm_requests) = spawn_anthropic_mock_server().await;
     let minimax_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-minimax".to_string(),
         name: "MiniMax".to_string(),
         saved_at: 0,
@@ -688,6 +709,7 @@ async fn claude_proxy_route_uses_request_model_before_active_fallback() {
         switch_count: 0,
     };
     let glm_preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-glm".to_string(),
         name: "GLM".to_string(),
         saved_at: 0,
@@ -762,6 +784,13 @@ fn test_state_with_api_presets_and_proxy_settings(
         local_api_token: std::sync::Arc::from("test-local-api-token"),
         workspace_settings: settings::SettingsManager::load(&app_dir).unwrap(),
         auth_manager,
+        codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+            app_dir.clone(),
+            std::env::temp_dir(),
+        )
+        .unwrap(),
+        agy_manager: crate::agy::Manager::load(app_dir.clone(), std::env::temp_dir()),
+        devin_manager: crate::devin::DevinManager::load(app_dir.clone(), std::env::temp_dir()),
         codex_oauth_manager: auth::CodexOAuthManager::new(),
         codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
         proxy_manager: proxy::ProxyManager::load(&app_dir).unwrap(),
@@ -776,11 +805,9 @@ fn test_state_with_api_presets_and_proxy_settings(
         preset_test_scheduler: auth::PresetTestScheduler::new(
             &app_dir.join(".webclx-terminal-sessions.json"),
         ),
-        preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-            app_dir.join(".webclx-preset-run-lease.json"),
-        ),
         agent_manager: crate::agent::AgentManager::new(&app_dir),
         agent_config: crate::agent::AgentConfigManager::new(&app_dir),
+        collaboration_manager: crate::collaboration::CollaborationManager::new(&app_dir),
     }
 }
 
@@ -809,6 +836,13 @@ fn test_state_with_claude_presets_and_proxy_settings(
         local_api_token: std::sync::Arc::from("test-local-api-token"),
         workspace_settings: settings::SettingsManager::load(&app_dir).unwrap(),
         auth_manager,
+        codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+            app_dir.clone(),
+            std::env::temp_dir(),
+        )
+        .unwrap(),
+        agy_manager: crate::agy::Manager::load(app_dir.clone(), std::env::temp_dir()),
+        devin_manager: crate::devin::DevinManager::load(app_dir.clone(), std::env::temp_dir()),
         codex_oauth_manager: auth::CodexOAuthManager::new(),
         codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
         proxy_manager: proxy::ProxyManager::load(&app_dir).unwrap(),
@@ -823,12 +857,229 @@ fn test_state_with_claude_presets_and_proxy_settings(
         preset_test_scheduler: auth::PresetTestScheduler::new(
             &app_dir.join(".webclx-terminal-sessions.json"),
         ),
-        preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-            app_dir.join(".webclx-preset-run-lease.json"),
-        ),
         agent_manager: crate::agent::AgentManager::new(&app_dir),
         agent_config: crate::agent::AgentConfigManager::new(&app_dir),
+        collaboration_manager: crate::collaboration::CollaborationManager::new(&app_dir),
     }
+}
+
+#[tokio::test]
+async fn anthropic_responses_replaces_placeholder_bearer_with_preset_key() {
+    let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
+    let preset = StoredApiPreset {
+        interchange_source: None,
+        id: "api-anthropic-placeholder".to_string(),
+        name: "Anthropic Placeholder".to_string(),
+        saved_at: 0,
+        provider_name: "mock-anthropic".to_string(),
+        base_url,
+        management_url: None,
+        wire_api: Some("responses".to_string()),
+        responses_proxy: Some(ApiResponsesProxyMode::AnthropicChat),
+        apply_upstream_proxy_on_switch: true,
+        config_overrides: Vec::new(),
+        legacy_config_key: None,
+        legacy_config_value: None,
+        legacy_secondary_config_key: None,
+        legacy_secondary_config_value: None,
+        terminal_env: Vec::new(),
+        terminal_startup_script: None,
+        api_key: "sk-real-preset-key".to_string(),
+        access_token: String::new(),
+        account_id: String::new(),
+        access_mode: None,
+        favorite: false,
+        switch_count: 0,
+    };
+    let preset_id = preset.id.clone();
+    let mut later_preset = preset.clone();
+    later_preset.id = "api-gpt-56".to_string();
+    later_preset.name = "GPT 5.6".to_string();
+    later_preset.provider_name = "GPT provider".to_string();
+    later_preset.base_url = "https://example.invalid/v1".to_string();
+    later_preset.responses_proxy = Some(ApiResponsesProxyMode::Direct);
+    later_preset.api_key = "sk-gpt".to_string();
+    let state = test_state_with_api_presets_and_proxy_settings(
+        vec![preset, later_preset.clone()],
+        UpstreamProxySettings {
+            active_api_proxy_preset_id: Some(later_preset.id),
+            ..Default::default()
+        },
+    );
+    let placeholder = local_proxy_api_key_for_preset_id(&preset_id);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {placeholder}")).unwrap(),
+    );
+
+    let response = codex_proxy::anthropic_responses(
+        State(state),
+        ConnectInfo("127.0.0.1:11111".parse().unwrap()),
+        headers,
+        Json(serde_json::json!({
+            "model": "GLM-5.3",
+            "input": "reply ok",
+            "stream": false
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = requests.lock().unwrap().join("\n");
+    let normalized = captured.to_ascii_lowercase();
+    assert!(
+        normalized.contains("authorization: bearer sk-real-preset-key"),
+        "占位 Bearer 应替换为预设凭据, 实际: {captured}"
+    );
+    assert!(
+        normalized.contains("x-api-key: sk-real-preset-key"),
+        "Anthropic x-api-key 应使用预设凭据, 实际: {captured}"
+    );
+    assert!(!captured.contains(&placeholder), "本地占位凭据不得透传到上游, 实际: {captured}");
+}
+
+#[tokio::test]
+async fn anthropic_responses_legacy_token_matches_unique_anthropic_model_after_switch() {
+    let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
+    let mut anthropic_preset = StoredApiPreset {
+        interchange_source: None,
+        id: "api-anthropic-legacy".to_string(),
+        name: "Anthropic Legacy GLM".to_string(),
+        saved_at: 0,
+        provider_name: "mock-anthropic".to_string(),
+        base_url,
+        management_url: None,
+        wire_api: Some("responses".to_string()),
+        responses_proxy: Some(ApiResponsesProxyMode::AnthropicChat),
+        apply_upstream_proxy_on_switch: true,
+        config_overrides: Vec::new(),
+        legacy_config_key: None,
+        legacy_config_value: None,
+        legacy_secondary_config_key: None,
+        legacy_secondary_config_value: None,
+        terminal_env: Vec::new(),
+        terminal_startup_script: None,
+        api_key: "sk-anthropic-legacy".to_string(),
+        access_token: String::new(),
+        account_id: String::new(),
+        access_mode: None,
+        favorite: false,
+        switch_count: 0,
+    };
+    anthropic_preset
+        .config_overrides
+        .push(auth_core::PresetConfigOverride {
+            key: Some("model".to_string()),
+            value: Some("GLM-5.3".to_string()),
+        });
+    let mut current_preset = anthropic_preset.clone();
+    current_preset.id = "api-current-gpt".to_string();
+    current_preset.name = "Current GPT".to_string();
+    current_preset.base_url = "https://example.invalid/v1".to_string();
+    current_preset.responses_proxy = Some(ApiResponsesProxyMode::Direct);
+    current_preset.api_key = "sk-current-gpt".to_string();
+    current_preset.config_overrides = vec![auth_core::PresetConfigOverride {
+        key: Some("model".to_string()),
+        value: Some("gpt-5.6-sol".to_string()),
+    }];
+    let state = test_state_with_api_presets_and_proxy_settings(
+        vec![anthropic_preset, current_preset.clone()],
+        UpstreamProxySettings {
+            active_api_proxy_preset_id: Some(current_preset.id),
+            ..Default::default()
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers
+        .insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer webclx-local-api-proxy"));
+
+    let response = codex_proxy::anthropic_responses(
+        State(state),
+        ConnectInfo("127.0.0.1:11111".parse().unwrap()),
+        headers,
+        Json(serde_json::json!({
+            "model": "GLM-5.3",
+            "input": "reply ok",
+            "stream": false
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = requests.lock().unwrap().join("\n");
+    assert!(
+        captured
+            .to_ascii_lowercase()
+            .contains("sk-anthropic-legacy")
+    );
+    assert!(!captured.to_ascii_lowercase().contains("sk-current-gpt"));
+}
+
+#[tokio::test]
+async fn anthropic_responses_preserves_real_client_bearer() {
+    let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
+    let preset = StoredApiPreset {
+        interchange_source: None,
+        id: "api-anthropic-client-bearer".to_string(),
+        name: "Anthropic Client Bearer".to_string(),
+        saved_at: 0,
+        provider_name: "mock-anthropic".to_string(),
+        base_url,
+        management_url: None,
+        wire_api: Some("responses".to_string()),
+        responses_proxy: Some(ApiResponsesProxyMode::AnthropicChat),
+        apply_upstream_proxy_on_switch: true,
+        config_overrides: Vec::new(),
+        legacy_config_key: None,
+        legacy_config_value: None,
+        legacy_secondary_config_key: None,
+        legacy_secondary_config_value: None,
+        terminal_env: Vec::new(),
+        terminal_startup_script: None,
+        api_key: "sk-real-preset-key".to_string(),
+        access_token: String::new(),
+        account_id: String::new(),
+        access_mode: None,
+        favorite: false,
+        switch_count: 0,
+    };
+    let state = test_state_with_api_proxy_settings(
+        preset,
+        UpstreamProxySettings {
+            active_api_proxy_preset_id: Some("api-anthropic-client-bearer".to_string()),
+            ..Default::default()
+        },
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer sk-client-provided"));
+
+    let response = codex_proxy::anthropic_responses(
+        State(state),
+        ConnectInfo("127.0.0.1:11111".parse().unwrap()),
+        headers,
+        Json(serde_json::json!({
+            "model": "GLM-5.3",
+            "input": "reply ok",
+            "stream": false
+        })),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let captured = requests.lock().unwrap().join("\n");
+    let normalized = captured.to_ascii_lowercase();
+    assert!(
+        normalized.contains("authorization: bearer sk-client-provided"),
+        "真实客户端 Bearer 应原样保留, 实际: {captured}"
+    );
+    assert!(
+        normalized.contains("x-api-key: sk-real-preset-key"),
+        "Anthropic x-api-key 仍应使用预设凭据, 实际: {captured}"
+    );
 }
 
 fn unique_temp_dir(label: &str) -> PathBuf {
@@ -844,6 +1095,7 @@ async fn openai_upstream_proxy_forwards_client_bearer_instead_of_preset_key() {
     // 客户端带真实非占位 Bearer → 上游应收到客户端 token，不是预设的 sk-test。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-preset-key-test".to_string(),
         name: "Preset Key Test".to_string(),
         saved_at: 0,
@@ -864,6 +1116,7 @@ async fn openai_upstream_proxy_forwards_client_bearer_instead_of_preset_key() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -904,6 +1157,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_placeholder_tok
     // 占位 token (webclx-local-api-proxy:<id>) 是预设身份标识, 必须回到预设凭据。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-placeholder-test".to_string(),
         name: "Placeholder Test".to_string(),
         saved_at: 0,
@@ -924,6 +1178,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_placeholder_tok
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let preset_id = preset.id.clone();
@@ -963,6 +1218,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_no_credential()
     // 无凭据 → 预设兜底 (旧的本机直连客户端行为不变)。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-no-cred-test".to_string(),
         name: "No Cred Test".to_string(),
         saved_at: 0,
@@ -983,6 +1239,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_no_credential()
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -1018,6 +1275,7 @@ async fn openai_upstream_proxy_injects_account_id_and_access_token_for_oauth_pre
     // OAuth 预设 → 使用 preset.base_url 上游 + 注入 access_token + account_id。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-oauth-test".to_string(),
         name: "OAuth Account".to_string(),
         saved_at: 0,
@@ -1038,6 +1296,7 @@ async fn openai_upstream_proxy_injects_account_id_and_access_token_for_oauth_pre
         access_token: "oauth-access-tok".to_string(),
         account_id: "acct-oauth-123".to_string(),
         access_mode: Some(ApiAccessMode::ChatgptOauth),
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -1082,6 +1341,7 @@ async fn openai_upstream_proxy_rejects_non_loopback_when_gateway_disabled() {
     // gateway_listen_non_loopback=false (默认) + 非 loopback → 403。
     let (base_url, _requests) = spawn_openai_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-gateway-off-test".to_string(),
         name: "Gateway Off Test".to_string(),
         saved_at: 0,
@@ -1102,6 +1362,7 @@ async fn openai_upstream_proxy_rejects_non_loopback_when_gateway_disabled() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_api_proxy_settings(
@@ -1133,6 +1394,7 @@ async fn openai_upstream_proxy_allows_non_loopback_when_gateway_enabled() {
     // gateway_listen_non_loopback=true + 非 loopback → 放行。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-gateway-on-test".to_string(),
         name: "Gateway On Test".to_string(),
         saved_at: 0,
@@ -1153,6 +1415,7 @@ async fn openai_upstream_proxy_allows_non_loopback_when_gateway_enabled() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let state = test_state_with_gateway_enabled_api_proxy_settings(
@@ -1294,6 +1557,33 @@ async fn spawn_anthropic_mock_server() -> (String, Arc<Mutex<Vec<String>>>) {
     (format!("http://{addr}"), requests)
 }
 
+async fn spawn_anthropic_auth_capturing_mock_server() -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let requests_for_task = Arc::clone(&requests);
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buffer = vec![0_u8; 8192];
+        let Ok(read) = stream.read(&mut buffer).await else {
+            return;
+        };
+        let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+        requests_for_task.lock().unwrap().push(request);
+        let body = r#"{"id":"msg_glm53","type":"message","role":"assistant","model":"GLM-5.3","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+    });
+
+    (format!("http://{addr}"), requests)
+}
+
 /// 捕获完整请求(含 Authorization 头)的 OpenAI mock,用于验证客户端凭据透传。
 async fn spawn_openai_auth_capturing_mock_server() -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1348,6 +1638,13 @@ fn test_state_with_gateway_enabled_api_proxy_settings(
         local_api_token: std::sync::Arc::from("test-local-api-token"),
         workspace_settings: settings::SettingsManager::load(&app_dir).unwrap(),
         auth_manager,
+        codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+            app_dir.clone(),
+            std::env::temp_dir(),
+        )
+        .unwrap(),
+        agy_manager: crate::agy::Manager::load(app_dir.clone(), std::env::temp_dir()),
+        devin_manager: crate::devin::DevinManager::load(app_dir.clone(), std::env::temp_dir()),
         codex_oauth_manager: auth::CodexOAuthManager::new(),
         codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
         proxy_manager: proxy::ProxyManager::load(&app_dir).unwrap(),
@@ -1362,10 +1659,8 @@ fn test_state_with_gateway_enabled_api_proxy_settings(
         preset_test_scheduler: auth::PresetTestScheduler::new(
             &app_dir.join(".webclx-terminal-sessions.json"),
         ),
-        preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-            app_dir.join(".webclx-preset-run-lease.json"),
-        ),
         agent_manager: crate::agent::AgentManager::new(&app_dir),
         agent_config: crate::agent::AgentConfigManager::new(&app_dir),
+        collaboration_manager: crate::collaboration::CollaborationManager::new(&app_dir),
     }
 }

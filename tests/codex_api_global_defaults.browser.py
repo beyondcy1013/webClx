@@ -21,6 +21,7 @@ def install_common_config_route(page, captured_payloads=None):
         "exists": True,
         "approval_never": True,
         "sandbox_full_access": False,
+        "animations_disabled": True,
         "approval_policy": "never",
         "sandbox_mode": "workspace-write",
     }
@@ -69,6 +70,10 @@ def route_local_static(route, request):
     route.continue_()
 
 
+def route_local_api(route):
+    route.fulfill(status=200, content_type="application/json", body="{}")
+
+
 def inspect_layout(browser, viewport, screenshot_path):
     page = browser.new_page(viewport=viewport, is_mobile=viewport["width"] < 600)
     console_errors = []
@@ -78,15 +83,23 @@ def inspect_layout(browser, viewport, screenshot_path):
     )
     if USE_LOCAL_STATIC:
         page.route("**/*", route_local_static)
+        page.route("**/api/**", route_local_api)
     install_common_config_route(page)
     page.goto(f"{BASE_URL}/codex_api", wait_until="domcontentloaded", timeout=30_000)
-    page.wait_for_selector("#codex-default-config-list tr", timeout=10_000)
+    page.wait_for_selector("#codex-default-config-list tr", state="attached", timeout=10_000)
+    btn_box = page.locator("#codex-global-settings-open").bounding_box()
+    bar_box = page.locator("#llm-global-options-bar").bounding_box()
+    if bar_box and btn_box:
+        assert (bar_box["x"] + bar_box["width"]) - (btn_box["x"] + btn_box["width"]) <= 1.0
+    page.locator("#codex-global-settings-open").click()
+    page.wait_for_selector("#codex-global-settings-dialog[open]")
 
     defaults = page.locator("#codex-api-global-defaults")
     defaults.scroll_into_view_if_needed()
     assert defaults.is_visible()
     assert page.locator("#codex-common-approval-never").is_checked()
     assert page.locator("#codex-common-sandbox-full-access").is_checked() is (not USE_LOCAL_STATIC)
+    assert page.locator("#codex-common-animations-disabled").is_checked()
     assert page.locator("#codex-common-config-path").text_content() == (
         "/home/root/.codex/config.toml"
     )
@@ -129,9 +142,12 @@ def inspect_save(browser):
     )
     if USE_LOCAL_STATIC:
         page.route("**/*", route_local_static)
+        page.route("**/api/**", route_local_api)
     install_common_config_route(page, captured_common_payloads)
     page.goto(f"{BASE_URL}/codex_api", wait_until="domcontentloaded", timeout=30_000)
-    page.wait_for_selector("#codex-default-config-list tr", timeout=10_000)
+    page.wait_for_selector("#codex-default-config-list tr", state="attached", timeout=10_000)
+    page.locator("#codex-global-settings-open").click()
+    page.wait_for_selector("#codex-global-settings-dialog[open]")
 
     def capture_settings_put(route, request):
         if request.method != "PUT":
@@ -151,6 +167,7 @@ def inspect_save(browser):
     page.locator("#codex-api-global-defaults").scroll_into_view_if_needed()
     page.locator("#codex-common-approval-never").uncheck()
     page.locator("#codex-common-sandbox-full-access").check()
+    page.locator("#codex-common-animations-disabled").uncheck()
     page.locator("#codex-common-config-save").click()
     page.wait_for_selector("#codex-common-config-status[data-tone=ok]")
     page.locator("#codex-default-config-add").click()
@@ -162,7 +179,12 @@ def inspect_save(browser):
 
     assert len(captured_payloads) == 1
     assert captured_common_payloads == [
-        {"approval_never": False, "sandbox_full_access": True}
+        {
+            "approval_never": False,
+            "sandbox_full_access": True,
+            "animations_disabled": False,
+            "alt_screen_disabled": False,
+        }
     ]
     assert set(captured_payloads[0]) == {"codex_default_config_entries"}
     assert captured_payloads[0]["codex_default_config_entries"][-1] == {

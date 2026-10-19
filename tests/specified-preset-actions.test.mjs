@@ -33,34 +33,48 @@ function createHarness(responses = []) {
   return { sandbox, requests, launches };
 }
 
-test("launch applies the selected preset before opening a direct fork terminal", async () => {
+test("temporary fork delegates the real config transaction to webclx run", async () => {
   const harness = createHarness();
   const result = await harness.sandbox.executeSpecifiedPreset({
     action: "launch",
     presetId: "preset-grok",
-    cwd: "/home/codes/webClx",
+    cwd: "/home/codes/tools/webClx",
+    temporary: true,
     command: "codex fork 019f2350-db5f-7cf0-b476-1cf14855b05d",
     terminalName: "webClx_QA_fork",
     quickStart: false,
   });
 
-  assert.equal(
-    harness.requests[0].url,
-    "/api/auth/api-presets/preset-grok/apply?project_path=%2Fhome%2Fcodes%2FwebClx",
-  );
-  assert.equal(harness.requests[0].options.method, "PUT");
+  assert.deepEqual(harness.requests, []);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.launches)), [
     {
-      cwd: "/home/codes/webClx",
+      cwd: "/home/codes/tools/webClx",
       options: {
         runCommand: "webclx run api 'preset-grok' -- codex fork 019f2350-db5f-7cf0-b476-1cf14855b05d",
         quickStart: false,
         terminalName: "webClx_QA_fork",
-        codexApiPresetId: "preset-grok",
+        codexApiPresetId: "",
+        autoCompact: true,
       },
     },
   ]);
   assert.equal(result.launchResult, "launched");
+  assert.equal(result.applied.temporary, true);
+});
+
+test("new terminal launch forwards the suffix for backend-assigned naming", async () => {
+  const harness = createHarness();
+  await harness.sandbox.executeSpecifiedPreset({
+    action: "launch",
+    presetId: "preset-gpt",
+    cwd: "/home/codes/tools/webClx",
+    temporary: true,
+    sessionAction: "new",
+    terminalName: "webClx_1_终端如何与deepseek agent通讯",
+    terminalNameSuffix: "终端如何与deepseek agent通讯",
+  });
+
+  assert.equal(harness.launches[0].options.terminalNameSuffix, "终端如何与deepseek agent通讯");
 });
 
 test("the shared call submits and polls a Codex task with optional parameters", async () => {
@@ -98,12 +112,12 @@ test("apply accepts optional project and proxy preference parameters", async () 
   await harness.sandbox.executeSpecifiedPreset({
     action: "apply",
     presetId: "preset-1",
-    projectPath: "/home/codes/webClx",
+    projectPath: "/home/codes/tools/webClx",
     respectSavedProxyPreference: false,
   });
   assert.equal(
     harness.requests[0].url,
-    "/api/auth/api-presets/preset-1/apply?project_path=%2Fhome%2Fcodes%2FwebClx&respect_saved_proxy_preference=false",
+    "/api/auth/codex-accounts/api/preset-1/apply?project_path=%2Fhome%2Fcodes%2FwebClx&respect_saved_proxy_preference=false",
   );
 });
 
@@ -120,13 +134,14 @@ test("a preset selector must contain exactly one lookup field", async () => {
   );
 });
 
-test("launch applies the preset before direct Codex resume and derives the terminal name", async () => {
+test("temporary Codex resume uses webclx run and derives the terminal name", async () => {
   const harness = createHarness();
   await harness.sandbox.executeSpecifiedPreset({
     action: "launch",
     agent: "codex",
     presetId: "preset-grok",
-    cwd: "/home/codes/webClx",
+    cwd: "/home/codes/tools/webClx",
+    temporary: true,
     sessionAction: "resume",
     sessionId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
     sourceTerminalName: "KTPro_3.1.6_5",
@@ -134,12 +149,13 @@ test("launch applies the preset before direct Codex resume and derives the termi
   });
 
   assert.deepEqual(JSON.parse(JSON.stringify(harness.launches[0])), {
-    cwd: "/home/codes/webClx",
+    cwd: "/home/codes/tools/webClx",
     options: {
       runCommand: "webclx run api 'preset-grok' -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d '继续修复'",
       quickStart: false,
       terminalName: "KTPro_3.1.6_5_resume",
-      codexApiPresetId: "preset-grok",
+      codexApiPresetId: "",
+      autoCompact: true,
     },
   });
 });
@@ -181,19 +197,19 @@ test("model hints never enter generated shell commands", () => {
   );
 });
 
-test("launch applies Claude config before direct fork without falling through to Codex", async () => {
+test("temporary Claude fork delegates the config transaction to webclx run", async () => {
   const harness = createHarness();
   await harness.sandbox.executeSpecifiedPreset({
     action: "launch",
     agent: "claude",
     presetId: "claude-preset",
+    temporary: true,
     sessionAction: "fork",
     sessionId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
     sourceTerminalName: "ClaudeWork",
   });
 
-  assert.equal(harness.requests[0].url, "/api/auth/claude-presets/claude-preset/apply");
-  assert.equal(harness.requests[0].options.method, "PUT");
+  assert.deepEqual(harness.requests, []);
   assert.equal(
     harness.launches[0].options.runCommand,
     "webclx run claude 'claude-preset' -- claude --resume 019f2350-db5f-7cf0-b476-1cf14855b05d --fork-session",
@@ -202,21 +218,62 @@ test("launch applies Claude config before direct fork without falling through to
   assert.equal(harness.launches[0].options.codexApiPresetId, "");
 });
 
-test("launch defers to webclx run when the selected preset is queued", async () => {
-  const harness = createHarness([{ deferred: true }]);
+test("temporary launch lets webclx run own apply, wait, and restore", async () => {
+  const harness = createHarness();
   const result = await harness.sandbox.executeSpecifiedPreset({
     action: "launch",
     presetId: "preset-grok",
+    temporary: true,
     command: "codex",
   });
   assert.equal(result.launchResult, "launched");
   assert.equal(harness.launches.length, 1);
   assert.equal(harness.launches[0].options.runCommand, "webclx run api 'preset-grok' -- codex");
+  assert.deepEqual(harness.requests, []);
+  assert.equal(result.applied.temporary, true);
+});
+
+test("explicit permanent launch applies shared config before direct Codex", async () => {
+  const harness = createHarness();
+  const result = await harness.sandbox.executeSpecifiedPreset({
+    action: "launch",
+    presetId: "preset-grok",
+    command: "codex",
+    temporary: false,
+  });
+  assert.equal(
+    harness.requests[0].url,
+    "/api/auth/codex-accounts/api/preset-grok/apply",
+  );
+  assert.equal(harness.requests[0].options.method, "PUT");
+  assert.equal(
+    harness.launches[0].options.runCommand,
+    "codex",
+  );
+  assert.equal(result.launchResult, "launched");
+});
+
+test("a deferred permanent launch never starts an agent with stale config", async () => {
+  const harness = createHarness([{
+    deferred: true,
+    name: "Pending",
+    preset_id: "preset-grok",
+  }]);
+  const result = await harness.sandbox.executeSpecifiedPreset({
+    action: "launch",
+    presetId: "preset-grok",
+    command: "codex",
+    temporary: false,
+  });
+
+  assert.equal(harness.requests.length, 1);
+  assert.deepEqual(harness.launches, []);
+  assert.equal(result.launchResult, null);
   assert.equal(result.applied.deferred, true);
 });
 
 test("workspace loads the current shared preset launcher", () => {
-  assert.match(indexHtml, /specified-preset-actions\.js\?v=20260812a/);
+  assert.match(indexHtml, /specified-preset-actions\.js\?v=20260928-cline-opencode/);
 });
 
 test("resume and fork reject malformed session IDs", async () => {

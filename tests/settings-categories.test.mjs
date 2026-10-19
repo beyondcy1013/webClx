@@ -64,7 +64,7 @@ assert.equal(
 );
 assert.match(
   appHtml,
-  /styles-base\.css\?v=20260806b[\s\S]*styles-settings\.css\?v=20260802g[\s\S]*app-terminal-tools-settings\.js\?v=20260727c[\s\S]*app-settings-categories\.js\?v=20260727b[\s\S]*app-navigation-tabs\.js\?v=20260725e[\s\S]*app-core-event-bindings\.js\?v=20260806a[\s\S]*app-settings-load-save\.js\?v=20260730a/,
+  /styles-base\.css\?v=20260916groups3[\s\S]*styles-settings\.css\?v=20260915a[\s\S]*app-terminal-tools-settings\.js\?v=20260727c[\s\S]*app-settings-categories\.js\?v=20260727b[\s\S]*app-navigation-tabs\.js\?v=20260821b[\s\S]*app-core-event-bindings\.js\?v=20260916a[\s\S]*app-settings-load-save\.js\?v=20260816b/,
   "split settings styles should load before the category registry and navigation",
 );
 assert.match(

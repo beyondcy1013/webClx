@@ -246,8 +246,8 @@
           state.claudePresetsLoaded = false;
         }
         const activeAuthTabUpdated =
-          (state.activeTab === "auth" && selectedSet.has("auth_presets")) ||
-          (state.activeTab === "api" && selectedSet.has("api_presets")) ||
+          (state.activeTab === "api" &&
+            (selectedSet.has("auth_presets") || selectedSet.has("api_presets"))) ||
           (state.activeTab === "claude" && selectedSet.has("claude_presets"));
         if (activeAuthTabUpdated) {
           await refreshAuthPanels();

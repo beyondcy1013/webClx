@@ -65,11 +65,19 @@
       authFormStatusEl,
       authConfigOverrideControls,
       authOauthStartButton,
+      authOauthBrowserStartButton,
+      authOauthExchangeButton,
+      authOauthCallbackInputEl,
+      authOauthCallbackFieldEl,
       authOauthOpenLinkEl,
       authOauthCopyCodeButton,
       authOauthSessionPanelEl,
       authOauthSessionSummaryEl,
       authOauthUserCodeEl,
+      authOauthUrlContainerEl,
+      authOauthUrlDisplayEl,
+      authOauthOpenUrlEl,
+      authOauthCopyUrlButton,
       authImportDialogEl,
       authImportTextEl,
       authOauthStatusEl,
@@ -149,28 +157,117 @@ function mergeAuthSource(item, inherited = {}) {
   };
 }
 
-function parseAuthSources(rawText) {
-  let parsed;
+// Depth-aware JSON scanner: extracts complete top-level JSON values ({...} or
+// [...]) from mixed text (chat logs, Markdown, prose).  Ported from sub2api
+// enhancedImport.ts so that pasted terminal conversations can be imported directly.
+function extractAuthJsonSources(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  // Fast path: the whole text is valid JSON.
   try {
-    parsed = JSON.parse(stripJsonCodeFence(rawText));
+    JSON.parse(trimmed);
+    return [trimmed];
   } catch {
-    throw new Error("内容不是有效的 JSON。");
+    // fall through to scan
   }
 
-  const inherited = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  const candidates = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed?.accounts)
-      ? parsed.accounts
-      : [parsed];
-  const sources = candidates
-    .map((item) => mergeAuthSource(item, inherited))
-    .filter((item) => item && typeof item === "object");
-  if (sources.length === 0) {
-    throw new Error("内容缺少可用的账号对象。");
+  const sources = [];
+  for (let start = 0; start < text.length; start += 1) {
+    const opener = text[start];
+    if (opener !== "{" && opener !== "[") continue;
+    // Walk forward tracking nesting and string escapes.
+    const stack = [];
+    let inString = false;
+    let escaped = false;
+    let end = null;
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) { escaped = false; }
+        else if (ch === "\\") { escaped = true; }
+        else if (ch === "\"") { inString = false; }
+        continue;
+      }
+      if (ch === "\"") { inString = true; }
+      else if (ch === "{" || ch === "[") { stack.push(ch); }
+      else if (ch === "}" || ch === "]") {
+        const expected = stack[stack.length - 1] === "{" ? "}" : "]";
+        if (expected !== ch) { end = null; break; }
+        stack.pop();
+        if (stack.length === 0) { end = i; break; }
+      }
+    }
+    if (end === null) return [];        // unbalanced — give up
+    const candidate = text.slice(start, end + 1);
+    start = end;
+    try {
+      JSON.parse(candidate);
+      sources.push(candidate);
+    } catch {
+      // Balanced braces in prose — skip.
+    }
   }
-
   return sources;
+}
+
+function parseAuthSources(rawText) {
+  // Try strict JSON first (including single code-fence strip).
+  const strictText = stripJsonCodeFence(rawText);
+  let strictParsed = null;
+  try {
+    strictParsed = JSON.parse(strictText);
+  } catch {
+    // Not strict JSON — try enhanced mixed-text extraction below.
+  }
+
+  if (strictParsed !== null) {
+    // Original strict-JSON path.
+    const inherited = strictParsed && typeof strictParsed === "object" && !Array.isArray(strictParsed) ? strictParsed : {};
+    const candidates = Array.isArray(strictParsed)
+      ? strictParsed
+      : Array.isArray(strictParsed?.accounts)
+        ? strictParsed.accounts
+          : [strictParsed];
+    const sources = candidates
+      .map((item) => mergeAuthSource(item, inherited))
+      .filter((item) => item && typeof item === "object");
+    if (sources.length === 0) {
+      throw new Error("内容缺少可用的账号对象。");
+    }
+    return sources;
+  }
+
+  // Enhanced path: scan mixed text for embedded JSON segments.
+  const jsonSegments = extractAuthJsonSources(rawText);
+  if (jsonSegments.length === 0) {
+    throw new Error("内容不是有效的 JSON，也未找到可识别的 JSON 片段。");
+  }
+
+  const allSources = [];
+  const parseErrors = [];
+  for (const segment of jsonSegments) {
+    try {
+      const parsed = JSON.parse(segment);
+      const inherited = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+      const candidates = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.accounts)
+          ? parsed.accounts
+          : [parsed];
+      const segmentSources = candidates
+        .map((item) => mergeAuthSource(item, inherited))
+        .filter((item) => item && typeof item === "object");
+      allSources.push(...segmentSources);
+    } catch (error) {
+      parseErrors.push(error?.message || String(error));
+    }
+  }
+
+  if (allSources.length === 0) {
+    const detail = parseErrors.length > 0 ? `：${parseErrors.slice(0, 2).join("；")}` : "";
+    throw new Error(`未从文本中提取到有效账号${detail}`);
+  }
+  return allSources;
 }
 
 function parseAuthSource(rawText) {
@@ -830,6 +927,7 @@ async function saveAuthPresetFromRawText(
     );
     updateStatus(statusElement, `${isEditing ? "已更新" : "已保存"}预设：${response.preset.name}`, "ok");
     await loadAuthPresets();
+    await window.loadCodexAccounts?.();
     return {
       ...response,
       saved_count: 1,
@@ -967,14 +1065,17 @@ async function applyAuthPreset(presetId, statusElement = authFormStatusEl) {
     if (response.deferred) {
       updateStatus(
         statusElement,
-        `已登记预设切换：${response.name}。当前指定 Agent 退出并恢复原配置后，将实际写入该预设。`,
+        `预设未被立即写入：${response.name}。已停止后续启动，请重试。`,
         "info",
       );
     } else {
       const note = response.local_config_file
         ? `（已同步项目本地配置：${response.local_config_file}）`
         : "";
-      updateStatus(statusElement, `已应用预设：${response.name}${note}`, "ok");
+      const daemonNote = response.codex_daemon_restarted
+        ? "（已重启 Codex 后台守护进程使切换生效）"
+        : "";
+      updateStatus(statusElement, `已应用预设：${response.name}${note}${daemonNote}`, "ok");
     }
     await refreshAuthPanels();
   } catch (error) {
@@ -1006,16 +1107,21 @@ async function refreshAuthPresetQuota(presetId, presetName, statusElement = auth
     updateStatus(statusElement, `已刷新额度：${response.preset.name}`, "ok");
     clearAuthPresetRefreshErrors(presetId);
     await refreshAuthPanels();
+    return { ok: true };
   } catch (error) {
-    const hint = error.message.includes("403")
-      ? " — Token 已失效，请重新导入该账号的 auth.json"
-      : error.message.includes("401")
-        ? " — 认证失败，请检查账号凭据是否有效"
-        : error.message.includes("请求") && error.message.includes("失败")
-          ? " — 网络异常，请检查网络连接后重试"
-          : "";
-    setAuthPresetRefreshError(presetId, `${error.message}${hint}`);
-    updateStatus(statusElement, `${presetName} 刷新失败：${error.message}${hint}`, "warn");
+    const hint = error.message.includes("refresh token") || error.message.includes("signing in")
+      ? " — 登录凭据已轮换失效，请重新导入该账号的 auth.json"
+      : error.message.includes("403")
+        ? " — Token 已失效，请重新导入该账号的 auth.json"
+        : error.message.includes("401")
+          ? " — 认证失败，请检查账号凭据是否有效"
+          : error.message.includes("请求") && error.message.includes("失败")
+            ? " — 网络异常，请检查网络连接后重试"
+            : "";
+    const message = `${error.message}${hint}`;
+    setAuthPresetRefreshError(presetId, message);
+    updateStatus(statusElement, `${presetName} 刷新失败：${message}`, "warn");
+    return { ok: false, error: message };
   } finally {
     updateAuthPresetRefreshingState(presetId, false);
   }
@@ -1300,6 +1406,8 @@ function renderAuthOauthSession(session = null) {
     return;
   }
 
+  const isBrowserFlow = session?.flow === "browser";
+
   if (!session) {
     authOauthSessionPanelEl.hidden = true;
     authOauthSessionSummaryEl.textContent = "等待发起…";
@@ -1312,22 +1420,51 @@ function renderAuthOauthSession(session = null) {
       authOauthCopyCodeButton.hidden = true;
       authOauthCopyCodeButton.disabled = true;
     }
+    if (authOauthCallbackFieldEl) authOauthCallbackFieldEl.hidden = true;
+    if (authOauthExchangeButton) {
+      authOauthExchangeButton.hidden = true;
+      authOauthExchangeButton.disabled = true;
+    }
+    if (authOauthUrlContainerEl) authOauthUrlContainerEl.hidden = true;
+    if (authOauthUrlDisplayEl) authOauthUrlDisplayEl.value = "";
+    if (authOauthOpenUrlEl) authOauthOpenUrlEl.href = "#";
     return;
   }
 
   authOauthSessionPanelEl.hidden = false;
   authOauthUserCodeEl.textContent = session.user_code || "-";
+  const authorizeUrl = session.authorize_url || session.verification_url || "";
   if (authOauthOpenLinkEl) {
     authOauthOpenLinkEl.hidden = false;
-    authOauthOpenLinkEl.href = session.authorize_url || session.verification_url || "https://auth.openai.com/codex/device";
+    authOauthOpenLinkEl.href = authorizeUrl || "https://auth.openai.com/codex/device";
+  }
+  if (authOauthUrlContainerEl) {
+    authOauthUrlContainerEl.hidden = !authorizeUrl;
+  }
+  if (authOauthUrlDisplayEl) {
+    authOauthUrlDisplayEl.value = authorizeUrl;
+  }
+  if (authOauthOpenUrlEl) {
+    authOauthOpenUrlEl.href = authorizeUrl || "#";
+    authOauthOpenUrlEl.hidden = !authorizeUrl;
+  }
+  if (authOauthCopyUrlButton) {
+    authOauthCopyUrlButton.hidden = !authorizeUrl;
   }
   if (authOauthCopyCodeButton) {
     authOauthCopyCodeButton.hidden = !session.user_code;
     authOauthCopyCodeButton.disabled = !session.user_code;
   }
 
+  const canExchange = isBrowserFlow && session.status === "pending";
+  if (authOauthCallbackFieldEl) authOauthCallbackFieldEl.hidden = !canExchange;
+  if (authOauthExchangeButton) {
+    authOauthExchangeButton.hidden = !canExchange;
+    authOauthExchangeButton.disabled = !canExchange;
+  }
+
   const statusLabels = {
-    pending: "等待你在官网完成登录",
+    pending: isBrowserFlow ? "等待你在浏览器完成登录并粘贴回调" : "等待你在官网完成登录",
     completed: "官方登录成功，token 已拿到",
     error: "官方登录失败",
     expired: "官方登录已超时",
@@ -1336,6 +1473,167 @@ function renderAuthOauthSession(session = null) {
     statusLabels[session.status] || "会话状态未知",
     session.user_code ? `验证码 ${session.user_code}` : null,
   ].filter(Boolean).join(" · ");
+}
+
+function setAuthBrowserOauthBusy(isBusy) {
+  if (!authOauthBrowserStartButton || !authOauthExchangeButton) return;
+  if (!authOauthBrowserStartButton.dataset.defaultLabel) {
+    authOauthBrowserStartButton.dataset.defaultLabel = authOauthBrowserStartButton.textContent;
+  }
+  if (!authOauthExchangeButton.dataset.defaultLabel) {
+    authOauthExchangeButton.dataset.defaultLabel = authOauthExchangeButton.textContent;
+  }
+  const label = isBusy ? "处理中…" : authOauthBrowserStartButton.dataset.defaultLabel;
+  authOauthBrowserStartButton.disabled = isBusy;
+  authOauthBrowserStartButton.textContent = label;
+  authOauthExchangeButton.disabled = isBusy || Boolean(authOauthExchangeButton.hidden);
+}
+
+async function startAuthBrowserOauthSession() {
+  if (!shouldContinueAuthOauthStart()) return;
+
+  clearAuthOauthPolling();
+  state.authOauthSessionId = "";
+  renderAuthOauthSession(null);
+  setAuthBrowserOauthBusy(true);
+  setAuthOauthStatus("正在生成 Codex 浏览器登录链接…", "info");
+
+  try {
+    const session = await requestJson("/api/auth/oauth/codex/browser/start", {
+      method: "POST",
+    });
+    state.authOauthSessionId = session.session_id;
+    state.authOauthAuthorizeUrl = session.authorize_url;
+    renderAuthOauthSession(session);
+    setAuthBrowserOauthBusy(false);
+    setAuthOauthStatus(
+      "登录跳转链接已生成。请点击“打开链接”前往登录，或点击输入框直接复制；登录后粘贴回调 code 完成兑换。",
+      "info",
+    );
+    authOauthCallbackInputEl?.focus();
+  } catch (error) {
+    setAuthBrowserOauthBusy(false);
+    setAuthOauthStatus(error.message, "warn");
+    renderAuthOauthSession(null);
+  }
+}
+
+async function copyAuthOauthAuthorizeUrl() {
+  const url = authOauthUrlDisplayEl?.value || state.authOauthAuthorizeUrl || "";
+  if (!url) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(url);
+    } else {
+      authOauthUrlDisplayEl?.select();
+      document.execCommand("copy");
+    }
+    setAuthOauthStatus("已复制登录跳转链接到剪贴板。", "ok");
+    if (typeof showStatus === "function") showStatus("已复制登录跳转链接到剪贴板。", "ok");
+  } catch (_) {
+    setAuthOauthStatus("复制失败，请手动选中文本复制。", "warn");
+  }
+}
+
+function parseAuthOauthCallback(rawText = "") {
+  const raw = rawText.trim();
+  if (!raw) return { code: "", state: "" };
+  try {
+    const url = new URL(raw);
+    return {
+      code: url.searchParams.get("code") || "",
+      state: url.searchParams.get("state") || "",
+    };
+  } catch (_) {
+    const match = raw.match(/(?:^|[?&])code=([^&]+)/);
+    if (match) {
+      const stateMatch = raw.match(/(?:^|[?&])state=([^&]+)/);
+      return {
+        code: decodeURIComponent(match[1]),
+        state: stateMatch ? decodeURIComponent(stateMatch[1]) : "",
+      };
+    }
+    return { code: raw, state: "" };
+  }
+}
+
+async function exchangeAuthBrowserOauthSession() {
+  const sessionId = state.authOauthSessionId;
+  const rawText = authOauthCallbackInputEl?.value || "";
+  if (!sessionId) {
+    setAuthOauthStatus("请先生成浏览器登录链接。", "warn");
+    return;
+  }
+
+  const parsed = parseAuthOauthCallback(rawText);
+  if (!parsed.code) {
+    setAuthOauthStatus("请粘贴登录回调 URL 或其中的 code。", "warn");
+    authOauthCallbackInputEl?.focus();
+    return;
+  }
+
+  setAuthBrowserOauthBusy(true);
+  setAuthOauthStatus("正在兑换 Codex 浏览器登录 token…", "info");
+  try {
+    const session = await requestJson("/api/auth/oauth/codex/browser/exchange", {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        callback: rawText,
+        code: parsed.code,
+        state: parsed.state,
+      }),
+    });
+    renderAuthOauthSession(session);
+
+    if (session.status === "completed" && session.auth) {
+      if (window.isRefreshingCurrentLogin) {
+        try {
+          await requestJson("/api/auth/current", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ auth: session.auth }),
+          });
+          await requestJson("/api/auth/current/preset", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: "" }),
+          });
+          setAuthOauthStatus("已刷新当前登录，并成功同步更新登录信息与账号预设！", "ok");
+          if (typeof showStatus === "function") showStatus("已刷新当前登录，并成功同步更新登录信息与账号预设！", "ok");
+          if (typeof loadCodexAccounts === "function") await loadCodexAccounts();
+        } catch (err) {
+          setAuthOauthStatus(`刷新当前登录完成，但更新登录信息出错：${err.message}`, "warn");
+        } finally {
+          window.isRefreshingCurrentLogin = false;
+        }
+      }
+      const rawAuthText = buildEditableAuthText(
+        session.auth,
+        session.details ?? {},
+        session.auth?.tokens?.account_id ?? "",
+        session.auth?.last_refresh ?? "",
+      );
+      populateAuthFormFromRawText(rawAuthText, {
+        presetName: session.suggested_name || buildAuthPresetName(rawAuthText),
+        statusMessage: window.isRefreshingCurrentLogin
+          ? "已刷新当前登录，token 已自动同步并回填到编辑器。"
+          : "浏览器 OAuth 登录成功，token 已回填；可保存为预设或应用到 auth.json。",
+        tone: "ok",
+      });
+      setAuthOauthStatus("浏览器登录成功，token 已回填到编辑器。", "ok");
+      state.authOauthSessionId = "";
+      if (authOauthCallbackInputEl) authOauthCallbackInputEl.value = "";
+      renderAuthOauthSession(null);
+      return;
+    }
+
+    setAuthBrowserOauthBusy(false);
+    setAuthOauthStatus(session.error || "浏览器登录兑换失败，请重新发起。", "warn");
+  } catch (error) {
+    setAuthBrowserOauthBusy(false);
+    setAuthOauthStatus(error.message, "warn");
+  }
 }
 
 function shouldContinueAuthOauthStart() {
@@ -1483,10 +1781,14 @@ async function startAuthOauthSession() {
       buildEditablePresetText,
       clearAuthOauthPolling,
       copyAuthOauthUserCode,
+      copyAuthOauthAuthorizeUrl,
+      exchangeAuthBrowserOauthSession,
+      startAuthBrowserOauthSession,
       deleteAuthPreset,
       editAuthPreset,
       ensureAuthPresetsLoaded,
       extractAuthDetails,
+      extractAuthJsonSources,
       handleAuthApplyInputAction,
       importAuthJsonFile,
       loadAuthPresets,
@@ -1494,6 +1796,7 @@ async function startAuthOauthSession() {
       normalizeAuthInputs,
       openAuthImportDialog,
       closeAuthImportDialog,
+      parseAuthSources,
       populateAuthFormFromRawText,
       pruneAuthPresetRefreshErrors,
       refreshAllAuthPresetQuotas,
@@ -1504,6 +1807,7 @@ async function startAuthOauthSession() {
       saveAuthPreset,
       saveAuthPresetAsNew,
       startAuthOauthSession,
+      testAuthPreset,
       testAllAuthPresets,
     };
   }

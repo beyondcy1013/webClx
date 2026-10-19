@@ -22,6 +22,7 @@ use std::sync::Mutex;
 /// Entries older than this are considered stale and ignored. Quota windows are
 /// at most a few hours, so a few hours of retention is plenty.
 const MAX_ENTRY_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+const LATEST_ZHIPU_RESET_KEY: &str = "zhipu:latest-reset";
 
 #[derive(Debug, Clone)]
 struct CachedReset {
@@ -52,6 +53,10 @@ impl QuotaResetCache {
         }
     }
 
+    pub fn record_latest_zhipu_reset(&self, reset_at: String) {
+        self.record_key(LATEST_ZHIPU_RESET_KEY, reset_at);
+    }
+
     fn record_key(&self, key: &str, reset_at: String) {
         if key.trim().is_empty() || reset_at.trim().is_empty() {
             return;
@@ -78,6 +83,29 @@ impl QuotaResetCache {
         self.get_for_key(&key)
     }
 
+    pub fn get_latest_zhipu_reset(&self) -> Option<String> {
+        self.get_for_key(LATEST_ZHIPU_RESET_KEY)
+    }
+
+    /// Capture a Zhipu quota-reset response seen by any proxy implementation.
+    /// Keeping the status/provider/body checks here prevents individual proxy
+    /// paths from drifting as providers add new wire-protocol adapters.
+    pub fn capture_zhipu_quota_response(
+        &self,
+        preset_id: &str,
+        base_url: &str,
+        status: u16,
+        body: &str,
+    ) -> Option<String> {
+        if status != 429 || !base_url_is_zhipu_upstream(base_url) {
+            return None;
+        }
+        let reset_at = parse_zhipu_quota_reset(body)?;
+        self.record_for_preset(preset_id, base_url, reset_at.clone());
+        self.record_latest_zhipu_reset(reset_at.clone());
+        Some(reset_at)
+    }
+
     fn get_for_key(&self, key: &str) -> Option<String> {
         let guard = self.inner.lock().ok()?;
         let entry = guard.get(key)?;
@@ -99,6 +127,7 @@ fn base_url_cache_key(base_url: &str) -> Option<String> {
 pub fn base_url_is_zhipu_upstream(base_url: &str) -> bool {
     let normalized = base_url.trim().to_ascii_lowercase();
     normalized.contains("bigmodel.cn")
+        || normalized.contains("zcode.z.ai")
         || normalized.contains("/api/codex-proxy/zhipu/")
         || normalized.contains("bigmodel")
         || normalized.contains("zhipu")
@@ -180,6 +209,7 @@ mod tests {
     fn detects_zhipu_host() {
         assert!(base_url_is_zhipu_upstream("https://open.bigmodel.cn/api/coding/paas/v4"));
         assert!(base_url_is_zhipu_upstream("https://Open.BIGMODEL.cn/"));
+        assert!(base_url_is_zhipu_upstream("https://zcode.z.ai/api/v1/ultra/anthropic"));
         assert!(!base_url_is_zhipu_upstream("https://api.deepseek.com"));
     }
 
@@ -187,6 +217,23 @@ mod tests {
     fn parses_zhipu_1308_reset() {
         let body = r#"{"error":{"code":"1308","message":"已达到 5 小时的使用上限。您的限额将在 2026-07-05 02:16:19 重置。"}}"#;
         assert_eq!(parse_zhipu_quota_reset(body), Some("2026-07-05 02:16:19".to_string()));
+    }
+
+    #[test]
+    fn captures_zcode_anthropic_quota_response_for_scheduling() {
+        let cache = QuotaResetCache::new();
+        let body = r#"{"type":"error","error":{"type":"rate_limit_error","code":"1308","message":"[1308][已达到 5 小时的使用上限。您的限额将在 2026-08-15 06:14:42 重置。][request-id]"}}"#;
+
+        assert_eq!(
+            cache.capture_zhipu_quota_response(
+                "api-glm-5-3",
+                "https://zcode.z.ai/api/v1/ultra/anthropic",
+                429,
+                body,
+            ),
+            Some("2026-08-15 06:14:42".to_string())
+        );
+        assert_eq!(cache.get_for_preset("api-glm-5-3"), Some("2026-08-15 06:14:42".to_string()));
     }
 
     #[test]
@@ -201,6 +248,21 @@ mod tests {
         cache.record_for_preset("p1", "", "2026-07-05 02:16:19".to_string());
         assert_eq!(cache.get_for_preset("p1"), Some("2026-07-05 02:16:19".to_string()));
         assert_eq!(cache.get_for_preset("p1"), Some("2026-07-05 02:16:19".to_string()));
+    }
+
+    #[test]
+    fn latest_zhipu_reset_is_available_when_terminal_preset_metadata_is_stale() {
+        let cache = QuotaResetCache::new();
+        let body = r#"{"error":{"code":"1308","message":"限额将在 2026-08-15 16:16:04 重置"}}"#;
+
+        cache.capture_zhipu_quota_response(
+            "api-glm",
+            "https://zcode.z.ai/api/v1/ultra/anthropic",
+            429,
+            body,
+        );
+
+        assert_eq!(cache.get_latest_zhipu_reset(), Some("2026-08-15 16:16:04".to_string()));
     }
 
     #[test]

@@ -9,19 +9,30 @@
 // promise proves the TCP connection succeeded and the
 // server responded.  A rejected promise means the host is
 // truly unreachable (DNS failure / connection refused / timeout).
-// On Android, a native bridge method is preferred when present
-// because it has no CORS restriction and reports accurate latency.
+// Probing always uses fetch: the former synchronous Android bridge
+// probe blocked the JS thread on network I/O inside the WebView.
 // ─────────────────────────────────────────────
 
 const TERMINAL_SERVER_PROBE = (() => {
   "use strict";
 
-  const DEFAULT_PORT = "PORT";
+  const DEFAULT_PORT = "11111";
   const PROBE_TIMEOUT_MS = 3500;
   const MIN_PROBE_INTERVAL_MS = 8000;
   const PROBE_PATH = "/favicon.svg";
+  // Grace boundary: a short unavailability of the current origin — most
+  // commonly the webClx service restarting itself — must never trigger a
+  // server switch.  Only when the current server has stayed unreachable for
+  // this whole window do we consider alternative candidates.  Any successful
+  // probe of (or WebSocket reconnect to) the current origin resets the clock.
+  const GRACE_PERIOD_MS = 60000;
 
   let cachedCandidates = null;
+  let currentUnreachableSince = 0;
+
+  function notifyServerReachable() {
+    currentUnreachableSince = 0;
+  }
 
   function candidateHosts() {
     if (cachedCandidates) return cachedCandidates;
@@ -44,41 +55,15 @@ const TERMINAL_SERVER_PROBE = (() => {
   }
 
   /**
-   * Probe via Android native bridge (no CORS, accurate latency).
-   * The bridge returns a JSON string like {"ok":true,"latency":12}.
-   * Returns null if bridge is unavailable.
-   */
-  function probeHostViaNative(host) {
-    const bridge = window.WebClxAndroid;
-    if (!bridge || typeof bridge.probeHost !== "function") return null;
-    try {
-      const origin = originFor(host);
-      const raw = bridge.probeHost(origin + PROBE_PATH, PROBE_TIMEOUT_MS);
-      if (!raw) return { host, ok: false, latency: Infinity };
-      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
-      if (parsed && typeof parsed === "object") {
-        return {
-          host,
-          ok: Boolean(parsed.ok),
-          latency: typeof parsed.latency === "number" ? parsed.latency : 0,
-        };
-      }
-      return { host, ok: Boolean(parsed), latency: 0 };
-    } catch (_) {
-      return { host, ok: false, latency: Infinity };
-    }
-  }
-
-  /**
    * Probe via no-cors fetch — works cross-origin in all browsers/WebViews.
    * Resolved ⇒ server reachable; rejected ⇒ unreachable.
    */
   async function probeHostViaFetch(host) {
     const url = `${originFor(host)}${PROBE_PATH}?_probe=${Date.now()}`;
     const start = performance.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
       await fetch(url, {
         mode: "no-cors",
         credentials: "omit",
@@ -86,18 +71,15 @@ const TERMINAL_SERVER_PROBE = (() => {
         redirect: "follow",
         signal: controller.signal,
       });
-      clearTimeout(timer);
       return { host, ok: true, latency: performance.now() - start };
     } catch (_) {
       return { host, ok: false, latency: Infinity };
+    } finally {
+      clearTimeout(timer);
     }
   }
 
   async function probeHost(host) {
-    // Prefer native bridge on Android — synchronous, no CORS, accurate latency.
-    const native = probeHostViaNative(host);
-    if (native) return native;
-    // Fallback: no-cors fetch — universal, cross-origin.
     return probeHostViaFetch(host);
   }
 
@@ -122,6 +104,7 @@ const TERMINAL_SERVER_PROBE = (() => {
     const currentResult = await probeHost(currentOrigin);
     if (gen !== probeGeneration) return null;
     if (currentResult.ok) {
+      currentUnreachableSince = 0;
       console.debug(`server-probe: current server reachable (${Math.round(currentResult.latency)}ms), staying`);
       return null;
     }
@@ -149,7 +132,45 @@ const TERMINAL_SERVER_PROBE = (() => {
     }
   }
 
-  async function reevaluate(reason = "") {
+  let reevaluateInFlight = null;
+
+  function reevaluate(reason = "") {
+    // Serialize re-evaluations: a second caller (network callback, resume
+    // dispatch, reconnect threshold) coalesces onto the in-flight probe
+    // instead of racing duplicate fetches against the same candidates.
+    if (reevaluateInFlight) {
+      return reevaluateInFlight;
+    }
+    reevaluateInFlight = runReevaluate(reason).finally(() => {
+      reevaluateInFlight = null;
+    });
+    return reevaluateInFlight;
+  }
+
+  async function runReevaluate(reason = "") {
+    // Restart-aware boundary: probe the current origin first.  A reachable
+    // current server always wins (reset the outage clock and stay).  An
+    // unreachable one starts/continues the grace clock; switching to another
+    // candidate is only allowed once the outage outlasts GRACE_PERIOD_MS.
+    const currentResult = await probeHost(window.location.origin);
+    if (currentResult.ok) {
+      currentUnreachableSince = 0;
+      return false;
+    }
+    const now = Date.now();
+    if (!currentUnreachableSince) {
+      currentUnreachableSince = now;
+    }
+    const unreachableForMs = now - currentUnreachableSince;
+    if (unreachableForMs < GRACE_PERIOD_MS) {
+      console.debug(
+        `server-probe: current server down for ${Math.round(unreachableForMs / 1000)}s (< ${GRACE_PERIOD_MS / 1000}s grace), likely a self-restart; staying`,
+      );
+      return false;
+    }
+    console.debug(
+      `server-probe: current server down for ${Math.round(unreachableForMs / 1000)}s (>= grace), evaluating alternatives (${reason})`,
+    );
     const best = await findBestServer(reason);
     if (best && !isCurrentHost(best)) {
       switchToServer(best);
@@ -158,5 +179,5 @@ const TERMINAL_SERVER_PROBE = (() => {
     return false;
   }
 
-  return { candidateHosts, findBestServer, switchToServer, reevaluate };
+  return { candidateHosts, findBestServer, switchToServer, reevaluate, notifyServerReachable };
 })();

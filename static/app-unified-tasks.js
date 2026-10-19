@@ -9,6 +9,16 @@ const UNIFIED_TASK_TYPE_LABELS = {
   "preset-test": "预设 API 测试",
 };
 
+// The manager is shared by workspace settings and the terminal dialog, but
+// workspace-only app.js loads after it on /terminal.
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 let unifiedTaskState = {
   pasteTasks: [],
   autoContinueTasks: [],
@@ -20,7 +30,231 @@ let unifiedTaskState = {
   editTaskId: null,
   editTaskSource: null,
   requestToken: 0,
+  taskView: document.body?.classList.contains("scheduled-tasks-window") ? "current" : "all",
+  showDeliveryRecords: false,
+  currentSessionId: new URLSearchParams(window.location.search).get("terminal_session") || "",
+  currentWorkdir: "",
+  currentWorkdirDisplay: "",
 };
+
+function unifiedTaskWindowIsCompact() {
+  return document.body?.classList.contains("scheduled-tasks-window") || false;
+}
+
+function unifiedTaskDialogUsesWorkdir() {
+  return Boolean(document.getElementById("terminal-scheduled-tasks-dialog"))
+    && !unifiedTaskWindowIsCompact();
+}
+
+function unifiedTaskNormalizeDir(value) {
+  let text = String(value || "").trim().replace(/\\/g, "/");
+  if (!text) return "";
+  if (text.length > 1) text = text.replace(/\/+$/, "");
+  return text;
+}
+
+function unifiedActiveSessionId() {
+  const params = new URLSearchParams(window.location.search);
+  if (unifiedTaskWindowIsCompact()) {
+    return (params.get("terminal_session") || "").trim();
+  }
+  if (typeof state !== "undefined" && String(state.activeSessionId || "").trim()) {
+    return String(state.activeSessionId).trim();
+  }
+  return (params.get("session") || params.get("terminal_session") || "").trim();
+}
+
+function unifiedTerminalById(sessionId) {
+  return unifiedTaskState.terminals.find((terminal) => terminal.id === sessionId) || null;
+}
+
+function captureUnifiedCurrentWorkdir() {
+  const sessionId = unifiedTaskState.currentSessionId;
+  let canonical = "";
+  let display = "";
+  if (typeof state !== "undefined" && Array.isArray(state.sessions)) {
+    const active = state.sessions.find((session) => session.id === sessionId);
+    if (active) {
+      canonical = active.path || "";
+      display = active.display_path || active.displayPath || active.path || "";
+    }
+  }
+  const listed = unifiedTerminalById(sessionId);
+  if (listed) {
+    canonical = canonical || listed.canonicalPath || "";
+    display = display || listed.path || "";
+  }
+  if (!canonical && !display && typeof state !== "undefined") {
+    canonical = state.currentPath || "";
+  }
+  unifiedTaskState.currentWorkdir = canonical;
+  unifiedTaskState.currentWorkdirDisplay = display || canonical;
+}
+
+function syncUnifiedCurrentSession() {
+  const currentSessionId = unifiedActiveSessionId();
+  const changed = currentSessionId !== unifiedTaskState.currentSessionId;
+  if (changed) unifiedTaskState.currentSessionId = currentSessionId;
+  captureUnifiedCurrentWorkdir();
+  const currentTerminal = unifiedTerminalById(currentSessionId);
+  const currentLabel = document.getElementById("unified-task-current-label");
+  if (currentLabel) {
+    currentLabel.textContent = currentTerminal
+      ? `当前终端：${currentTerminal.name}`
+      : currentSessionId
+        ? `当前终端：${currentSessionId}`
+        : "未指定当前终端";
+  }
+  return changed;
+}
+
+function unifiedTaskDirectoryKeys() {
+  const keys = new Set();
+  [unifiedTaskState.currentWorkdir, unifiedTaskState.currentWorkdirDisplay].forEach((value) => {
+    const normalized = unifiedTaskNormalizeDir(value);
+    if (normalized) keys.add(normalized);
+  });
+  return keys;
+}
+
+function unifiedCurrentWorkdirLabel() {
+  return unifiedTaskNormalizeDir(unifiedTaskState.currentWorkdirDisplay)
+    || unifiedTaskNormalizeDir(unifiedTaskState.currentWorkdir);
+}
+
+function syncUnifiedDialogScopeLabel() {
+  const label = document.getElementById("unified-task-dialog-scope");
+  if (!label || !unifiedTaskDialogUsesWorkdir()) return;
+  if (unifiedTaskState.taskView === "all") {
+    label.textContent = "正在显示全部目录。";
+    return;
+  }
+  const directory = unifiedCurrentWorkdirLabel();
+  label.textContent = directory
+    ? `只显示当前目录 ${directory}。点「全部」查看其他目录。`
+    : "未识别当前工作目录。点「全部」查看所有定时任务。";
+}
+
+function unifiedTaskMatchesCurrentWorkdir(task) {
+  const keys = unifiedTaskDirectoryKeys();
+  if (!keys.size || !task) return false;
+  const values = [task.workingDir];
+  const listed = unifiedTerminalById(task.sessionId);
+  if (listed) values.push(listed.path, listed.canonicalPath);
+  if (typeof state !== "undefined" && Array.isArray(state.sessions)) {
+    const session = state.sessions.find((item) => item.id === task.sessionId);
+    if (session) values.push(session.path, session.display_path, session.displayPath);
+  }
+  return values.some((value) => keys.has(unifiedTaskNormalizeDir(value)));
+}
+
+function unifiedTaskList() {
+  return [
+    ...unifiedTaskState.pasteTasks,
+    ...unifiedTaskState.autoContinueTasks,
+    ...unifiedTaskState.presetTestTasks,
+  ];
+}
+
+function unifiedTaskIsDeliveryRecord(task) {
+  return task?.source === "server" && Boolean(task.status) && task.status !== "queued";
+}
+
+function unifiedTaskSurfaceSeparatesQueue() {
+  return Boolean(document.getElementById("terminal-scheduled-tasks-dialog"))
+    || document.body?.classList.contains("scheduled-tasks-window");
+}
+
+function unifiedScopedTasks() {
+  const tasks = unifiedTaskList();
+  if (unifiedTaskState.taskView === "all") return tasks;
+  if (unifiedTaskWindowIsCompact()) {
+    return tasks.filter((task) => task.sessionId === unifiedTaskState.currentSessionId);
+  }
+  if (unifiedTaskDialogUsesWorkdir()) {
+    return tasks.filter((task) => unifiedTaskMatchesCurrentWorkdir(task));
+  }
+  return tasks;
+}
+
+function unifiedVisibleTasks() {
+  const tasks = unifiedScopedTasks();
+  if (!unifiedTaskSurfaceSeparatesQueue() || unifiedTaskState.showDeliveryRecords) {
+    return tasks;
+  }
+  return tasks.filter((task) => !unifiedTaskIsDeliveryRecord(task));
+}
+
+function syncUnifiedDeliveryToggle() {
+  const button = document.getElementById("unified-task-delivery-toggle");
+  if (!button) return;
+  const deliveryCount = unifiedScopedTasks().filter(unifiedTaskIsDeliveryRecord).length;
+  const showing = Boolean(unifiedTaskState.showDeliveryRecords);
+  button.classList.toggle("active", showing);
+  button.setAttribute("aria-pressed", showing ? "true" : "false");
+  button.textContent = showing ? "隐藏投递记录" : `投递记录 ${deliveryCount}`;
+}
+
+function syncUnifiedTaskViewButtons() {
+  document.querySelectorAll("[data-unified-task-view]").forEach((button) => {
+    const active = button.dataset.unifiedTaskView === unifiedTaskState.taskView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", active ? "true" : "false");
+  });
+}
+
+function setUnifiedTaskView(view) {
+  if (!unifiedTaskWindowIsCompact() && !unifiedTaskDialogUsesWorkdir()) return;
+  unifiedTaskState.taskView = view === "all" ? "all" : "current";
+  syncUnifiedTaskViewButtons();
+  syncUnifiedDialogScopeLabel();
+  renderUnifiedTaskTable();
+  updateUnifiedTaskListStatus();
+}
+
+function updateUnifiedTaskListStatus(errors = {}) {
+  const { pasteError, acError, presetTestError, crontabError } = errors;
+  if (syncUnifiedCurrentSession()) renderUnifiedTaskTable();
+  syncUnifiedDialogScopeLabel();
+  if (pasteError) {
+    setUnifiedListStatus(pasteError.message || "读取粘贴任务失败。", "warn");
+  } else if (acError) {
+    setUnifiedListStatus(acError.message || "读取自动继续任务失败。", "warn");
+  } else if (presetTestError) {
+    setUnifiedListStatus(presetTestError.message || "读取预设 API 测试任务失败。", "warn");
+  } else if (crontabError) {
+    setUnifiedListStatus(`crontab 读取异常: ${crontabError}`, "warn");
+  } else if (unifiedTaskWindowIsCompact() && unifiedTaskState.taskView === "current") {
+    const sessionLabel = document.getElementById("unified-task-current-label")?.textContent || "当前终端";
+    const scoped = unifiedScopedTasks();
+    setUnifiedListStatus(
+      unifiedTaskState.currentSessionId
+        ? `${sessionLabel}：待发送 ${scoped.filter(unifiedTaskIsPending).length} 个，投递记录 ${scoped.filter(unifiedTaskIsDeliveryRecord).length} 条。`
+        : "未识别当前终端，请切换到“全部任务”管理。",
+      scoped.length ? "ok" : "muted",
+    );
+  } else if (unifiedTaskDialogUsesWorkdir() && unifiedTaskState.taskView === "current") {
+    const scoped = unifiedScopedTasks();
+    const label = unifiedCurrentWorkdirLabel();
+    setUnifiedListStatus(
+      label
+        ? `当前目录 ${label}：待发送 ${scoped.filter(unifiedTaskIsPending).length} 个，投递记录 ${scoped.filter(unifiedTaskIsDeliveryRecord).length} 条。`
+        : "未识别当前工作目录。点「全部」查看所有定时任务。",
+      scoped.length ? "ok" : "muted",
+    );
+  } else {
+    const scoped = unifiedScopedTasks();
+    const pendingCount = scoped.filter(unifiedTaskIsPending).length;
+    const deliveryCount = scoped.filter(unifiedTaskIsDeliveryRecord).length;
+    setUnifiedListStatus(
+      scoped.length
+        ? `待发送队列 ${pendingCount} 个，投递记录 ${deliveryCount} 条。投递记录不在发送队列中。`
+        : "当前没有定时任务。",
+      scoped.length ? "ok" : "muted",
+    );
+  }
+  syncUnifiedDeliveryToggle();
+}
 
 function setUnifiedCreateStatus(message, tone) {
   const el = document.getElementById("unified-task-create-status");
@@ -44,7 +278,19 @@ async function loadUnifiedTerminals() {
       id: s.id,
       name: s.name || s.id,
       path: s.display_path || s.path || "",
+      canonicalPath: s.path || "",
     }));
+    const currentTerminal = unifiedTaskState.terminals.find(
+      (terminal) => terminal.id === unifiedTaskState.currentSessionId,
+    );
+    const currentLabel = document.getElementById("unified-task-current-label");
+    if (currentLabel) {
+      currentLabel.textContent = currentTerminal
+        ? `当前终端：${currentTerminal.name}`
+        : unifiedTaskState.currentSessionId
+          ? `当前终端：${unifiedTaskState.currentSessionId}`
+          : "未指定当前终端";
+    }
 
     // Build unique working directory list from active terminal paths
     const dirSet = new Map();
@@ -56,10 +302,32 @@ async function loadUnifiedTerminals() {
     unifiedTaskState.workdirs = Array.from(dirSet.keys()).sort();
 
     populateUnifiedTerminalSelect();
+    if (unifiedTaskState.currentSessionId) {
+      const terminalSelect = document.getElementById("unified-task-terminal");
+      if (terminalSelect) terminalSelect.value = unifiedTaskState.currentSessionId;
+    }
     populateUnifiedWorkdirSelect();
   } catch (error) {
     setUnifiedCreateStatus(error?.message || "读取终端列表失败。", "warn");
   }
+}
+
+async function openScheduledTasksDialog() {
+  const dialog = document.getElementById("terminal-scheduled-tasks-dialog");
+  if (!dialog) return;
+  if (!dialog.open) dialog.showModal();
+  unifiedTaskState.currentSessionId = String(
+    (typeof state !== "undefined" && state.activeSessionId) || "",
+  ).trim();
+  unifiedTaskState.taskView = "current";
+  unifiedTaskState.showDeliveryRecords = false;
+  syncUnifiedTaskViewButtons();
+  syncUnifiedDialogScopeLabel();
+  captureUnifiedCurrentWorkdir();
+  await loadUnifiedTerminals();
+  captureUnifiedCurrentWorkdir();
+  loadUnifiedPresetTargets();
+  await loadUnifiedTasks();
 }
 
 async function loadUnifiedPresetTargets() {
@@ -192,6 +460,17 @@ function updateUnifiedPresetScheduleVisibility() {
     ?.classList.toggle("hidden", scheduleType !== "interval");
 }
 
+function setUnifiedTaskButtonBusy(button, isBusy, busyLabel = "") {
+  if (!button) {
+    return;
+  }
+  if (!button.dataset.defaultLabel) {
+    button.dataset.defaultLabel = button.textContent;
+  }
+  button.disabled = isBusy;
+  button.textContent = isBusy && busyLabel ? busyLabel : button.dataset.defaultLabel;
+}
+
 function resolveUnifiedTaskDueAt() {
   const modeSelect = document.getElementById("unified-task-schedule-mode");
   const now = Date.now();
@@ -207,7 +486,7 @@ function resolveUnifiedTaskDueAt() {
     if (dueAtMs <= now) {
       return { error: "指定时间必须晚于当前时间。" };
     }
-    return { dueAtMs, label: new Date(dueAtMs).toLocaleString() };
+    return { dueAtMs, label: new Date(dueAtMs).toLocaleString(), repeatIntervalMs: 0 };
   }
   const delayValueEl = document.getElementById("unified-task-delay-value");
   const delayUnitEl = document.getElementById("unified-task-delay-unit");
@@ -217,9 +496,21 @@ function resolveUnifiedTaskDueAt() {
   }
   const unit = delayUnitEl?.value || "minutes";
   const multiplier = unit === "seconds" ? 1000 : unit === "hours" ? 3600000 : 60000;
-  const dueAtMs = now + Math.round(rawDelay * multiplier);
+  const amountMs = Math.round(rawDelay * multiplier);
+  if (modeSelect?.value === "interval") {
+    if (!Number.isSafeInteger(amountMs) || amountMs < 1000) {
+      return { error: "循环间隔必须是至少 1 秒的安全毫秒数。" };
+    }
+    const dueAtMs = now + amountMs;
+    if (!Number.isSafeInteger(dueAtMs)) {
+      return { error: "循环间隔过大。" };
+    }
+    const unitLabel = unit === "seconds" ? "秒" : unit === "hours" ? "小时" : "分钟";
+    return { dueAtMs, label: `每隔 ${rawDelay} ${unitLabel}`, repeatIntervalMs: amountMs };
+  }
+  const dueAtMs = now + amountMs;
   const label = `${rawDelay} ${unit === "seconds" ? "秒" : unit === "hours" ? "小时" : "分钟"}后`;
-  return { dueAtMs, label };
+  return { dueAtMs, label, repeatIntervalMs: 0 };
 }
 
 function buildUnifiedPresetTestPayload() {
@@ -269,7 +560,7 @@ async function createUnifiedPresetTestTask(createBtn) {
     setUnifiedCreateStatus(built.error, "warn");
     return;
   }
-  setButtonBusy(createBtn, true, "创建中...");
+  setUnifiedTaskButtonBusy(createBtn, true, "创建中...");
   setUnifiedCreateStatus("正在创建预设 API 循环测试任务...", "info");
   try {
     await requestJson("/api/auth/preset-test-schedules", {
@@ -284,7 +575,7 @@ async function createUnifiedPresetTestTask(createBtn) {
   } catch (error) {
     setUnifiedCreateStatus(error?.message || "创建预设 API 测试任务失败。", "warn");
   } finally {
-    setButtonBusy(createBtn, false);
+    setUnifiedTaskButtonBusy(createBtn, false);
   }
 }
 
@@ -327,6 +618,7 @@ async function createUnifiedTask() {
     send_enter: sendEnter,
     task_type: taskType,
     terminal_mode: targetMode,
+    repeat_interval_millis: resolved.repeatIntervalMs,
   };
 
   if (targetMode === "new") {
@@ -346,7 +638,7 @@ async function createUnifiedTask() {
     }
   }
 
-  setButtonBusy(createBtn, true, "创建中...");
+  setUnifiedTaskButtonBusy(createBtn, true, "创建中...");
   setUnifiedCreateStatus("正在创建定时任务...", "info");
   try {
     await requestJson("/api/terminal/scheduled-inputs", {
@@ -361,7 +653,7 @@ async function createUnifiedTask() {
   } catch (error) {
     setUnifiedCreateStatus(error?.message || "创建定时任务失败。", "warn");
   } finally {
-    setButtonBusy(createBtn, false);
+    setUnifiedTaskButtonBusy(createBtn, false);
   }
 }
 
@@ -378,15 +670,24 @@ async function loadUnifiedTasks() {
   if (requestToken !== unifiedTaskState.requestToken) return;
 
   unifiedTaskState.pasteTasks = pasteResult.status === "fulfilled"
-    ? (pasteResult.value?.tasks || []).map(normalizeUnifiedPasteTask).filter(Boolean)
+    ? deduplicateUnifiedTasks(
+      (pasteResult.value?.tasks || []).map(normalizeUnifiedPasteTask).filter(Boolean),
+    )
     : [];
   unifiedTaskState.autoContinueTasks = autoContinueResult.status === "fulfilled"
-    ? (autoContinueResult.value?.auto_continue_tasks || []).map(normalizeUnifiedAutoContinueTask).filter(Boolean)
+    ? deduplicateUnifiedTasks(
+      (autoContinueResult.value?.auto_continue_tasks || [])
+        .map(normalizeUnifiedAutoContinueTask)
+        .filter(Boolean),
+    )
     : [];
   unifiedTaskState.presetTestTasks = presetTestResult.status === "fulfilled"
-    ? (presetTestResult.value?.schedules || []).map(normalizeUnifiedPresetTestTask).filter(Boolean)
+    ? deduplicateUnifiedTasks(
+      (presetTestResult.value?.schedules || []).map(normalizeUnifiedPresetTestTask).filter(Boolean),
+    )
     : [];
 
+  syncUnifiedCurrentSession();
   renderUnifiedTaskTable();
 
   const pasteError = pasteResult.status === "rejected" ? pasteResult.reason : null;
@@ -404,18 +705,8 @@ async function loadUnifiedTasks() {
     setUnifiedListStatus(presetTestError.message || "读取预设 API 测试任务失败。", "warn");
   } else if (crontabError) {
     setUnifiedListStatus(`crontab 读取异常: ${crontabError}`, "warn");
-  } else {
-    const total =
-      unifiedTaskState.pasteTasks.length +
-      unifiedTaskState.autoContinueTasks.length +
-      unifiedTaskState.presetTestTasks.length;
-    setUnifiedListStatus(
-      total
-        ? `共 ${total} 个定时任务（终端 ${unifiedTaskState.pasteTasks.length}，自动继续 ${unifiedTaskState.autoContinueTasks.length}，预设测试 ${unifiedTaskState.presetTestTasks.length}）。`
-        : "当前没有定时任务。",
-      total ? "ok" : "muted",
-    );
   }
+  updateUnifiedTaskListStatus({ pasteError, acError, presetTestError, crontabError });
 
   // Also render auto-continue history for the history card
   if (autoContinueResult.status === "fulfilled") {
@@ -426,15 +717,33 @@ async function loadUnifiedTasks() {
   }
 }
 
+function unifiedTaskIsPending(task) {
+  return task.source !== "server" || !task.status || task.status === "queued";
+}
+
+function unifiedDeliveryStatus(task) {
+  return ({
+    dispatching: "发送中",
+    confirmed: "已确认接收",
+    pending_confirmation: "待确认接收（不自动重发）",
+    unknown: "结果未知（不自动重发）",
+    written: "已写入（未验证接收）",
+    unverified: "已写入（未验证接收）",
+  })[task.status] || task.status || "待发送";
+}
+
 function normalizeUnifiedPasteTask(task) {
   if (!task) return null;
   const taskId = String(task.taskId || task.id || "").trim();
   const dueAt = Number(task.dueAt ?? task.due_at ?? task.due_at_millis);
   if (!taskId || !Number.isFinite(dueAt)) return null;
+  const repeatIntervalMs = Number(task.repeat_interval_millis || 0);
   return {
     taskId,
     source: "server",
     type: task.task_type || "paste",
+    status: String(task.status || ""),
+    lastError: String(task.last_error || ""),
     sessionId: String(task.sessionId || task.session_id || ""),
     terminalName: String(task.terminalName || task.terminal_name || ""),
     dueAt,
@@ -443,7 +752,14 @@ function normalizeUnifiedPasteTask(task) {
     sendEnter: task.send_enter ?? true,
     workingDir: String(task.working_dir || task.workingDir || ""),
     label: String(task.label || ""),
-    editable: true,
+    repeatIntervalMs: Number.isSafeInteger(repeatIntervalMs) && repeatIntervalMs > 0
+      ? repeatIntervalMs
+      : 0,
+    parentTaskId: String(task.parent_task_id || ""),
+    schedule: Number.isSafeInteger(repeatIntervalMs) && repeatIntervalMs > 0
+      ? `每隔 ${formatUnifiedRepeatInterval(repeatIntervalMs)}`
+      : "",
+    editable: !task.status || task.status === "queued",
   };
 }
 
@@ -458,7 +774,7 @@ function normalizeUnifiedAutoContinueTask(task) {
     source: "crontab",
     type: "auto-continue",
     sessionId,
-    terminalName: webclxName || "未找到",
+    terminalName: webclxName || (sessionId ? `未找到 (${sessionId})` : "未找到"),
     dueAt,
     preview: String(task.command || task.signature || ""),
     sendEnter: false,
@@ -467,6 +783,15 @@ function normalizeUnifiedAutoContinueTask(task) {
     schedule: String(task.schedule || ""),
     editable: true,
   };
+}
+
+function deduplicateUnifiedTasks(tasks) {
+  const uniqueTasks = new Map();
+  tasks.forEach((task) => {
+    const identity = `${task.source}:${task.taskId}`;
+    if (!uniqueTasks.has(identity)) uniqueTasks.set(identity, task);
+  });
+  return Array.from(uniqueTasks.values());
 }
 
 function normalizeUnifiedPresetTestTask(task) {
@@ -512,6 +837,26 @@ function formatUnifiedTaskDue(dueAtMs) {
   }
 }
 
+function formatUnifiedRepeatInterval(intervalMs) {
+  const ms = Number(intervalMs);
+  if (!Number.isSafeInteger(ms) || ms <= 0) return "";
+  if (ms % 3600000 === 0) return `${ms / 3600000} 小时`;
+  if (ms % 60000 === 0) return `${ms / 60000} 分钟`;
+  if (ms % 1000 === 0) return `${ms / 1000} 秒`;
+  return `${ms} 毫秒`;
+}
+
+function formatUnifiedScheduleWithDue(task) {
+  const due = task.dueAt > 0 ? formatUnifiedTaskDue(task.dueAt) : "";
+  return [task.schedule, due].filter(Boolean).join(" · ") || "-";
+}
+
+function truncateUnifiedTaskTarget(value, maxChars = 20) {
+  const chars = Array.from(String(value || ""));
+  if (chars.length <= maxChars) return chars.join("");
+  return `${chars.slice(0, Math.max(0, maxChars - 1)).join("")}…`;
+}
+
 function formatUnifiedTaskRemaining(dueAtMs) {
   if (!Number.isFinite(dueAtMs) || dueAtMs <= 0) return "-";
   const remaining = dueAtMs - Date.now();
@@ -520,11 +865,7 @@ function formatUnifiedTaskRemaining(dueAtMs) {
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  const parts = [];
-  if (hours > 0) parts.push(`${hours} 时`);
-  if (minutes > 0 || hours > 0) parts.push(`${minutes} 分`);
-  parts.push(`${seconds} 秒`);
-  return parts.join(" ");
+  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function formatUnifiedTaskLocalInputValue(dueAtMs) {
@@ -539,15 +880,18 @@ function formatUnifiedTaskLocalInputValue(dueAtMs) {
   ].join("-") + `T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+function scheduledInputBody(task) {
+  const text = String(task?.text || "");
+  const isMultiline = text.includes("\n") || text.includes("\r");
+  const prepared = text.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+  return isMultiline ? `\u001b[200~${prepared}\u001b[201~` : prepared;
+}
+
 function renderUnifiedTaskTable() {
   const tbody = document.getElementById("unified-task-list");
   if (!tbody) return;
 
-  const allTasks = [
-    ...unifiedTaskState.pasteTasks,
-    ...unifiedTaskState.autoContinueTasks,
-    ...unifiedTaskState.presetTestTasks,
-  ].sort((a, b) => {
+  const allTasks = unifiedVisibleTasks().sort((a, b) => {
     // Sort: tasks with dueAt=0 (crontab without epoch) go last, then by dueAt ascending
     const aTime = a.dueAt > 0 ? a.dueAt : Number.MAX_SAFE_INTEGER;
     const bTime = b.dueAt > 0 ? b.dueAt : Number.MAX_SAFE_INTEGER;
@@ -555,10 +899,30 @@ function renderUnifiedTaskTable() {
   });
 
   if (!allTasks.length) {
-    tbody.innerHTML = '<tr><td colspan="8" class="meta-text">当前没有定时任务。</td></tr>';
+    const dialogMode = Boolean(document.getElementById("terminal-scheduled-tasks-dialog"));
+    const deliveryCount = unifiedScopedTasks().filter(unifiedTaskIsDeliveryRecord).length;
+    const outsideCount = unifiedTaskDialogUsesWorkdir() && unifiedTaskState.taskView === "current"
+      ? unifiedTaskList().filter((task) => !unifiedTaskMatchesCurrentWorkdir(task)).length
+      : 0;
+    const directoryLabel = unifiedCurrentWorkdirLabel();
+    let emptyMessage = unifiedTaskSurfaceSeparatesQueue()
+      && !unifiedTaskState.showDeliveryRecords
+      && deliveryCount
+      ? `待发送队列是空的。另有 ${deliveryCount} 条投递记录，不在发送队列中。`
+      : "当前没有定时任务。";
+    if (unifiedTaskDialogUsesWorkdir() && unifiedTaskState.taskView === "current" && !directoryLabel) {
+      emptyMessage = "未识别当前工作目录。点「全部」查看所有定时任务。";
+    } else if (outsideCount && !deliveryCount) {
+      emptyMessage = `当前目录没有待发送任务。其他目录还有 ${outsideCount} 条，点「全部」查看。`;
+    } else if (outsideCount && deliveryCount && !unifiedTaskState.showDeliveryRecords) {
+      emptyMessage = `${emptyMessage} 其他目录还有 ${outsideCount} 条，点「全部」查看。`;
+    }
+    const columns = dialogMode ? 6 : 8;
+    tbody.innerHTML = `<tr><td colspan="${columns}" class="meta-text">${escapeHtml(emptyMessage)}</td></tr>`;
     return;
   }
 
+  const dialogMode = Boolean(document.getElementById("terminal-scheduled-tasks-dialog"));
   tbody.innerHTML = allTasks
     .map((task) => {
       const sourceLabel = task.source === "crontab"
@@ -574,39 +938,66 @@ function renderUnifiedTaskTable() {
               : "启用 · 上次失败"
             : "启用 · 未测试"
           : "已停用"
-        : formatUnifiedTaskRemaining(task.dueAt) === "即将发送"
-          ? "待发"
-          : "已排程";
+        : task.source === "server" && task.status && task.status !== "queued"
+          ? unifiedDeliveryStatus(task)
+          : formatUnifiedTaskRemaining(task.dueAt) === "即将发送"
+            ? "待发"
+            : "已排程";
       // Server-side tasks support full editing (type/target/schedule/text);
       // crontab auto-continue tasks can only adjust their fire time because
       // their content is a fixed continue command, so they fall back to the
       // time-only prompt editor.
       const editLabel = task.source === "crontab" ? "编辑时间" : "编辑";
-      const actionCell = task.source === "preset-test"
+      const recordTitle = [
+        task.lastError,
+        task.parentTaskId ? `循环任务 ${task.parentTaskId}` : "",
+      ].filter(Boolean).join(" · ");
+      const actionCell = !unifiedTaskIsPending(task)
+        ? `<span class="meta-text" title="${escapeHtml(recordTitle)}">投递记录</span>`
+        : task.source === "preset-test"
         ? `
-          <button class="button secondary unified-task-run" type="button" data-task-id="${escapeHtml(task.taskId)}">立即测试</button>
-          <button class="button secondary unified-task-edit" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}" data-due-at="${task.dueAt}">编辑</button>
-          <button class="button secondary unified-task-toggle" type="button" data-task-id="${escapeHtml(task.taskId)}" data-enabled="${task.enabled}">${task.enabled ? "停用" : "启用"}</button>
-          <button class="button secondary unified-task-cancel" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}">删除</button>
+          <div class="unified-task-actions-cell">
+            <button class="button secondary unified-task-run" type="button" data-task-id="${escapeHtml(task.taskId)}">立即测试</button>
+            <button class="button secondary unified-task-edit" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}" data-due-at="${task.dueAt}">编辑</button>
+            <button class="button secondary unified-task-toggle" type="button" data-task-id="${escapeHtml(task.taskId)}" data-enabled="${task.enabled}">${task.enabled ? "停用" : "启用"}</button>
+            <button class="button secondary unified-task-cancel" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}">删除</button>
+          </div>
         `
         : `
-          <button class="button secondary unified-task-edit" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}" data-due-at="${task.dueAt}">${escapeHtml(editLabel)}</button>
-          <button class="button secondary unified-task-cancel" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}">取消</button>
+          <div class="unified-task-actions-cell">
+            ${task.source === "server" ? `
+              <button class="button secondary unified-task-run-now" type="button" data-task-id="${escapeHtml(task.taskId)}">立即发送</button>
+            ` : ""}
+            <button class="button secondary unified-task-edit" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}" data-due-at="${task.dueAt}">${escapeHtml(editLabel)}</button>
+            <button class="button secondary unified-task-cancel" type="button" data-source="${escapeHtml(task.source)}" data-task-id="${escapeHtml(task.taskId)}">取消</button>
+          </div>
         `;
-      const remainingCell = task.dueAt > 0
+      const remainingCell = !unifiedTaskIsPending(task)
+        ? `<span class="meta-text" title="${escapeHtml(recordTitle)}">${escapeHtml(unifiedDeliveryStatus(task))}</span>`
+        : task.dueAt > 0
         ? `<span class="mono-text unified-task-remaining" data-due-at="${task.dueAt}">${escapeHtml(formatUnifiedTaskRemaining(task.dueAt))}</span>`
         : '<span class="meta-text">-</span>';
-      const workdirInfo = task.workingDir ? ` <span class="meta-text">@${escapeHtml(task.workingDir)}</span>` : "";
+      const targetText = `${task.terminalName || "-"}${task.workingDir ? ` @${task.workingDir}` : ""}`;
+      const targetDisplay = truncateUnifiedTaskTarget(targetText);
       return `
         <tr data-task-id="${escapeHtml(task.taskId)}">
-          <td>${unifiedTaskTypeBadge(task.type, task.source)}</td>
-          <td class="meta-text">${escapeHtml(sourceLabel)}</td>
-          <td>${escapeHtml(task.terminalName || "-")}${workdirInfo}</td>
-          <td class="mono-text">${escapeHtml(task.source === "preset-test" ? `${task.schedule || "-"}${task.dueAt > 0 ? ` · ${formatUnifiedTaskDue(task.dueAt)}` : ""}` : task.dueAt > 0 ? formatUnifiedTaskDue(task.dueAt) : task.schedule || "-")}</td>
-          <td>${remainingCell}</td>
-          <td class="task-preview-cell mono-text compile-path-text">${escapeHtml(task.preview || "-")}</td>
-          <td class="meta-text">${escapeHtml(status)}</td>
-          <td>${actionCell}</td>
+          ${dialogMode ? `
+            <td>${actionCell}</td>
+            <td title="${escapeHtml(`${unifiedTaskTypeLabel(task)} · ${sourceLabel}`)}">${escapeHtml(unifiedTaskTypeLabel(task))}</td>
+            <td title="${escapeHtml(targetText)}">${escapeHtml(targetDisplay)}</td>
+            <td class="mono-text">${escapeHtml(formatUnifiedScheduleWithDue(task))}</td>
+            <td>${remainingCell}</td>
+            <td class="task-preview-cell mono-text" title="${escapeHtml(task.preview || "-")}">${escapeHtml(task.preview || "-")}</td>
+          ` : `
+            <td>${unifiedTaskTypeBadge(task.type, task.source)}</td>
+            <td class="meta-text">${escapeHtml(sourceLabel)}</td>
+            <td title="${escapeHtml(targetText)}">${escapeHtml(targetDisplay)}</td>
+            <td class="mono-text">${escapeHtml(task.source === "preset-test" ? `${task.schedule || "-"}${task.dueAt > 0 ? ` · ${formatUnifiedTaskDue(task.dueAt)}` : ""}` : formatUnifiedScheduleWithDue(task))}</td>
+            <td>${remainingCell}</td>
+            <td class="meta-text">${escapeHtml(status)}</td>
+            <td>${actionCell}</td>
+            <td class="task-preview-cell mono-text compile-path-text">${escapeHtml(task.preview || "-")}</td>
+          `}
         </tr>
       `;
     })
@@ -621,16 +1012,19 @@ function startUnifiedTaskRemainingTicker() {
   stopUnifiedTaskRemainingTimer();
   const tick = () => {
     const cells = document.querySelectorAll("#unified-task-list .unified-task-remaining");
-    let anyDue = false;
+    let transitionedToDue = false;
     cells.forEach((cell) => {
       const dueAt = Number(cell.dataset.dueAt);
       if (Number.isFinite(dueAt) && dueAt > 0) {
+        const prevText = cell.textContent;
         const text = formatUnifiedTaskRemaining(dueAt);
         cell.textContent = text;
-        if (text === "即将发送") anyDue = true;
+        if (text === "即将发送" && prevText !== "即将发送") {
+          transitionedToDue = true;
+        }
       }
     });
-    if (anyDue) {
+    if (transitionedToDue) {
       loadUnifiedTasks();
     }
   };
@@ -645,13 +1039,17 @@ function stopUnifiedTaskRemainingTimer() {
   }
 }
 
+function unifiedTaskTypeLabel(task) {
+  return UNIFIED_TASK_TYPE_LABELS[task.type] || "定时任务";
+}
+
 async function cancelUnifiedTask(taskId) {
   return cancelUnifiedTaskBySource("server", taskId);
 }
 
 async function cancelUnifiedTaskBySource(source, taskId) {
   if (!taskId) return;
-  if (!window.confirm(source === "preset-test" ? "确定删除此预设 API 测试任务？" : "确定取消此定时任务？")) return;
+  if (source === "preset-test" && !window.confirm("确定删除此预设 API 测试任务？")) return;
   const path = source === "crontab"
     ? `/api/terminal/auto-continue-tasks/${encodeURIComponent(taskId)}`
     : source === "preset-test"
@@ -665,6 +1063,47 @@ async function cancelUnifiedTaskBySource(source, taskId) {
     await loadUnifiedTasks();
   } catch (error) {
     setUnifiedListStatus(error?.message || "取消定时任务失败。", "warn");
+  }
+}
+
+async function runUnifiedTaskNow(taskId) {
+  const task = findUnifiedTask(taskId);
+  if (!task || task.source !== "server") return;
+  const runButton = document.querySelector(`.unified-task-run-now[data-task-id="${CSS.escape(taskId)}"]`);
+  setUnifiedTaskButtonBusy(runButton, true, "发送中...");
+  setUnifiedListStatus("正在立即发送定时任务...", "info");
+  try {
+    if (task.repeatIntervalMs > 0) {
+      await requestJson(`/api/terminal/scheduled-inputs/${encodeURIComponent(taskId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ due_at: Date.now() + 1000 }),
+      });
+      setUnifiedListStatus("已触发循环任务的下一次发送，后续按原间隔继续。", "ok");
+      await loadUnifiedTasks();
+      return;
+    }
+    const body = {
+      data: scheduledInputBody(task),
+    };
+    await requestJson(`/api/terminal/sessions/${encodeURIComponent(task.sessionId)}/input`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (task.sendEnter) {
+      await requestJson(`/api/terminal/sessions/${encodeURIComponent(task.sessionId)}/enter`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ submit_enters: 1 }),
+      });
+    }
+    await cancelUnifiedTaskBySource("server", taskId);
+    setUnifiedListStatus("定时任务已立即发送并取消。", "ok");
+  } catch (error) {
+    setUnifiedListStatus(error?.message || "立即发送定时任务失败。", "warn");
+  } finally {
+    setUnifiedTaskButtonBusy(runButton, false);
   }
 }
 
@@ -730,9 +1169,27 @@ function fillUnifiedFormFromTask(task) {
   if (terminalSelect) terminalSelect.value = task.sessionId || "";
   // Default to the datetime picker so the existing exact time is visible.
   const scheduleMode = document.getElementById("unified-task-schedule-mode");
-  if (scheduleMode) scheduleMode.value = "datetime";
-  const datetimeEl = document.getElementById("unified-task-datetime");
-  if (datetimeEl) datetimeEl.value = formatUnifiedTaskLocalInputValue(task.dueAt);
+  const repeatIntervalMs = Number(task.repeatIntervalMs || 0);
+  if (repeatIntervalMs > 0) {
+    if (scheduleMode) scheduleMode.value = "interval";
+    const delayValueEl = document.getElementById("unified-task-delay-value");
+    const delayUnitEl = document.getElementById("unified-task-delay-unit");
+    let unit = "seconds";
+    let amount = repeatIntervalMs / 1000;
+    if (repeatIntervalMs % 3600000 === 0) {
+      unit = "hours";
+      amount = repeatIntervalMs / 3600000;
+    } else if (repeatIntervalMs % 60000 === 0) {
+      unit = "minutes";
+      amount = repeatIntervalMs / 60000;
+    }
+    if (delayValueEl) delayValueEl.value = String(amount);
+    if (delayUnitEl) delayUnitEl.value = unit;
+  } else {
+    if (scheduleMode) scheduleMode.value = "datetime";
+    const datetimeEl = document.getElementById("unified-task-datetime");
+    if (datetimeEl) datetimeEl.value = formatUnifiedTaskLocalInputValue(task.dueAt);
+  }
   updateUnifiedScheduleModeVisibility();
   const textEl = document.getElementById("unified-task-text");
   if (textEl) textEl.value = task.text || task.preview || "";
@@ -779,6 +1236,9 @@ function clearUnifiedTaskForm() {
   const sendEnterEl = document.getElementById("unified-task-send-enter");
   const presetNameEl = document.getElementById("unified-task-preset-name");
   const presetEnabledEl = document.getElementById("unified-task-preset-enabled");
+  const scheduleModeEl = document.getElementById("unified-task-schedule-mode");
+  if (scheduleModeEl) scheduleModeEl.value = "delay";
+  updateUnifiedScheduleModeVisibility();
   if (textEl) textEl.value = "";
   if (sendEnterEl) sendEnterEl.checked = true;
   if (presetNameEl) presetNameEl.value = "";
@@ -823,13 +1283,14 @@ async function updateUnifiedTask() {
     send_enter: sendEnterEl?.checked ?? true,
     task_type: typeSelect?.value || "paste",
     session_id: terminalSelect?.value || "",
+    repeat_interval_millis: resolved.repeatIntervalMs,
   };
   if (!body.session_id) {
     setUnifiedCreateStatus("请选择目标终端。", "warn");
     return;
   }
   const saveBtn = document.getElementById("unified-task-create-btn");
-  setButtonBusy(saveBtn, true, "保存中...");
+  setUnifiedTaskButtonBusy(saveBtn, true, "保存中...");
   setUnifiedCreateStatus("正在保存定时任务...", "info");
   try {
     await requestJson(`/api/terminal/scheduled-inputs/${encodeURIComponent(taskId)}`, {
@@ -845,7 +1306,7 @@ async function updateUnifiedTask() {
   } catch (error) {
     setUnifiedCreateStatus(error?.message || "更新定时任务失败。", "warn");
   } finally {
-    setButtonBusy(saveBtn, false);
+    setUnifiedTaskButtonBusy(saveBtn, false);
     setUnifiedEditModeButtonLabels(Boolean(unifiedTaskState.editTaskId));
   }
 }
@@ -857,7 +1318,7 @@ async function updateUnifiedPresetTestTask(taskId) {
     return;
   }
   const saveBtn = document.getElementById("unified-task-create-btn");
-  setButtonBusy(saveBtn, true, "保存中...");
+  setUnifiedTaskButtonBusy(saveBtn, true, "保存中...");
   setUnifiedCreateStatus("正在保存预设 API 测试任务...", "info");
   try {
     await requestJson(`/api/auth/preset-test-schedules/${encodeURIComponent(taskId)}`, {
@@ -873,7 +1334,7 @@ async function updateUnifiedPresetTestTask(taskId) {
   } catch (error) {
     setUnifiedCreateStatus(error?.message || "更新预设 API 测试任务失败。", "warn");
   } finally {
-    setButtonBusy(saveBtn, false);
+    setUnifiedTaskButtonBusy(saveBtn, false);
     setUnifiedEditModeButtonLabels(Boolean(unifiedTaskState.editTaskId));
   }
 }
@@ -969,12 +1430,7 @@ function openPathBrowseDialog(initialPath, onConfirm) {
     </div>
   `;
   document.body.appendChild(overlay);
-
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) {
-      closePathBrowseDialog();
-    }
-  });
+  bindBackdropDismissal?.(overlay, () => {});
 
   document.getElementById("path-browse-cancel-btn").addEventListener("click", closePathBrowseDialog);
   document.getElementById("path-browse-confirm-btn").addEventListener("click", () => {
@@ -1081,6 +1537,53 @@ async function loadPathBrowseDirectory(relPath) {
   }
 }
 
+function closeScheduledTasksWindow() {
+  const currentSessionId = new URLSearchParams(window.location.search).get("terminal_session") || "";
+  const params = new URLSearchParams();
+  if (currentSessionId) params.set("session", currentSessionId);
+  const fallbackUrl = `/terminal${params.toString() ? `?${params.toString()}` : ""}`;
+
+  if (typeof window.WebClxAndroid?.closeScheduledTasksView === "function") {
+    if (window.WebClxAndroid.closeScheduledTasksView() === true) return;
+  }
+
+  // Keep the button on the WebView/browser history path. Native Android back
+  // uses MainActivity.onBackPressed; the bridge must not mask a failed back.
+  const currentUrl = window.location.href;
+  if (window.history.length > 1) {
+    window.history.back();
+    window.setTimeout(() => {
+      if (window.location.href === currentUrl) {
+        window.location.replace(fallbackUrl);
+      }
+    }, 250);
+    return;
+  }
+
+  if (typeof window.WebClxAndroid?.goBack === "function") {
+    try {
+      if (window.WebClxAndroid.goBack() === true) return;
+    } catch (_error) {
+      // Fall through to the direct terminal fallback.
+    }
+  }
+  if (typeof window.WebClxAndroid?.isSystemKeyboardVisible === "function") {
+    window.location.replace(fallbackUrl);
+    return;
+  }
+  window.close();
+  if (window.closed) {
+    return;
+  }
+
+  // Browsers can reject close() for a reused or restored named window.
+  window.setTimeout(() => {
+    if (!window.closed) {
+      window.location.replace(fallbackUrl);
+    }
+  }, 0);
+}
+
 function initUnifiedTaskBindings() {
   document
     .getElementById("unified-task-type")
@@ -1124,6 +1627,24 @@ function initUnifiedTaskBindings() {
     }
   });
   document.getElementById("unified-task-refresh")?.addEventListener("click", loadUnifiedTasks);
+  document.getElementById("unified-task-delivery-toggle")?.addEventListener("click", () => {
+    unifiedTaskState.showDeliveryRecords = !unifiedTaskState.showDeliveryRecords;
+    renderUnifiedTaskTable();
+    updateUnifiedTaskListStatus();
+  });
+  document.querySelectorAll("[data-unified-task-view]").forEach((button) => {
+    button.addEventListener("click", () => setUnifiedTaskView(button.dataset.unifiedTaskView));
+  });
+  document.getElementById("scheduled-tasks-window-close")?.addEventListener("click", () => {
+    closeScheduledTasksWindow();
+  });
+  document.getElementById("scheduled-tasks-dialog-close")?.addEventListener("click", () => {
+    document.getElementById("terminal-scheduled-tasks-dialog")?.close();
+  });
+  document.getElementById("terminal-scheduled-tasks-close")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    document.getElementById("terminal-scheduled-tasks-dialog")?.close();
+  });
   document.getElementById("unified-task-workdir-browse")?.addEventListener("click", () => {
     const input = document.getElementById("unified-task-workdir");
     openPathBrowseDialog(input?.value || "", (selectedPath) => {
@@ -1138,6 +1659,11 @@ function initUnifiedTaskBindings() {
     const runButton = event.target.closest?.(".unified-task-run");
     if (runButton) {
       runUnifiedPresetTestTask(runButton.dataset.taskId || "");
+      return;
+    }
+    const runNowButton = event.target.closest?.(".unified-task-run-now");
+    if (runNowButton) {
+      runUnifiedTaskNow(runNowButton.dataset.taskId || "");
       return;
     }
     const toggleButton = event.target.closest?.(".unified-task-toggle");
@@ -1165,6 +1691,10 @@ function initUnifiedTaskBindings() {
   updateUnifiedTargetModeVisibility();
   updateUnifiedScheduleModeVisibility();
   updateUnifiedTaskTypeVisibility();
+
+  document
+    .getElementById("terminal-scheduled-tasks-dialog")
+    ?.addEventListener("close", stopUnifiedTaskRemainingTimer);
 }
 
 // Initialize when DOM is ready

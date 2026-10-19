@@ -109,6 +109,6 @@ assert.match(
 
 assert.match(
   terminalRs,
-  /let requested_session_id[\s\S]*query[\s\S]*\.session_id[\s\S]*filter\(\|value\| !value\.is_empty\(\)\)[\s\S]*let directory = match requested_session_id\.as_deref\(\)[\s\S]*Some\(session_id\) => match manager\.session_path\(session_id\)[\s\S]*Some\(path\) => path[\s\S]*None =>[\s\S]*filesystem::resolve_terminal_directory_path/,
+  /let requested_session_id[\s\S]*query[\s\S]*\.session_id[\s\S]*filter\(\|value\| !value\.is_empty\(\)\)[\s\S]*registered_session_path[\s\S]*lookup_manager\.session_path[\s\S]*let directory = match requested_session_id\.as_deref\(\)[\s\S]*Some\(path\) => path[\s\S]*filesystem::resolve_terminal_directory_path/,
   "terminal websocket should prefer the stored session path before validating the URL path",
 );

@@ -232,6 +232,7 @@ mod tests {
 
     fn preset(id: &str, name: &str) -> StoredApiPreset {
         StoredApiPreset {
+            interchange_source: None,
             id: id.to_string(),
             name: name.to_string(),
             saved_at: 0,
@@ -252,6 +253,7 @@ mod tests {
             access_token: String::new(),
             account_id: String::new(),
             access_mode: None,
+            favorite: false,
             switch_count: 0,
         }
     }

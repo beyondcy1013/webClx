@@ -19,6 +19,13 @@ use crate::{ApiResult, AppError, AppState, PathQuery};
 
 const MAX_EDITABLE_FILE_SIZE: u64 = 1024 * 1024;
 const MAX_WORKSPACE_ICON_SIZE: u64 = 2 * 1024 * 1024;
+const PROJECT_ROOT_MARKERS: &[&str] = &[
+    ".git",
+    "Cargo.toml",
+    "go.mod",
+    "package.json",
+    "pyproject.toml",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceIconQuery {
@@ -42,6 +49,7 @@ pub struct DirectoryEntry {
     name: String,
     path: String,
     kind: &'static str,
+    symlink: bool,
     size: Option<u64>,
 }
 
@@ -117,12 +125,28 @@ pub async fn list_entries(
         };
         let entry_path = entry.path();
         let relative_entry_path = relative_path(&base_dir, &entry_path)?;
-        let kind = if file_type.is_dir() {
+        // 软链接按目标归类：指向目录的可继续浏览，指向文件的可打开编辑，断链保留 symlink 标记。
+        let link_target = if file_type.is_symlink() {
+            match entry.metadata().await {
+                Ok(metadata) => Some(metadata),
+                Err(error) => {
+                    warn!("skip broken symlink {}: {error}", entry_path.display());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let kind = if file_type.is_symlink() {
+            match &link_target {
+                Some(metadata) if metadata.is_dir() => "dir",
+                Some(metadata) if metadata.is_file() => "file",
+                _ => "symlink",
+            }
+        } else if file_type.is_dir() {
             "dir"
         } else if file_type.is_file() {
             "file"
-        } else if file_type.is_symlink() {
-            "symlink"
         } else {
             "other"
         };
@@ -131,13 +155,20 @@ pub async fn list_entries(
             name: entry.file_name().to_string_lossy().to_string(),
             path: path_to_string(&relative_entry_path),
             kind,
-            size: if file_type.is_file() {
-                match entry.metadata().await {
-                    Ok(metadata) => Some(metadata.len()),
-                    Err(error) => {
-                        warn!("skip unreadable file metadata {}: {error}", entry_path.display());
-                        None
-                    }
+            symlink: file_type.is_symlink(),
+            size: if kind == "file" {
+                match link_target {
+                    Some(metadata) => Some(metadata.len()),
+                    None => match entry.metadata().await {
+                        Ok(metadata) => Some(metadata.len()),
+                        Err(error) => {
+                            warn!(
+                                "skip unreadable file metadata {}: {error}",
+                                entry_path.display()
+                            );
+                            None
+                        }
+                    },
                 }
             } else {
                 None
@@ -276,9 +307,19 @@ pub async fn rename_path(
         .await
         .map_err(|error| AppError::not_found(format!("路径不存在: {error}")))?
         .file_type();
-    if !file_type.is_file() && !file_type.is_dir() {
-        return Err(AppError::bad_request("只能重命名普通文件或文件夹。"));
-    }
+    let kind = if file_type.is_dir() {
+        "dir"
+    } else if file_type.is_file() {
+        "file"
+    } else if file_type.is_symlink() {
+        match fs::metadata(&source_path).await {
+            Ok(metadata) if metadata.is_dir() => "dir",
+            Ok(metadata) if metadata.is_file() => "file",
+            _ => "symlink",
+        }
+    } else {
+        return Err(AppError::bad_request("只能重命名普通文件、文件夹或软链接。"));
+    };
 
     let new_name = validate_entry_name(&payload.name)?;
     let parent = source_path
@@ -293,7 +334,7 @@ pub async fn rename_path(
             old_path: path_to_string(&relative),
             path: path_to_string(&relative),
             display_path: display_path(&base_dir, &display_root, &source_path),
-            kind: if file_type.is_dir() { "dir" } else { "file" },
+            kind,
         }));
     }
 
@@ -319,7 +360,7 @@ pub async fn rename_path(
         old_path: path_to_string(&old_relative),
         path: path_to_string(&new_relative),
         display_path: display_path(&base_dir, &display_root, &target_path),
-        kind: if file_type.is_dir() { "dir" } else { "file" },
+        kind,
     }))
 }
 
@@ -361,7 +402,7 @@ fn resolve_workspace_icon_path(
 ) -> ApiResult<PathBuf> {
     let relative_icon = normalize_workspace_icon_relative_path(icon_path)?;
     let mut directory = resolve_directory_path(base_dir, requested_dir)?;
-    let scope_root = access_root(base_dir);
+    let project_root = workspace_project_root(base_dir, &directory);
 
     loop {
         let candidate = directory.join(&relative_icon);
@@ -376,19 +417,61 @@ fn resolve_workspace_icon_path(
             }
         }
 
-        if !nearest || directory == scope_root {
+        if !nearest || directory == project_root {
             break;
         }
         let Some(parent) = directory.parent() else {
             break;
         };
-        if !parent.starts_with(scope_root) {
+        if !parent.starts_with(&project_root) {
             break;
         }
         directory = parent.to_path_buf();
     }
 
     Err(AppError::not_found("项目图标不存在。"))
+}
+
+pub fn workspace_icon_project_path(base_dir: &Path, directory: &Path) -> PathBuf {
+    relative_path(base_dir, &workspace_project_root(base_dir, directory)).unwrap_or_default()
+}
+
+fn workspace_project_root(base_dir: &Path, directory: &Path) -> PathBuf {
+    let scope_root = access_root(base_dir);
+    let mut candidate = directory.to_path_buf();
+
+    loop {
+        if candidate != base_dir && is_workspace_project_root(&candidate) {
+            return candidate;
+        }
+        if candidate.parent().is_some_and(is_workspace_project_group) {
+            return candidate;
+        }
+        if candidate == base_dir || candidate == scope_root {
+            return directory.to_path_buf();
+        }
+        let Some(parent) = candidate.parent() else {
+            return directory.to_path_buf();
+        };
+        if !parent.starts_with(scope_root) {
+            return directory.to_path_buf();
+        }
+        candidate = parent.to_path_buf();
+    }
+}
+
+fn is_workspace_project_root(directory: &Path) -> bool {
+    PROJECT_ROOT_MARKERS
+        .iter()
+        .any(|marker| directory.join(marker).exists())
+}
+
+fn is_workspace_project_group(directory: &Path) -> bool {
+    std::fs::read_dir(directory).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|entry| entry.path().is_dir() && is_workspace_project_root(&entry.path()))
+    })
 }
 
 fn normalize_workspace_icon_relative_path(raw: &str) -> ApiResult<PathBuf> {
@@ -441,10 +524,17 @@ pub fn canonical_directory_in_access_scope(
     Ok(canonical)
 }
 
+// 浏览路径按字面解析并保留软链接形态（与终端目录解析一致），由后续文件系统调用跟随链接；
+// 越权防护只针对字面上的 .. 逃逸，不能依赖 canonicalize 展开。
 fn resolve_path(base_dir: &Path, requested: &str) -> ApiResult<PathBuf> {
     let relative = normalize_relative_path(requested)?;
-    let candidate = base_dir.join(relative);
-    canonicalize_in_access_scope(base_dir, &candidate)
+    let candidate = normalize_path_lexically(&base_dir.join(relative));
+
+    if !is_within_access_scope(base_dir, &candidate) {
+        return Err(AppError::bad_request("只允许访问当前工作目录及其上一层目录。"));
+    }
+
+    Ok(candidate)
 }
 
 fn canonicalize_in_access_scope(base_dir: &Path, candidate: &Path) -> ApiResult<PathBuf> {
@@ -742,8 +832,9 @@ mod tests {
     use super::{
         canonical_directory_in_access_scope, diff_paths, display_path, is_within_access_scope,
         merge_toml_front_matter, normalize_relative_path, parent_relative_path, path_to_string,
-        resolve_file_path, resolve_terminal_directory_path, resolve_workspace_icon_path,
-        should_merge_existing_sections, validate_entry_name,
+        resolve_directory_path, resolve_file_path, resolve_terminal_directory_path,
+        resolve_workspace_icon_path, should_merge_existing_sections, validate_entry_name,
+        workspace_icon_project_path,
     };
     use std::{
         fs,
@@ -863,9 +954,9 @@ mod tests {
             display_path(
                 Path::new("/home/workspaces-src"),
                 Path::new("/home/codes"),
-                Path::new("/home/workspaces-src/webClx")
+                Path::new("/home/workspaces-src/tools/webClx")
             ),
-            "/home/codes/webClx"
+            "/home/codes/tools/webClx"
         );
         assert_eq!(
             display_path(
@@ -902,11 +993,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn resolve_file_path_rejects_symlink_escape_outside_access_root() {
+    fn resolve_paths_follow_symlinks_and_keep_link_path() {
         use std::os::unix::fs::symlink;
 
         let unique = format!(
-            "webclx-pathguard-{}",
+            "webclx-symlink-browse-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -920,9 +1011,31 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, workspace.join("link-dir")).unwrap();
         symlink(outside.join("secret.txt"), workspace.join("link.txt")).unwrap();
 
-        let result = resolve_file_path(&workspace, "link.txt");
+        let file_result = resolve_file_path(&workspace, "link.txt");
+        let dir_result = resolve_directory_path(&workspace, "link-dir");
+        fs::remove_dir_all(&temp_root).unwrap();
+
+        assert_eq!(file_result.unwrap(), workspace.join("link.txt"));
+        assert_eq!(dir_result.unwrap(), workspace.join("link-dir"));
+    }
+
+    #[test]
+    fn resolve_file_path_still_rejects_lexical_escape_beyond_access_root() {
+        let unique = format!(
+            "webclx-lexical-escape-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_root = std::env::temp_dir().join(unique);
+        let workspace = temp_root.join("parent").join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+
+        let result = resolve_file_path(&workspace, "../..");
         fs::remove_dir_all(&temp_root).unwrap();
 
         assert!(result.is_err());
@@ -943,6 +1056,7 @@ mod tests {
         let nested = project.join("src").join("feature");
         fs::create_dir_all(project.join("static")).unwrap();
         fs::create_dir_all(&nested).unwrap();
+        fs::write(project.join("Cargo.toml"), b"[package]").unwrap();
         fs::write(project.join("icon.ico"), b"ico").unwrap();
         fs::write(project.join("static").join("favicon.svg"), b"<svg/>").unwrap();
 
@@ -962,6 +1076,108 @@ mod tests {
         );
         assert!(resolve_workspace_icon_path(&workspace, "demo", "../secret.ico", false).is_err());
         assert!(resolve_workspace_icon_path(&workspace, "demo", "README.md", false).is_err());
+
+        fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn workspace_icon_nearest_lookup_does_not_inherit_workspace_root_icon() {
+        let unique = format!(
+            "webclx-workspace-icon-boundary-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_root = std::env::temp_dir().join(unique);
+        let workspace = temp_root.join("codes");
+        let project = workspace.join("demo");
+        let nested = project.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(workspace.join("icon.ico"), b"workspace").unwrap();
+
+        assert_eq!(
+            resolve_workspace_icon_path(&workspace, "", "icon.ico", true).unwrap(),
+            workspace.join("icon.ico")
+        );
+        assert!(resolve_workspace_icon_path(&workspace, "demo", "icon.ico", true).is_err());
+        assert!(resolve_workspace_icon_path(&workspace, "demo/src", "icon.ico", true).is_err());
+
+        fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn workspace_icon_nearest_lookup_does_not_inherit_third_party_group_icon() {
+        let unique = format!(
+            "webclx-workspace-icon-third-party-boundary-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_root = std::env::temp_dir().join(unique);
+        let workspace = temp_root.join("codes");
+        let group = workspace.join("third_party");
+        let project = group.join("zcodeOfficial");
+        let nested = project.join("src");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(group.join("another-project")).unwrap();
+        fs::write(group.join("another-project").join("Cargo.toml"), b"[package]").unwrap();
+        fs::write(group.join("icon.ico"), b"group").unwrap();
+
+        assert_eq!(
+            resolve_workspace_icon_path(&workspace, "third_party", "icon.ico", true).unwrap(),
+            group.join("icon.ico")
+        );
+        assert!(
+            resolve_workspace_icon_path(&workspace, "third_party/zcodeOfficial", "icon.ico", true)
+                .is_err()
+        );
+        assert!(
+            resolve_workspace_icon_path(
+                &workspace,
+                "third_party/zcodeOfficial/src",
+                "icon.ico",
+                true
+            )
+            .is_err()
+        );
+
+        fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn workspace_icon_project_path_separates_generic_group_projects() {
+        let unique = format!(
+            "webclx-workspace-icon-generic-group-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let temp_root = std::env::temp_dir().join(unique);
+        let workspace = temp_root.join("codes");
+        let group = workspace.join("apps");
+        let first = group.join("patheticMan");
+        let second = group.join("zcode-fresh-reset");
+        fs::create_dir_all(first.join("src")).unwrap();
+        fs::create_dir_all(second.join("src")).unwrap();
+        fs::write(first.join("package.json"), b"{}").unwrap();
+        fs::write(second.join("Cargo.toml"), b"[package]").unwrap();
+        fs::write(group.join("icon.ico"), b"group").unwrap();
+
+        assert_eq!(
+            workspace_icon_project_path(&workspace, &first.join("src")),
+            PathBuf::from("apps/patheticMan")
+        );
+        assert_eq!(
+            workspace_icon_project_path(&workspace, &second.join("src")),
+            PathBuf::from("apps/zcode-fresh-reset")
+        );
+        assert!(
+            resolve_workspace_icon_path(&workspace, "apps/zcode-fresh-reset/src", "icon.ico", true)
+                .is_err()
+        );
 
         fs::remove_dir_all(temp_root).unwrap();
     }

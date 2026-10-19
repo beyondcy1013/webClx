@@ -125,6 +125,7 @@ pub async fn run_browser_actions(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| AppError::internal(format!("启动 Playwright 失败: {error}")))?;
     if let Some(mut stdin) = child.stdin.take() {

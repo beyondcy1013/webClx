@@ -137,8 +137,12 @@ function renderTerminalArchives() {
       "mini-button accent",
     );
     runLink.addEventListener("click", (event) => {
+      const archivedTerminalName = String(
+        archive.terminal_name || archive.terminalName || "",
+      ).trim();
       openFreshTerminalRunLink(event, archiveWorkingPath(archive), command, {
         beforeNavigate: () => touchTerminalArchive(archiveId),
+        terminalName: archivedTerminalName ? `${archivedTerminalName}_resume` : "",
       });
     });
 

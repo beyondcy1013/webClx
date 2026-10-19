@@ -72,7 +72,7 @@ async def main():
                 "element => element.closest('label').classList.add('terminal-specified-task-preset-field')"
             )
             await page.add_style_tag(
-                path="/home/codes/webClx/static/styles-terminal.css"
+                path="/home/codes/tools/webClx/static/styles-terminal.css"
             )
         await page.wait_for_function(
             "() => typeof openTerminalSpecifiedTaskDialog === 'function'"

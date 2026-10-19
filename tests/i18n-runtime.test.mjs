@@ -11,7 +11,7 @@ function read(relativePath) {
 }
 
 test("all browser entry points load the shared localization runtime first", () => {
-  for (const page of ["index.html", "terminal.html", "agent.html", "login.html"]) {
+  for (const page of ["index.html", "terminal.html", "agent-profiles.html", "login.html"]) {
     const html = read(page);
     assert.match(html, /<script defer src="\/assets\/i18n\.js\?v=[^"]+"><\/script>/);
     assert.ok(
@@ -21,7 +21,7 @@ test("all browser entry points load the shared localization runtime first", () =
   }
 });
 
-test("localization runtime exposes Chinese and English with persistent selection", () => {
+test("localization runtime follows the system language until the user selects a locale", () => {
   const source = fs.readFileSync(runtimePath, "utf8");
   const stored = new Map();
   const context = vm.createContext({
@@ -34,7 +34,7 @@ test("localization runtime exposes Chinese and English with persistent selection
       getItem(key) { return stored.get(key) ?? null; },
       setItem(key, value) { stored.set(key, value); },
     },
-    navigator: { languages: ["en-US"] },
+    navigator: { language: "en-US", languages: ["zh-CN"] },
     MutationObserver: class { observe() {} },
     CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
   });
@@ -50,6 +50,29 @@ test("localization runtime exposes Chinese and English with persistent selection
   assert.equal(context.document.documentElement.lang, "zh-CN");
 });
 
+test("stored locale overrides the system language", () => {
+  const source = fs.readFileSync(runtimePath, "utf8");
+  const context = vm.createContext({
+    window: {},
+    document: {
+      addEventListener() {},
+      documentElement: { dataset: {}, lang: "" },
+    },
+    localStorage: {
+      getItem() { return "zh-CN"; },
+      setItem() {},
+    },
+    navigator: { language: "en-US", languages: ["en-US"] },
+    MutationObserver: class { observe() {} },
+    CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init?.detail; } },
+  });
+  context.window = context;
+  context.window.dispatchEvent = () => {};
+  vm.runInContext(source, context);
+
+  assert.equal(context.webclxI18n.getLocale(), "zh-CN");
+});
+
 test("runtime translates navigation, terminal messaging, Agent, settings, and login copy", () => {
   const source = fs.readFileSync(runtimePath, "utf8");
   for (const [zh, en] of [
@@ -61,6 +84,9 @@ test("runtime translates navigation, terminal messaging, Agent, settings, and lo
     ["账号", "Username"],
     ["密码", "Password"],
     ["登录", "Sign in"],
+    ["登录中…", "Signing in..."],
+    ["登录请求过多，请稍后重试", "Too many sign-in requests. Try again shortly."],
+    ["网络错误，请稍后重试", "Network error. Try again shortly."],
     ["新 Agent 会话", "New Agent session"],
   ]) {
     assert.match(source, new RegExp(`${JSON.stringify(zh)}\\s*:\\s*${JSON.stringify(en)}`));
@@ -69,5 +95,7 @@ test("runtime translates navigation, terminal messaging, Agent, settings, and lo
   assert.match(source, /aria-label/);
   assert.match(source, /placeholder/);
   assert.match(source, /webclx-language-select/);
+  assert.match(source, /browser-topbar-spacer/);
+  assert.match(source, /replaceWith\(label\)/);
+  assert.match(read("login.js"), /webclxI18n\?\.translate/);
 });
-

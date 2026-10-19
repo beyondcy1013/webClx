@@ -6,6 +6,11 @@
     <title>webClx</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <script>
+      if (new URLSearchParams(window.location.search).get("compact") === "tasks") {
+        document.documentElement.classList.add("scheduled-tasks-window");
+      }
+    </script>
+    <script>
       (() => {
         try {
           const mode = window.localStorage.getItem("webclx:theme-mode");
@@ -30,62 +35,79 @@
         );
       });
     </script>
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20260806b" />
-    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260813a" />
-    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260802b" />
-    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260804b" />
-    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260802c" />
-    <script defer src="/assets/i18n.js?v=20260814a"></script>
-    <script defer src="/assets/terminal-settings.js?v=20260812c"></script>
-    <script defer src="/assets/terminal-session-activity.js?v=20260726a"></script>
-    <script defer src="/assets/terminal-session-storage.js?v=20260618a"></script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20261013-no-mask" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20261013-agy-action-menu" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260926-workflow-history" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260921-global-dialog" />
+    <script defer src="/assets/abort-signal-compat.js?v=20260817a"></script>
+    <script defer src="/assets/dialog-backdrop-guard.js?v=20260916c"></script>
+    <script defer src="/assets/i18n.js?v=20260820a"></script>
+    <script defer src="/assets/terminal-settings.js?v=20261009-codebuddy-compact"></script>
+    <script defer src="/assets/terminal-session-activity.js?v=20260918groupcolor7nobubblewhite"></script>
+    <script defer src="/assets/terminal-session-render.js?v=20260926history1"></script>
+    <script defer src="/assets/terminal-session-storage.js?v=20260916groups3"></script>
     <script defer src="/assets/terminal-android-select-menu.js?v=20260804b"></script>
-    <script defer src="/assets/workspace-project-icons.js?v=20260729a"></script>
-    <script defer src="/assets/specified-preset-actions.js?v=20260812d"></script>
+    <script defer src="/assets/workspace-project-icons.js?v=20261017-stable-session-menu"></script>
+    <script defer src="/assets/specified-preset-actions.js?v=20260928-cline-opencode"></script>
+    <script defer src="/assets/new-terminal.js?v=20260916groups3"></script>
+    <script defer src="/assets/terminal-specified-task.js?v=20261015-workspace-all-tabs"></script>
+    <script defer src="/assets/terminal-designate-preset.js?v=20260829a"></script>
     <script defer src="/assets/app-frp-manager.js?v=20260619a"></script>
     <script defer src="/assets/app-proxy-manager.js?v=20260713c"></script>
-    <script defer src="/assets/app-auth-manager.js?v=20260716a"></script>
-    <script defer src="/assets/app-api-manager.js?v=20260731a"></script>
-    <script defer src="/assets/app-claude-manager.js?v=20260716a"></script>
+    <script defer src="/assets/app-auth-manager.js?v=20260926-usage-error-toast"></script>
+    <script defer src="/assets/app-codex-account-manager.js?v=20261013-codebuddy-total-single-value"></script>
+    <script defer src="/assets/app-llm-account-editor-dialog.js?v=20260924-llm-editor-dialog"></script>
+    <script defer src="/assets/app-codebuddy-manager.js?v=20260923a"></script>
+    <script defer src="/assets/app-devin-manager.js?v=20260924a"></script>
+    <script defer src="/assets/app-agy-manager.js?v=20261013-agy-action-menu"></script>
+    <script defer src="/assets/app-api-manager.js?v=20260926-account-save-refresh"></script>
+    <script defer src="/assets/app-sub2api-manager.js?v=20260921c"></script>
+    <script defer src="/assets/app-claude-manager.js?v=20260924-claude-editor"></script>
     <script defer src="/assets/app-account-clipboard-manager.js?v=20260716b"></script>
-    <script defer src="/assets/app-preset-sync-manager.js?v=20260618e"></script>
+    <script defer src="/assets/app-preset-sync-manager.js?v=20260821f"></script>
     <script defer src="/assets/app-compile-status-manager.js?v=20260813b"></script>
-    <script defer src="/assets/app-system-panel-manager.js?v=20260713c"></script>
+    <script defer src="/assets/app-system-panel-manager.js?v=20260816b"></script>
     <script defer src="/assets/app-settings-formatters.js?v=20260730a"></script>
-    <script defer src="/assets/app-terminal-tools-settings.js?v=20260727c"></script>
+    <script defer src="/assets/app-terminal-tools-settings.js?v=20260926-workflow-unification"></script>
     <script defer src="/assets/app-error-keyword-rules.js?v=20260716a"></script>
-    <script defer src="/assets/app-terminal-commands.js?v=20260706a"></script>
-    <script defer src="/assets/app-config-override.js?v=20260719a"></script>
+    <script defer src="/assets/app-terminal-commands.js?v=20261018-pipe-fields"></script>
+    <script defer src="/assets/app-config-override.js?v=20260830c"></script>
     <script defer src="/assets/app-workspace-history-tooltip.js?v=20260707a"></script>
-    <script defer src="/assets/app-workspace-history.js?v=20260801b"></script>
+    <script defer src="/assets/app-workspace-history.js?v=20260919role2"></script>
     <script defer src="/assets/app-version-check.js?v=20260706a"></script>
     <script defer src="/assets/app-datetime-format.js?v=20260707a"></script>
-    <script defer src="/assets/app-preset-table.js?v=20260718a"></script>
-    <script defer src="/assets/app-terminal-archives.js?v=20260730b"></script>
+    <script defer src="/assets/app-preset-table.js?v=20260903a"></script>
+    <script defer src="/assets/app-terminal-archives.js?v=20260829b"></script>
     <script defer src="/assets/app-path-utils.js?v=20260707a"></script>
     <script defer src="/assets/app-session-views.js?v=20260724a"></script>
-    <script defer src="/assets/app-session-controls.js?v=20260718i"></script>
+    <script defer src="/assets/app-session-controls.js?v=20260916groups3"></script>
     <script defer src="/assets/app-home-session-render.js?v=20260801a"></script>
-    <script defer src="/assets/app-preset-ops.js?v=20260723a"></script>
+    <script defer src="/assets/app-preset-ops.js?v=20260926-auth-wrappers"></script>
     <script defer src="/assets/app-frp-proxy-ops.js?v=20260707a"></script>
-    <script defer src="/assets/app-feature-managers-init.js?v=20260802a"></script>
+    <script defer src="/assets/app-feature-managers-init.js?v=20260926-browser-oauth"></script>
     <script defer src="/assets/app-auto-continue-tasks.js?v=20260707a"></script>
-    <script defer src="/assets/app-unified-tasks.js?v=20260711a"></script>
-    <script defer src="/assets/app-workspace-browser.js?v=20260726c"></script>
-    <script defer src="/assets/app-designate-preset.js?v=20260727d"></script>
-    <script defer src="/assets/app-session-actions.js?v=20260801a"></script>
+    <script defer src="/assets/app-unified-tasks.js?v=20261012-action-first"></script>
+    <script defer src="/assets/app-workspace-browser.js?v=20260815a"></script>
+    <script defer src="/assets/app-designate-preset.js?v=20260916a"></script>
+    <script defer src="/assets/terminal-experience-save.js?v=20261014-ops-keyword"></script>
+    <script defer src="/assets/app-session-actions.js?v=20261013-hidden-zone"></script>
     <script defer src="/assets/app-settings-categories.js?v=20260727b"></script>
-    <script defer src="/assets/app-navigation-tabs.js?v=20260725e"></script>
-    <script defer src="/assets/app-core-event-bindings.js?v=20260806a"></script>
+    <script defer src="/assets/app-navigation-tabs.js?v=20260926-account-tab-urls"></script>
+    <script defer src="/assets/app-core-event-bindings.js?v=20260918-indexed-history1"></script>
     <script defer src="/assets/app-frp-proxy-event-bindings.js?v=20260707a"></script>
-    <script defer src="/assets/app-preset-form-event-bindings.js?v=20260730a"></script>
-    <script defer src="/assets/app-settings-load-save.js?v=20260730a"></script>
-    <script defer src="/assets/app-settings-event-bindings.js?v=20260730a"></script>
-    <script defer src="/assets/app-desktop-update-events.js?v=20260710a"></script>
-    <script defer src="/assets/app-agent-settings.js?v=20260711b"></script>
-    <script defer src="/assets/app.js?v=20260806a"></script>
+    <script defer src="/assets/app-preset-form-event-bindings.js?v=20260926-browser-oauth"></script>
+    <script defer src="/assets/app-settings-load-save.js?v=20261011-compact-agent-guard"></script>
+    <script defer src="/assets/app-settings-event-bindings.js?v=20261009-codebuddy-compact"></script>
+    <script defer src="/assets/app.js?v=20261009-codebuddy-compact"></script>
+    <script defer src="/assets/app-model-catalog-policy.js?v=20260916a"></script>
   </head>
   <body class="app-shell">
+    <script>
+      if (new URLSearchParams(window.location.search).get("compact") === "tasks") {
+        document.body.classList.add("scheduled-tasks-window");
+      }
+    </script>
     <div class="page browser-page">
       <header class="topbar slim browser-topbar">
         <div class="tabs page-tabs" role="tablist" aria-label="webClx tabs">
@@ -99,23 +121,17 @@
             历史工作区
           </button>
           <button id="tab-api" class="tab-button" data-tab="api" role="tab" aria-selected="false">
-            Codex_API
-          </button>
-          <button id="tab-claude" class="tab-button" data-tab="claude" role="tab" aria-selected="false">
-            Claude_API
+            LLM_API
           </button>
           <button id="tab-settings" class="tab-button" data-tab="settings" role="tab" aria-selected="false">
             设置
           </button>
-          <button id="tab-desktop" class="tab-button" data-tab="desktop" role="tab" aria-selected="false">
-            远程桌面
-          </button>
           <a class="tab-button topbar-link-button" href="/agent" role="tab" aria-selected="false">
-            Agent
+            DeepSeek Agent
           </a>
-          <button id="tab-auth" class="tab-button" data-tab="auth" role="tab" aria-selected="false">
-            Codex_OAuth
-          </button>
+          <a class="tab-button topbar-link-button" href="/collaboration" role="tab" aria-selected="false">
+            智能体协作
+          </a>
           <button id="tab-terminal-archives" class="tab-button" data-tab="terminal-archives" role="tab" aria-selected="false">
             归档列表
           </button>
@@ -141,7 +157,7 @@
           <div class="directory-session-strip">
             <div class="directory-session-actions">
               <a id="open-terminal-root" class="link-button" href="/terminal" title="直接在当前页面显示的目录新建终端，不跟随下拉框切换">
-                当前目录终端
+                新开
               </a>
               <select id="favorite-path-select" class="favorite-select workspace-favorite-select" aria-label="跳转收藏">
                 <option value="">跳转收藏</option>
@@ -274,13 +290,23 @@
               <p class="section-label">历史工作区</p>
               <h2>按工作目录查看对话</h2>
             </div>
-            <div id="workspace-history-status" class="inline-status compact-status table-card-status" data-tone="info" role="status" aria-live="polite">正在读取历史工作区…</div>
+            <div class="workspace-history-load-status">
+              <div id="workspace-history-status" class="inline-status compact-status table-card-status" data-tone="info" role="status" aria-live="polite">正在读取历史工作区…</div>
+              <div id="workspace-history-progress-panel" class="workspace-history-progress-panel" hidden>
+                <div class="workspace-history-progress-meta">
+                  <span id="workspace-history-current-work">准备读取历史记录…</span>
+                  <span id="workspace-history-progress-label">0/0</span>
+                </div>
+                <progress id="workspace-history-progress" class="workspace-history-progress" max="100" value="0" aria-label="历史工作区读取进度"></progress>
+              </div>
+            </div>
           </div>
           <div class="toolbar workspace-history-toolbar">
+            <button id="copy-workspace-history-path" class="workspace-current-copy" type="button" title="点击复制当前路径" aria-label="复制历史工作区当前目录路径">当前目录：</button>
             <select id="workspace-history-path-select" class="terminal-session-select directory-session-select" aria-label="切换历史工作目录">
               <option value="">正在读取历史工作区…</option>
             </select>
-            <button id="workspace-history-terminal" class="button secondary" type="button">新建终端</button>
+            <button id="workspace-history-terminal" class="button secondary" type="button">新开</button>
             <button id="workspace-history-delete" class="button secondary" type="button">删除目录</button>
             <button id="workspace-history-refresh" class="button secondary" type="button">刷新对话</button>
             <form id="workspace-history-search-form" class="session-search-form" role="search">
@@ -293,7 +319,9 @@
                 spellcheck="false"
                 aria-label="搜索历史工作区对话"
                 placeholder="搜索"
+                list="workspace-history-search-history"
               />
+              <datalist id="workspace-history-search-history"></datalist>
               <button id="workspace-history-search-submit" class="button secondary" type="submit">搜索</button>
               <button id="workspace-history-search-clear" class="button secondary" type="button">清除</button>
               <label class="workspace-history-search-scope-label">
@@ -309,7 +337,7 @@
                 type="checkbox"
                 checked
               />
-              仅30天
+              仅7天
             </label>
           </form>
           </div>
@@ -317,6 +345,15 @@
 
         <div class="table-wrap">
           <table class="entry-table workspace-history-table">
+            <colgroup>
+              <col data-workspace-history-column="actions" />
+              <col data-workspace-history-column="terminal" />
+              <col data-workspace-history-column="active-terminal" />
+              <col data-workspace-history-column="session" />
+              <col data-workspace-history-column="size" />
+              <col data-workspace-history-column="title" />
+              <col data-workspace-history-column="updated" />
+            </colgroup>
             <thead>
               <tr>
                 <th>操作</th>
@@ -370,14 +407,207 @@
         </div>
       </section>
 
-      <section id="auth-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-auth">
-
-        <section class="auth-card auth-list-card">
+      <section id="api-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-api">
+        <section class="auth-card auth-list-card codex-account-list-card">
           <div class="panel-head wide">
             <div>
-              <p class="section-label">已保存预设</p>
+              <p class="section-label">统一账号</p>
+              <h2>LLM_API 账号</h2>
             </div>
             <div class="toolbar">
+              <button id="codex-account-export" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出选中</button>
+              <button id="codex-account-export-file" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出文件</button>
+              <button id="codex-account-add-oauth" class="button secondary" type="button" data-account-kinds="oauth">添加 OAuth</button>
+              <button id="codex-account-login-oauth" class="button primary" type="button" data-account-kinds="oauth">新登录</button>
+              <button id="codex-account-save-current" class="button secondary" type="button" disabled data-account-kinds="oauth">保存当前 Codex 登录</button>
+              <button id="codex-account-refresh-current" class="button secondary" type="button" disabled data-account-kinds="oauth">刷新当前登录</button>
+              <button id="codex-account-logout-current" class="button danger" type="button" disabled data-account-kinds="oauth">注销当前 Codex 登录</button>
+              <button id="codex-account-detect-current" class="button secondary" type="button" disabled data-account-kinds="oauth api claude codebuddy devin agy">重新读取当前账号</button>
+              <button id="codex-account-add-claude" class="button primary" type="button" data-account-kinds="claude">添加 Claude</button>
+              <button id="codex-account-add-api" class="button primary" type="button" data-account-kinds="api">添加 API</button>
+              <button id="codex-account-add-codebuddy" class="button primary" type="button" data-account-kinds="codebuddy">添加 CodeBuddy</button>
+              <button id="codex-account-add-devin" class="button primary" type="button" data-account-kinds="devin">添加 Devin</button>
+              <button id="codex-account-add-agy" class="button primary" type="button" data-account-kinds="agy">添加 AGY</button>
+              <button id="agy-detect-current" class="button secondary" type="button" hidden>重新读取当前账号</button>
+              <button id="agy-refresh" class="button secondary" type="button" hidden>刷新</button>
+              <button id="codex-account-refresh" class="button secondary" type="button" title="刷新账号列表" aria-label="刷新账号列表">&#8635;</button>
+            </div>
+          </div>
+          <div class="tabs segmented-tabs account-type-tabs" role="tablist" aria-label="账号类型切换">
+            <button class="tab-button account-type-tab active" data-kind="oauth" role="tab" aria-selected="true">Codex_OAuth</button>
+            <button class="tab-button account-type-tab" data-kind="api" role="tab" aria-selected="false">Codex_API</button>
+            <button class="tab-button account-type-tab" data-kind="claude" role="tab" aria-selected="false">Claude_API</button>
+            <button class="tab-button account-type-tab" data-kind="codebuddy" role="tab" aria-selected="false">CodeBuddy</button>
+            <button class="tab-button account-type-tab" data-kind="devin" role="tab" aria-selected="false">Devin</button>
+            <button id="tab-agy-auth" class="tab-button account-type-tab" data-kind="agy" role="tab" aria-selected="false">AGY</button>
+            <button id="tab-opencode" class="tab-button account-type-tab" data-kind="opencode" role="tab" aria-selected="false">OpenCode</button>
+          </div>
+          <div id="codebuddy-auto-bar" class="codebuddy-auto-bar subtab-options-bar" hidden>
+            <div class="subtab-options-actions">
+              <button id="codebuddy-run-checkin" class="button secondary" type="button">立即全部签到</button>
+              <button id="codebuddy-run-travel" class="button secondary" type="button">立即全部旅行</button>
+              <button id="codebuddy-refresh-credits" class="button secondary" type="button">刷新全部积分</button>
+              <button id="codebuddy-export-file" class="button secondary" type="button">导出 JSON</button>
+              <button id="codebuddy-export-clipboard" class="button secondary" type="button">导出到剪贴板</button>
+              <button id="codebuddy-import-toolbar" class="button secondary" type="button" data-account-kinds="codebuddy">导入文件</button>
+              <button id="codebuddy-import-clipboard" class="button secondary" type="button" data-account-kinds="codebuddy">从剪贴板导入</button>
+              <input id="codebuddy-import-file-input" type="file" accept=".json,application/json" hidden />
+            </div>
+            <div class="subtab-options-switches">
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="codebuddy-auto-checkin" type="checkbox" />
+                <span>自动签到</span>
+              </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="codebuddy-auto-travel" type="checkbox" />
+                <span>自动旅行</span>
+              </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="codebuddy-option-bypass" type="checkbox" />
+                <span>最高权限（bypassPermissions，不再询问）</span>
+              </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="codebuddy-option-sandbox" type="checkbox" />
+                <span>危险也不问（真正 full pass，仅隔离环境）</span>
+              </label>
+            </div>
+            <div class="subtab-options-meta">
+              <span id="codebuddy-auto-note" class="inline-status" data-tone="muted" hidden></span>
+            </div>
+            <button id="codebuddy-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+          </div>
+          <div id="devin-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" hidden>
+            <div class="subtab-options-actions">
+              <button id="devin-import-current-toolbar" class="button secondary" type="button" data-account-kinds="devin">导入当前配置</button>
+            </div>
+            <div class="subtab-options-switches">
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="devin-option-bypass" type="checkbox" />
+                <span>全局 Bypass（自动批准所有权限，允许所有操作，禁止询问）</span>
+              </label>
+            </div>
+            <div class="subtab-options-meta">
+              <span id="devin-options-note" class="inline-status" data-tone="muted"></span>
+            </div>
+            <button id="devin-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+          </div>
+          <div id="opencode-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" hidden>
+            <div class="subtab-options-switches">
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="opencode-option-all-permissions" type="checkbox" checked />
+                <span>启动开启所有权限（允许全部写入与工具操作）</span>
+              </label>
+            </div>
+            <div class="subtab-options-meta">
+              <span id="opencode-options-note" class="inline-status" data-tone="muted"></span>
+            </div>
+          </div>
+          <div id="agy-options-bar" class="codebuddy-auto-bar agy-options-bar subtab-options-bar" hidden>
+            <div class="subtab-options-actions">
+              <button id="agy-quota-all" class="button secondary" type="button">刷新所有额度</button>
+              <button id="agy-test-all" class="button secondary" type="button">测试所有账号</button>
+              <button id="agy-toggle-email-col" class="button secondary" type="button">显示邮箱</button>
+              <button id="agy-export-file" class="button secondary" type="button">导出 JSON</button>
+              <button id="agy-export-clipboard" class="button secondary" type="button">导出到剪贴板</button>
+              <button id="agy-import-open" class="button secondary" type="button">导入账号</button>
+            </div>
+            <div class="subtab-options-switches">
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="agy-option-dangerous" type="checkbox" />
+                <span>危险也不问（allow "*" + always-proceed，命令免提示）</span>
+              </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="agy-option-auto-edits" type="checkbox" />
+                <span>自动批准文件编辑（accept-edits，改文件不再确认）</span>
+              </label>
+            </div>
+            <div class="subtab-options-meta">
+              <span id="agy-options-note" class="inline-status" data-tone="muted"></span>
+            </div>
+          </div>
+          <div id="llm-global-options-bar" class="codebuddy-auto-bar llm-global-options-bar subtab-options-bar" hidden>
+            <div class="subtab-options-actions">
+              <button id="codex-account-query-usage" class="button secondary" type="button" disabled data-account-kinds="oauth api">查询用量</button>
+              <button id="codex-account-import" class="button secondary" type="button">从剪贴板导入</button>
+              <button id="codex-account-import-file-btn" class="button secondary" type="button">导入文件</button>
+              <input id="codex-account-import-file" class="sr-only" type="file" accept="application/json,.json" />
+              <button id="codex-account-sub2api" class="button secondary" type="button" data-account-kinds="oauth api claude">sub2api</button>
+            </div>
+            <div class="subtab-options-switches">
+              <span class="llm-global-codex-options" data-account-kinds="oauth api">
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-approval-never" type="checkbox" /><span>不弹审批</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-sandbox-full" type="checkbox" /><span>完全访问</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-animations-disabled" type="checkbox" /><span>禁用字符动画</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-alt-screen-disabled" type="checkbox" /><span>内联模式</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-daemon-disabled" type="checkbox" checked /><span>禁用后台守护进程</span></label>
+              </span>
+            </div>
+            <div class="subtab-options-meta">
+              <span id="llm-global-options-note" class="inline-status llm-global-options-note" data-tone="muted"></span>
+              <button id="codex-global-settings-open" class="button secondary llm-global-settings-open" type="button" aria-haspopup="dialog">全局设置</button>
+            </div>
+            <button id="codex-oauth-subtab-login" class="button primary" type="button" data-account-kinds="oauth" hidden>新登录</button>
+            <button id="codex-oauth-subtab-save-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>保存当前登录</button>
+            <button id="codex-oauth-subtab-refresh-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>刷新当前登录</button>
+            <button id="codex-oauth-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>重新读取当前账号</button>
+            <button id="codex-api-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="api" hidden>重新读取当前账号</button>
+            <button id="claude-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="claude" hidden>重新读取当前账号</button>
+          </div>
+          <div class="table-wrap auth-table-wrap codex-account-desktop-wrap">
+            <table class="entry-table auth-table codex-account-table">
+              <thead>
+                <tr>
+                  <th class="codex-account-selection-header"><input id="codex-account-select-all" type="checkbox" aria-label="全选当前账号" /></th>
+                  <th>操作</th>
+                  <th class="api-preset-favorite-cell">收藏</th>
+                  <th>状态指示</th>
+                  <th>测试结果</th>
+                  <th>类型</th>
+                  <th>名称</th>
+                  <th>账号 / 凭据</th>
+                  <th class="usage-window-column">用量窗口</th>
+                  <th class="codebuddy-credits-column">总积分</th>
+                  <th class="codebuddy-credits-column">分类积分</th>
+                  <th class="codebuddy-credits-column">到期</th>
+                  <th>模型</th>
+                  <th>入口</th>
+                  <th>使用</th>
+                </tr>
+              </thead>
+              <tbody id="codex-account-list"></tbody>
+            </table>
+          </div>
+          <div id="agy-table-wrap" class="table-wrap auth-table-wrap agy-table-wrap" hidden>
+            <table class="entry-table auth-table agy-table">
+              <thead>
+                <tr>
+                  <th class="agy-col-actions">操作</th>
+                  <th class="agy-col-name">名称</th>
+                  <th class="agy-col-email">邮箱</th>
+                  <th class="agy-col-status">状态</th>
+                  <th class="agy-col-quota">剩余额度</th>
+                  <th class="agy-col-reset">复位时间</th>
+                  <th class="agy-col-countdown">倒计时</th>
+                  <th class="agy-col-quota-at">刷新额度时间</th>
+                  <th class="agy-col-saved">保存时间</th>
+                </tr>
+              </thead>
+              <tbody id="agy-preset-list"></tbody>
+            </table>
+          </div>
+          <div id="codex-account-status" class="inline-status" data-tone="muted" hidden></div>
+        </section>
+
+        <section class="auth-card auth-list-card codex-oauth-detail-card">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">Codex 官方登录账号</p>
+            </div>
+            <div class="toolbar">
+              <button id="auth-detail-login-btn" class="button primary" type="button">新登录</button>
+              <button id="auth-detail-save-current-btn" class="button secondary" type="button" disabled>保存当前登录</button>
+              <button id="auth-detail-refresh-current-btn" class="button secondary" type="button" disabled>刷新当前登录</button>
+              <button id="auth-detail-detect-current-btn" class="button secondary" type="button" disabled>重新读取当前账号</button>
               <button id="auth-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
               <button id="auth-clipboard-export" class="button secondary" type="button">导出到剪贴板</button>
               <button id="auth-test-all-presets" class="button secondary" type="button">测试所有账号</button>
@@ -414,289 +644,17 @@
         </section>
 
         <div hidden>
-          <p id="auth-current-file"></p>
-          <p id="auth-current-account"></p>
-          <p id="auth-config-file"></p>
-          <p id="auth-preset-file"></p>
-        </div>
-
-        <div class="auth-layout auth-layout-merged">
-          <div class="auth-sidebar">
-            <section class="auth-card">
-              <div class="panel-head wide">
-                <div>
-                  <p class="section-label">新增预设</p>
-                  <h2>粘贴账号 JSON</h2>
-                </div>
-              </div>
-
-              <div class="toolbar auth-actions">
-                <button id="auth-oauth-start" class="button secondary" type="button">官网登录</button>
-                <a
-                  id="auth-oauth-open-link"
-                  class="button secondary"
-                  href="https://auth.openai.com/codex/device"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  hidden
-                >打开官网</a>
-                <button id="auth-oauth-copy-code" class="button secondary" type="button" hidden>复制验证码</button>
-              </div>
-              <div id="auth-oauth-session-panel" class="settings-card settings-card-tight" hidden>
-                <div class="card-label-help">
-                  <p class="section-label">当前登录会话</p>
-                  <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
-                    <span class="card-desc-icon">?</span>
-                    <span class="card-desc-text">如果浏览器没有自动打开，请手动点击"打开官网"，输入上面的验证码继续。</span>
-                  </span>
-                </div>
-                <p id="auth-oauth-session-summary" class="settings-value">等待发起…</p>
-                <p class="meta-text mono-text">验证码：<span id="auth-oauth-user-code">-</span></p>
-              </div>
-              <div id="auth-oauth-status" class="inline-status" data-tone="muted" hidden></div>
-
-              <label class="field auth-field">
-                <span class="field-label">预设名称</span>
-                <input
-                  id="auth-preset-name"
-                  class="text-input"
-                  type="text"
-                  placeholder="留空则按账号自动命名"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-              </label>
-
-              <details id="auth-config-overrides-details" class="config-overrides-details auth-field">
-                <summary class="config-overrides-summary">
-                  <span class="field-title-help">
-                    <span class="field-label">可选 config.toml 额外覆盖</span>
-                    <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
-                      <span class="card-desc-icon">?</span>
-                      <span class="card-desc-text">前两行留空时沿用设置页默认；后续行请填键名和值。</span>
-                    </span>
-                  </span>
-                  <span id="auth-config-overrides-summary" class="config-overrides-summary-text">未设置</span>
-                </summary>
-                <div class="config-overrides-panel">
-                  <div id="auth-config-overrides-list" class="config-overrides-list"></div>
-                  <div class="toolbar auth-actions config-overrides-actions">
-                    <button id="auth-add-config-override" class="button secondary" type="button">添加一项</button>
-                  </div>
-                </div>
-              </details>
-
-              <label class="field auth-field">
-                <span class="field-label">账号 JSON</span>
-                <textarea
-                  id="auth-preset-input"
-                  class="auth-preset-editor"
-                  spellcheck="false"
-                  placeholder='可粘贴 CPA 账号数组、导出的账号数组，或当前 auth.json 对象。'
-                ></textarea>
-              </label>
-
-              <div class="toolbar auth-actions">
-                <button id="auth-import-file-button" class="button secondary" type="button">导入 JSON 文件</button>
-                <input
-                  id="auth-import-file"
-                  class="sr-only"
-                  type="file"
-                  accept="application/json,.json"
-                  aria-label="选择 Codex OAuth 账号 JSON 文件"
-                />
-                <button id="auth-clear-input" class="button secondary" type="button">清空</button>
-                <button id="auth-apply-input" class="button secondary" type="button">应用到 auth.json</button>
-                <button id="auth-save-preset" class="button primary" type="button">新增</button>
-                <button id="auth-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
-                <button id="auth-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
-              </div>
-
-              <div id="auth-form-status" class="inline-status" data-tone="muted">
-                保存时会先转换成当前 auth.json 的键结构，再写入预设仓库。
-              </div>
-            </section>
-          </div>
-        </div>
-      </section>
-
-      <section id="api-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-api">
-        <section class="auth-card auth-list-card api-top-list-card">
-          <div class="panel-head wide">
-            <div>
-              <p class="section-label">已保存预设</p>
-            </div>
-            <div class="toolbar api-preset-toolbar">
-              <label class="api-preset-group-control">
-                <span>分组</span>
-                <select
-                  id="api-preset-group-mode"
-                  class="text-input api-preset-group-select"
-                  aria-label="API 预设分组方式"
-                >
-                  <option value="base_url">Base URL</option>
-                  <option value="model">大模型</option>
-                </select>
-              </label>
-              <label class="api-preset-search-control">
-                <span class="sr-only">搜索 API 预设</span>
-                <input
-                  id="api-preset-search"
-                  class="text-input api-preset-search-input"
-                  type="search"
-                  placeholder="搜索名字、模型或 URL"
-                  autocomplete="off"
-                />
-              </label>
-              <button
-                id="api-preset-selection-mode"
-                class="button secondary"
-                type="button"
-                aria-pressed="false"
-              >
-                选择
-              </button>
-              <button id="api-add-preset" class="button primary" type="button">新增预设</button>
-              <details class="api-toolbar-more">
-                <summary class="button secondary">更多</summary>
-                <div class="api-toolbar-menu" role="group" aria-label="API 预设批量操作">
-                  <button id="api-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
-                  <button id="api-clipboard-export" class="button secondary" type="button">导出已选</button>
-                  <button id="api-account-import-file-button" class="button secondary" type="button">导入 JSON / 压缩包</button>
-                  <input
-                    id="api-account-import-file"
-                    class="sr-only"
-                    type="file"
-                    multiple
-                    accept="application/json,application/zip,application/x-tar,application/gzip,.json,.zip,.tar,.tar.gz,.tgz,.gz"
-                    aria-label="选择 Codex API 账号 JSON 或压缩包"
-                  />
-                  <button id="api-test-all-presets" class="button secondary" type="button">测试所有账号</button>
-                </div>
-              </details>
-            </div>
-          </div>
-
-          <div class="table-wrap auth-table-wrap api-desktop-table-wrap">
-            <table class="entry-table auth-table">
-              <thead>
-                <tr>
-                  <th>序号</th>
-                  <th>操作</th>
-                  <th>状态指示</th>
-                  <th>名字</th>
-                  <th>Base URL</th>
-                  <th>Wire</th>
-                  <th>协议转换</th>
-                  <th>本机入口</th>
-                  <th>管理URL</th>
-                  <th>凭据</th>
-                  <th>启动环境</th>
-                  <th>启动脚本</th>
-                  <th>使用</th>
-                  <th>保存时间</th>
-                </tr>
-              </thead>
-              <tbody id="api-preset-list"></tbody>
-            </table>
-          </div>
-          <div
-            id="api-preset-mobile-list"
-            class="api-preset-mobile-list"
-            role="list"
-            aria-live="polite"
-          ></div>
-          <div id="api-manager-status" class="inline-status" data-tone="muted" hidden></div>
-        </section>
-
-        <div hidden>
           <p id="api-current-target"></p>
           <p id="api-current-file"></p>
           <p id="api-config-file"></p>
           <p id="api-preset-file"></p>
         </div>
 
-        <section id="codex-api-global-defaults" class="auth-card api-global-defaults-card">
-          <div class="panel-head wide">
-            <div>
-              <p class="section-label">全局 / 默认选项</p>
-              <h2>Codex 公共配置</h2>
-            </div>
-          </div>
-          <div class="codex-common-config-section">
-            <div class="settings-section-head codex-common-config-head">
-              <div>
-                <h3>当前 config.toml</h3>
-                <p id="codex-common-config-path" class="meta-text mono-text">正在读取…</p>
-              </div>
-              <div class="toolbar codex-common-config-toolbar">
-                <button id="codex-common-config-refresh" class="button secondary" type="button">刷新</button>
-                <button id="codex-common-config-save" class="button primary" type="button">保存当前配置</button>
-              </div>
-            </div>
-            <div class="codex-common-config-options" role="group" aria-label="Codex 当前公共配置">
-              <label class="codex-common-config-option" for="codex-common-approval-never">
-                <input id="codex-common-approval-never" type="checkbox" />
-                <span>
-                  <strong>不弹审批</strong>
-                  <code>approval_policy = "never"</code>
-                </span>
-              </label>
-              <label class="codex-common-config-option" for="codex-common-sandbox-full-access">
-                <input id="codex-common-sandbox-full-access" type="checkbox" />
-                <span>
-                  <strong>完全访问</strong>
-                  <code>sandbox_mode = "danger-full-access"</code>
-                </span>
-              </label>
-            </div>
-            <div
-              id="codex-common-config-status"
-              class="inline-status"
-              data-tone="muted"
-              role="status"
-              aria-live="polite"
-              hidden
-            ></div>
-          </div>
-          <div class="settings-section-head codex-default-config-head">
-            <div>
-              <h3>预设默认值</h3>
-            </div>
-            <div class="toolbar codex-default-config-toolbar">
-              <button id="codex-default-config-add" class="button secondary" type="button">添加一项</button>
-              <button id="codex-default-config-reset" class="button secondary" type="button">恢复内置</button>
-              <button id="codex-default-config-save" class="button primary" type="button">保存默认值</button>
-            </div>
-          </div>
-          <div class="table-wrap codex-default-config-table-wrap">
-            <table class="entry-table codex-default-config-table" aria-label="Codex 全局默认 config">
-              <thead>
-                <tr>
-                  <th scope="col">键名</th>
-                  <th scope="col">默认值</th>
-                  <th scope="col">作用域</th>
-                  <th scope="col">操作</th>
-                </tr>
-              </thead>
-              <tbody id="codex-default-config-list"></tbody>
-            </table>
-          </div>
-          <div
-            id="codex-default-config-status"
-            class="inline-status"
-            data-tone="muted"
-            role="status"
-            aria-live="polite"
-            hidden
-          ></div>
-        </section>
-
         <div id="api-preset-editor-panel" class="auth-layout api-editor-layout" hidden>
           <section class="auth-card">
             <div class="panel-head wide">
               <div>
-                <p class="section-label">新增预设</p>
+                <p id="api-preset-editor-mode-label" class="section-label">新增预设</p>
                 <h2>保存 API 凭据与 Base URL</h2>
               </div>
             </div>
@@ -871,46 +829,207 @@
             </details>
 
             <div class="toolbar auth-actions">
-              <button id="api-account-import-text-button" class="button secondary" type="button">从文本导入</button>
               <button id="api-clear-input" class="button secondary" type="button">清空</button>
-              <button id="api-save-preset" class="button primary" type="button">新增</button>
-              <button id="api-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
+              <button id="api-save-preset" class="button primary" type="button">保存</button>
+              <button id="api-save-as-new-preset" class="button secondary" type="button" disabled hidden>另存为副本</button>
               <button id="api-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
             </div>
 
-            <div id="api-account-import-status" class="inline-status" data-tone="muted" hidden></div>
 
             <div id="api-form-status" class="inline-status" data-tone="muted">
               应用 API 预设时会同时写入 auth.json，并按全局默认、Wire API 和预设覆盖去校正 config.toml。所有 Codex_API 预设共用同一个 provider ID：`webclx_api`。
             </div>
           </section>
         </div>
-      </section>
 
-      <section id="claude-view" class="panel auth-panel tab-view" role="tabpanel" aria-labelledby="tab-claude">
-        <section class="auth-card auth-list-card api-top-list-card">
+        <section id="agy-view" class="auth-panel tab-view" role="tabpanel" aria-labelledby="tab-agy-auth" hidden>
+          <section id="agy-editor-panel" class="auth-card" hidden>
+            <div class="panel-head wide"><div><p class="section-label">新增预设</p><h2>导入 AGY 账号</h2></div></div>
+            <div class="toolbar auth-actions"><button id="agy-import-current" class="button secondary" type="button">从本机提取已登录账号</button></div>
+            <div class="toolbar auth-actions"><button id="agy-oauth-start" class="button secondary" type="button">启动 AGY OAuth 登录</button><a id="agy-oauth-open" class="button secondary" href="#" target="_blank" rel="noopener noreferrer" hidden>打开 Google 登录</a></div>
+            <div id="agy-oauth-panel" class="settings-card settings-card-tight" hidden><p class="field-help">登录后浏览器会跳转到 localhost:8085/callback。复制地址栏中的完整回调 URL，或只复制其中的 code，粘贴到下面完成兑换。</p><label class="field auth-field"><span class="field-label">OAuth 回调 URL 或 code</span><input id="agy-oauth-code" class="text-input mono-text" autocomplete="off" spellcheck="false" /></label><button id="agy-oauth-exchange" class="button primary" type="button">兑换并保存账号</button></div>
+            <div class="api-preset-basic-grid"><label class="field auth-field"><span class="field-label">预设名称</span><input id="agy-preset-name" class="text-input" maxlength="120" placeholder="例如 工作账号" /></label></div>
+            <label class="field auth-field"><span class="field-label">Token JSON</span><textarea id="agy-preset-input" class="auth-preset-editor mono-text" rows="8" spellcheck="false" placeholder='可粘贴 [{"email":"name@gmail.com","refresh_token":"1//..."}]，或 antigravity-oauth-token 的完整 JSON'></textarea></label>
+            <div class="toolbar auth-actions"><button id="agy-save" class="button primary" type="button">保存预设</button><button id="agy-clear" class="button secondary" type="button">清空</button></div>
+            <div id="agy-status" class="inline-status" data-tone="muted" role="status" aria-live="polite"></div>
+          </section>
+        </section>
+
+
+        <div hidden>
+          <p id="auth-current-file"></p>
+          <p id="auth-current-account"></p>
+          <p id="auth-config-file"></p>
+          <p id="auth-preset-file"></p>
+        </div>
+
+        <div class="auth-layout auth-layout-merged">
+          <div class="auth-sidebar">
+            <section class="auth-card">
+              <div class="panel-head wide">
+                <div>
+                  <p class="section-label">新增预设</p>
+                  <h2>粘贴账号 JSON</h2>
+                </div>
+              </div>
+
+              <div class="toolbar auth-actions">
+                <button id="auth-oauth-browser-start" class="button primary" type="button" title="与 codex login 一致：OpenAI OAuth + PKCE，登录后粘贴 127.0.0.1:1455 回调地址">浏览器登录</button>
+                <button id="auth-oauth-start" class="button secondary" type="button" title="等同 codex login --device-auth">设备码登录</button>
+                <a
+                  id="auth-oauth-open-link"
+                  class="button secondary"
+                  href="https://auth.openai.com/codex/device"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  hidden
+                >打开登录链接</a>
+                <button id="auth-oauth-copy-code" class="button secondary" type="button" hidden>复制验证码</button>
+              </div>
+              <div id="auth-oauth-session-panel" class="settings-card settings-card-tight" hidden>
+                <div class="card-label-help">
+                  <p class="section-label">当前登录会话</p>
+                  <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                    <span class="card-desc-icon">?</span>
+                    <span class="card-desc-text">如果浏览器没有自动打开，请手动点击"打开官网"，输入上面的验证码继续。</span>
+                  </span>
+                </div>
+                <p id="auth-oauth-session-summary" class="settings-value">等待发起…</p>
+                <p class="meta-text mono-text">验证码：<span id="auth-oauth-user-code">-</span></p>
+                <div id="auth-oauth-url-container" class="auth-oauth-url-container" hidden>
+                  <label class="field auth-field">
+                    <span class="field-label">登录跳转地址（点击直接复制）</span>
+                    <input
+                      id="auth-oauth-url-display"
+                      class="text-input mono-text auth-url-display"
+                      readonly
+                      spellcheck="false"
+                      title="点击直接复制"
+                      placeholder="登录跳转链接将在此显示…"
+                      style="cursor: pointer;"
+                    />
+                  </label>
+                  <div class="toolbar auth-actions" style="margin-top: 6px;">
+                    <a id="auth-oauth-open-url" class="button primary" href="#" target="_blank" rel="noopener noreferrer">打开链接</a>
+                    <button id="auth-oauth-copy-url" class="button secondary" type="button">复制链接</button>
+                  </div>
+                </div>
+                <label class="field auth-field" id="auth-oauth-callback-field" hidden>
+                  <span class="field-label">登录回调 URL 或 code</span>
+                  <input
+                    id="auth-oauth-callback"
+                    class="text-input mono-text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="http://127.0.0.1:1455/auth/callback?code=...&state=..."
+                  />
+                </label>
+                <div class="toolbar auth-actions">
+                  <button id="auth-oauth-exchange" class="button primary" type="button" hidden>兑换并回填 token</button>
+                </div>
+              </div>
+              <div id="auth-oauth-status" class="inline-status" data-tone="muted" hidden></div>
+
+              <label class="field auth-field">
+                <span class="field-label">预设名称</span>
+                <input
+                  id="auth-preset-name"
+                  class="text-input"
+                  type="text"
+                  placeholder="留空则按账号自动命名"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+              </label>
+
+              <details id="auth-config-overrides-details" class="config-overrides-details auth-field">
+                <summary class="config-overrides-summary">
+                  <span class="field-title-help">
+                    <span class="field-label">可选 config.toml 额外覆盖</span>
+                    <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
+                      <span class="card-desc-icon">?</span>
+                      <span class="card-desc-text">前两行留空时沿用设置页默认；后续行请填键名和值。</span>
+                    </span>
+                  </span>
+                  <span id="auth-config-overrides-summary" class="config-overrides-summary-text">未设置</span>
+                </summary>
+                <div class="config-overrides-panel">
+                  <div id="auth-config-overrides-list" class="config-overrides-list"></div>
+                  <div class="toolbar auth-actions config-overrides-actions">
+                    <button id="auth-add-config-override" class="button secondary" type="button">添加一项</button>
+                  </div>
+                </div>
+              </details>
+
+              <label class="field auth-field">
+                <span class="field-label">账号 JSON</span>
+                <textarea
+                  id="auth-preset-input"
+                  class="auth-preset-editor"
+                  spellcheck="false"
+                  placeholder='可粘贴 CPA 账号数组、导出的账号数组，或当前 auth.json 对象。'
+                ></textarea>
+              </label>
+
+              <div class="toolbar auth-actions">
+                <button id="auth-import-file-button" class="button secondary" type="button">导入 JSON 文件</button>
+                <input
+                  id="auth-import-file"
+                  class="sr-only"
+                  type="file"
+                  accept="application/json,.json"
+                  aria-label="选择 Codex OAuth 账号 JSON 文件"
+                />
+                <button id="auth-clear-input" class="button secondary" type="button">清空</button>
+                <button id="auth-apply-input" class="button secondary" type="button">应用到 auth.json</button>
+                <button id="auth-save-preset" class="button primary" type="button">新增</button>
+                <button id="auth-save-as-new-preset" class="button secondary" type="button" disabled hidden>新增</button>
+                <button id="auth-apply-edited-preset" class="button secondary" type="button" disabled>切换此预设</button>
+              </div>
+
+              <div id="auth-form-status" class="inline-status" data-tone="muted">
+                保存时会先转换成当前 auth.json 的键结构，再写入预设仓库。
+              </div>
+            </section>
+          </div>
+        </div>
+        <section class="auth-card auth-list-card claude-account-detail-card" hidden>
           <div class="panel-head wide">
             <div>
               <p class="section-label">已保存预设</p>
             </div>
-            <div class="toolbar">
-              <button id="claude-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
-              <button id="claude-clipboard-export" class="button secondary" type="button">导出到剪贴板</button>
-              <button id="claude-test-all-presets" class="button secondary" type="button">测试所有账号</button>
+            <div class="toolbar api-preset-toolbar provider-preset-toolbar">
+              <button id="claude-global-settings-open" class="button secondary" type="button" aria-haspopup="dialog">全局设置</button>
+              <label class="api-preset-group-control">
+                <span>分组</span>
+                <select id="claude-preset-group-mode" class="select-input api-preset-group-select">
+                  <option value="base_url">按 Base URL</option>
+                  <option value="model">按模型</option>
+                </select>
+              </label>
+              <label class="api-preset-search-control">
+                <span class="sr-only">搜索 Claude 预设</span>
+                <input id="claude-preset-search" class="text-input api-preset-search-input" type="search" placeholder="搜索名字、模型或 URL" autocomplete="off" />
+              </label>
+              <button id="claude-preset-selection-mode" class="button secondary" type="button" aria-pressed="false">选择</button>
+              <button id="claude-add-preset" class="button primary" type="button">新增预设</button>
+              <details class="api-toolbar-more">
+                <summary class="button secondary">更多</summary>
+                <div class="api-toolbar-menu" role="group" aria-label="Claude 预设批量操作">
+                  <button id="claude-clipboard-import" class="button secondary" type="button">从剪贴板导入</button>
+                  <button id="claude-clipboard-export" class="button secondary" type="button">导出到剪贴板</button>
+                  <button id="claude-test-all-presets" class="button secondary" type="button">测试所有账号</button>
+                </div>
+              </details>
             </div>
           </div>
 
-          <div class="table-wrap auth-table-wrap">
+          <div class="table-wrap auth-table-wrap provider-desktop-table-wrap">
             <table class="entry-table auth-table">
               <thead>
                 <tr>
                   <th>序号</th>
-                  <th>排序</th>
-                  <th>切换</th>
-                  <th>测试</th>
-                  <th>OpenCode</th>
-                  <th>编辑</th>
-                  <th>删除</th>
+                  <th>操作</th>
                   <th>状态指示</th>
                   <th>名字</th>
                   <th>Base URL</th>
@@ -924,6 +1043,7 @@
               <tbody id="claude-preset-list"></tbody>
             </table>
           </div>
+          <div id="claude-preset-mobile-list" class="provider-preset-mobile-list" role="list" aria-live="polite"></div>
           <div id="claude-manager-status" class="inline-status" data-tone="muted" hidden></div>
         </section>
 
@@ -933,41 +1053,7 @@
           <p id="claude-preset-file"></p>
         </div>
 
-        <section id="claude-api-global-defaults" class="auth-card api-global-defaults-card">
-          <div class="panel-head wide">
-            <div>
-              <p class="section-label">全局 / 默认选项</p>
-              <h2>Claude settings.json env 默认值</h2>
-            </div>
-            <div class="toolbar">
-              <button id="claude-default-config-add" class="button secondary" type="button">添加一项</button>
-              <button id="claude-default-config-reset" class="button secondary" type="button">恢复内置</button>
-              <button id="claude-default-config-save" class="button primary" type="button">保存默认值</button>
-            </div>
-          </div>
-          <div class="table-wrap codex-default-config-table-wrap">
-            <table class="entry-table codex-default-config-table" aria-label="Claude 全局默认 env">
-              <thead>
-                <tr>
-                  <th scope="col">环境变量</th>
-                  <th scope="col">默认值</th>
-                  <th scope="col">操作</th>
-                </tr>
-              </thead>
-              <tbody id="claude-default-config-list"></tbody>
-            </table>
-          </div>
-          <div
-            id="claude-default-config-status"
-            class="inline-status"
-            data-tone="muted"
-            role="status"
-            aria-live="polite"
-            hidden
-          ></div>
-        </section>
-
-        <div class="auth-layout api-editor-layout">
+        <div id="claude-preset-editor-panel" class="auth-layout api-editor-layout" hidden>
           <section class="auth-card claude-editor-card">
             <div class="panel-head wide">
               <div>
@@ -1166,10 +1252,11 @@
             </div>
           </section>
         </div>
+
       </section>
 
       <section id="settings-view" class="panel settings-panel tab-view" role="tabpanel" aria-labelledby="tab-settings">
-        <div class="tabs settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类">
+        <div class="tabs segmented-tabs settings-tabs settings-category-tabs" role="tablist" aria-label="设置分类">
           <button
             id="settings-tab-tools"
             class="tab-button settings-category-button"
@@ -1283,7 +1370,7 @@
         </div>
         <div
           id="settings-subtabs"
-          class="tabs settings-subtabs"
+          class="tabs segmented-tabs settings-subtabs"
           role="tablist"
           aria-label="设置子分类"
           hidden
@@ -1318,6 +1405,48 @@
                 placeholder="30"
               />
             </label>
+            <label class="field field-inline-tight">
+              <span class="field-label">登录密码最小字符数（0 表示不限制）</span>
+              <input
+                id="webui-password-min-length-input"
+                class="text-input"
+                type="number"
+                min="0"
+                step="1"
+                placeholder="0"
+              />
+            </label>
+            <div class="field">
+              <span class="field-label">WebUI 登录密码</span>
+              <div class="toolbar webui-password-row">
+                <input
+                  id="webui-current-password-input"
+                  class="text-input"
+                  type="password"
+                  placeholder="当前密码"
+                  autocomplete="current-password"
+                  spellcheck="false"
+                />
+                <input
+                  id="webui-new-password-input"
+                  class="text-input"
+                  type="password"
+                  placeholder="新密码"
+                  autocomplete="new-password"
+                  spellcheck="false"
+                />
+                <input
+                  id="webui-confirm-password-input"
+                  class="text-input"
+                  type="password"
+                  placeholder="确认新密码"
+                  autocomplete="new-password"
+                  spellcheck="false"
+                />
+                <button id="webui-save-password-btn" class="button secondary" type="button">更新密码</button>
+              </div>
+              <span id="webui-password-status" class="field-help" aria-live="polite">修改成功后，所有现有会话都会失效并要求重新登录。</span>
+            </div>
           </div>
 
           <div class="system-overview-inline" aria-label="系统当前配置">
@@ -1331,7 +1460,7 @@
             <span class="field-label">服务端口被占用时自动顺延</span>
             <span class="toggle-row">
               <input id="server-port-auto-increment-input" type="checkbox" checked />
-              <span class="toggle-note">开启后优先监听 0.0.0.0:PORT；如果端口被占用，会自动尝试 PORT、11113 等后续端口。</span>
+              <span class="toggle-note">开启后优先监听 0.0.0.0:11111；如果端口被占用，会自动尝试 11112、11113 等后续端口。</span>
             </span>
           </label>
 
@@ -1378,6 +1507,15 @@
           hidden
         >
           <label class="field">
+            <span class="field-label">新开终端默认行为</span>
+            <select id="terminal-new-session-behavior-input" class="text-input">
+              <option value="dialog">通过对话框新开</option>
+              <option value="direct">直接新开</option>
+            </select>
+            <span class="field-help">对话框会复用现有预设启动界面；直接新开会立即在当前工作目录创建终端。</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">终端改名预设</span>
             <textarea
               id="terminal-rename-presets-input"
@@ -1391,13 +1529,26 @@
           </label>
 
           <label class="field">
+            <span class="field-label">新开对话框 Agent 类型</span>
+            <textarea
+              id="terminal-agent-commands-input"
+              class="settings-textarea mono-text terminal-default-env-input"
+              rows="7"
+              placeholder="codex | Codex | codex | codex --resume {session_id}&#10;devin | Devin | devin | devin --resume {session_id}"
+              autocomplete="off"
+              spellcheck="false"
+            ></textarea>
+            <span class="field-help">每行格式：key | 显示名 | 新会话命令 | 恢复命令。恢复命令可用 {session_id} 占位符并会被安全引用；留空时使用系统默认列表。</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">终端运行程序显示位置</span>
             <select id="terminal-activity-agent-display-select" class="text-input">
               <option value="hidden">不显示</option>
               <option value="prefix">作为前缀</option>
               <option value="suffix">作为后缀</option>
             </select>
-            <span class="field-help">用于会话下拉框和活动终端名称；开启后会显示当前检测到的运行程序，例如 Codex 或 Claude。</span>
+            <span class="field-help">用于会话下拉框和活动终端名称；开启后会显示当前检测到的运行程序，例如 Codex、Claude、DeepSeek、AGY、CDX、CodeBuddy、Cline 或 OpenCode。</span>
           </label>
 
           <div class="field settings-inline-control">
@@ -1493,6 +1644,19 @@
                 checked
               />
               <span class="toggle-note">开启后，检测到 Codex 的手动中断提示或 &lt;turn_aborted&gt; 时结束当前错误生命周期，不再自动发送"继续"。</span>
+            </span>
+          </label>
+
+          <label class="field field-toggle">
+            <span class="field-label">禁止向 CodeBuddy / AGY 发送 /compact</span>
+            <span class="toggle-row">
+              <input
+                id="terminal-auto-compact-skip-codebuddy-input"
+                type="checkbox"
+                checked
+                disabled
+              />
+              <span class="toggle-note">固定保护：CodeBuddy、AGY 和 Cline 不接收 webClx 的自动压缩或 /compact 软键盘命令；上下文错误保持错误状态，旧开关不能解除禁令。</span>
             </span>
           </label>
 
@@ -1721,7 +1885,7 @@
                 <h2>无人值守自动续跑</h2>
                 <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
                   <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">仅当当前时间落在以下时段内时，才自动处理终端的限额错误：解析上游智谱（bigmodel.cn）额度重置时间，并在重置时间 1 分钟后自动创建定时任务发送"继续"。时段外不自动处理，避免在你面前反复重试。留空表示永不自动续跑。支持跨零点，例如 22:00-08:00。</span>
+                  <span class="card-desc-text">仅当当前时间落在以下时段内时，才自动处理终端的限额错误：解析上游智谱（bigmodel.cn）额度重置时间，并在重置时间 1 分钟后自动创建定时任务发送"继续"。时段外不自动处理，避免在你面前反复重试。留空表示永不自动续跑；全天可填 00:00-24:00；也支持跨零点，例如 22:00-08:00。</span>
                 </span>
               </div>
             </div>
@@ -1730,14 +1894,14 @@
                 <span class="field-label">无人值守时段（HH:MM-HH:MM）</span>
                 <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
                   <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">仅对上游 base_url 包含 bigmodel.cn（智谱）的 Codex_API 预设生效；复用套餐查询对话框的智谱网址过滤算法。命中限额错误时，会用上游 429 返回的真实重置时间在重置后 1 分钟自动续跑。</span>
+                  <span class="card-desc-text">仅对上游 base_url 包含 bigmodel.cn 或 zcode.z.ai（智谱）的 Codex_API 预设生效；复用套餐查询对话框的智谱网址过滤算法。命中限额错误时，会用上游 429 返回的真实重置时间在重置后 1 分钟自动续跑。</span>
                 </span>
               </span>
               <input
                 id="terminal-auto-continue-active-window-input"
                 class="text-input"
                 type="text"
-                placeholder="22:00-08:00（留空 = 关闭）"
+                placeholder="00:00-24:00（全天）"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -1779,10 +1943,6 @@
               <div class="card-title-help">
                 <p class="section-label">新建定时任务</p>
                 <h2>创建定时任务</h2>
-                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
-                  <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">终端任务按指定时间发送内容；预设 API 测试任务按每天、每周或固定间隔循环检查指定预设。</span>
-                </span>
               </div>
             </div>
             <div id="unified-task-create-status" class="inline-status" data-tone="muted"></div>
@@ -1835,6 +1995,7 @@
                 <div class="unified-task-schedule-row">
                   <select id="unified-task-schedule-mode" class="text-input">
                     <option value="delay">延迟</option>
+                    <option value="interval">循环间隔</option>
                     <option value="datetime">指定时间</option>
                   </select>
                   <input id="unified-task-delay-value" class="text-input" type="number" min="1" step="1" value="5" placeholder="延迟数值" />
@@ -1919,32 +2080,41 @@
               <div class="card-title-help">
                 <p class="section-label">定时任务</p>
                 <h2>统一任务管理</h2>
-                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
-                  <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">终端发送、自动继续和预设 API 循环测试都在此创建、编辑、启停和查看结果。</span>
-                </span>
               </div>
               <div class="toolbar">
+                <div class="unified-task-view-switch" role="tablist" aria-label="定时任务范围">
+                  <button class="button secondary active" type="button" data-unified-task-view="current" role="tab" aria-selected="true">当前终端</button>
+                  <button class="button secondary" type="button" data-unified-task-view="all" role="tab" aria-selected="false">全部任务</button>
+                </div>
                 <button id="unified-task-new-btn" class="button" type="button">新建任务</button>
+                <button id="unified-task-delivery-toggle" class="button secondary" type="button" aria-pressed="false">投递记录</button>
                 <button id="unified-task-refresh" class="button secondary" type="button">刷新</button>
+                <button
+                  id="scheduled-tasks-window-close"
+                  class="button secondary scheduled-tasks-window-close"
+                  type="button"
+                  aria-label="关闭定时任务窗口"
+                  title="关闭"
+                >&#10005;</button>
               </div>
             </div>
+            <div id="unified-task-current-label" class="meta-text compact-meta">正在读取当前终端…</div>
             <div id="unified-task-list-status" class="inline-status" data-tone="muted">尚未读取。</div>
           </div>
 
           <div class="settings-card settings-card-wide settings-card-tight">
-            <div class="table-wrap compile-table-wrap">
+            <div class="table-wrap compile-table-wrap unified-task-table-wrap">
               <table class="entry-table compile-task-table unified-task-table">
                 <thead>
                   <tr>
                     <th>任务类型</th>
                     <th>来源</th>
-                    <th>目标</th>
+                    <th>目标终端</th>
                     <th>执行时间</th>
                     <th>剩余</th>
-                    <th>内容 / 结果</th>
                     <th>状态</th>
                     <th>操作</th>
+                    <th>内容 / 结果</th>
                   </tr>
                 </thead>
                 <tbody id="unified-task-list">
@@ -1959,10 +2129,6 @@
               <div class="card-title-help">
                 <p class="section-label">历史</p>
                 <h2>已过期/已清理的自动继续任务</h2>
-                <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
-                  <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">过期的 crontab 一次性任务会在读取时自动从 crontab 清理并归档到这里，方便回看；最多保留 200 条。</span>
-                </span>
               </div>
               <div class="toolbar">
                 <button id="auto-continue-history-toggle" class="button secondary" type="button" aria-expanded="false" aria-controls="auto-continue-history-table-wrap">查看历史</button>
@@ -2257,7 +2423,9 @@
               <button id="terminal-tool-add-folder" class="button secondary" type="button">新建目录</button>
               <button id="terminal-tool-add-action" class="button primary" type="button">新建工作流</button>
               <button id="terminal-tool-export" class="button secondary" type="button">导出</button>
+              <button id="terminal-tool-export-clipboard" class="button secondary" type="button">导出到剪贴板</button>
               <button id="terminal-tool-import" class="button secondary" type="button">导入</button>
+              <button id="terminal-tool-import-clipboard" class="button secondary" type="button">从剪贴板导入</button>
               <input id="terminal-tool-import-file" type="file" accept="application/json,.json" hidden />
             </div>
           </div>
@@ -2311,6 +2479,17 @@
               </label>
             </div>
             <div id="terminal-tool-actions-section" class="terminal-tool-actions-section">
+              <label class="field">
+                <span class="field-label">从使用场景开始（替换动作前会确认）</span>
+                <select id="terminal-tool-template" class="text-input">
+                  <option value="">选择模板…</option>
+                  <option value="environment">进入工作环境：启动 / 返回专属 Codex 终端</option>
+                  <option value="task">执行任务：选择预设 → 单次任务 → 返回结果</option>
+                  <option value="reference">复用已有流程：引用同一份定义</option>
+                  <option value="custom">高级自定义：自由组合动作</option>
+                </select>
+              </label>
+              <p class="muted-text">环境仅准备上下文并等待输入；任务立即执行。多个入口引用同一流程，修改一处即可同步。任务内容可用 {{参数名}}，执行时统一询问。</p>
               <div class="terminal-tool-actions-head">
                 <span class="field-label">执行动作</span>
                 <button id="terminal-tool-action-add" class="button secondary" type="button">添加动作</button>
@@ -2371,6 +2550,28 @@
             </label>
           </div>
 
+          <div class="appearance-group">
+            <div>
+              <span class="field-label">终端分组角色图标</span>
+              <span class="field-help">颜色区分分组，图标区分管理者和执行者。</span>
+            </div>
+            <label class="field">
+              <span class="field-label">管理者 Emoji</span>
+              <input id="terminal-group-manager-emoji-input" class="text-input" type="text" maxlength="8" value="👑" autocomplete="off" />
+            </label>
+            <label class="field">
+              <span class="field-label">执行者图标方案</span>
+              <select id="terminal-group-executor-emoji-mode" class="text-input select-input">
+                <option value="random">按终端稳定随机</option>
+                <option value="fixed">使用指定 Emoji</option>
+              </select>
+            </label>
+            <label class="field" id="terminal-group-executor-emoji-field">
+              <span class="field-label">执行者 Emoji</span>
+              <input id="terminal-group-executor-emoji-input" class="text-input" type="text" maxlength="8" value="⚙️" autocomplete="off" />
+            </label>
+          </div>
+
           <div class="appearance-group font-settings-entry">
             <div>
               <span class="field-label">字体设置</span>
@@ -2394,19 +2595,19 @@
               <div class="font-settings-grid">
                 <label class="field">
                   <span class="field-label">层级 1 / 注释微字</span>
-                  <input id="font-size-tier-1-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.64" autocomplete="off" spellcheck="false" />
+                  <input id="font-size-tier-1-input" class="text-input mono-text" type="number" min="0.50" max="1.20" step="0.01" placeholder="0.90" autocomplete="off" spellcheck="false" />
                 </label>
                 <label class="field">
                   <span class="field-label">层级 2 / 辅助小字</span>
-                  <input id="font-size-tier-2-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.68" autocomplete="off" spellcheck="false" />
+                  <input id="font-size-tier-2-input" class="text-input mono-text" type="number" min="0.50" max="1.20" step="0.01" placeholder="0.95" autocomplete="off" spellcheck="false" />
                 </label>
                 <label class="field">
                   <span class="field-label">层级 3 / 常规正文</span>
-                  <input id="font-size-tier-3-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.72" autocomplete="off" spellcheck="false" />
+                  <input id="font-size-tier-3-input" class="text-input mono-text" type="number" min="0.50" max="1.20" step="0.01" placeholder="1.00" autocomplete="off" spellcheck="false" />
                 </label>
                 <label class="field">
                   <span class="field-label">层级 4 / 导航上限</span>
-                  <input id="font-size-tier-4-input" class="text-input mono-text" type="number" min="0.50" max="1.00" step="0.01" placeholder="0.74" autocomplete="off" spellcheck="false" />
+                  <input id="font-size-tier-4-input" class="text-input mono-text" type="number" min="0.50" max="1.20" step="0.01" placeholder="1.06" autocomplete="off" spellcheck="false" />
                 </label>
               </div>
               <span class="field-help">单位 rem；层级 1 ≤ 2 ≤ 3 ≤ 4，层级 4 是导航上限。</span>
@@ -2515,7 +2716,7 @@
               </div>
             </div>
             <div class="settings-toggle-list">
-              <label class="toggle-row" title="https://open.bigmodel.cn/api/coding/paas/v4&#10;http://127.0.0.1:PORT/api/codex-proxy/zhipu/v1">
+              <label class="toggle-row" title="https://open.bigmodel.cn/api/coding/paas/v4&#10;http://127.0.0.1:11111/api/codex-proxy/zhipu/v1">
                 <input
                   type="checkbox"
                   data-codex-api-auto-proxy-provider="zhipu"
@@ -2684,7 +2885,7 @@
                   </label>
                   <label class="field">
                     <span class="field-label">远端端口</span>
-                    <input id="frp-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
+                    <input id="frp-source-public-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
                   </label>
                   <label class="field">
                     <span class="field-label">auth.token</span>
@@ -2985,11 +3186,11 @@
                       </label>
                       <label class="field">
                         <span class="field-label">本地端口</span>
-                        <input id="frp-role-frpc-local-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
+                        <input id="frp-role-frpc-local-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
                       </label>
                       <label id="frp-role-frpc-remote-port-field" class="field">
                         <span class="field-label">远端端口</span>
-                        <input id="frp-role-frpc-remote-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="PORT" />
+                        <input id="frp-role-frpc-remote-port-input" class="text-input mono-text" type="number" min="1" max="65535" value="11111" />
                       </label>
                       <label id="frp-role-frpc-custom-domains-field" class="field" hidden>
                         <span class="field-label">域名</span>
@@ -3504,87 +3705,42 @@
           <div class="settings-card settings-card-wide">
             <div class="panel-head">
               <div>
-                <p class="section-label">Agent 模型与提示词</p>
+                <p class="section-label">DeepSeek Harness</p>
               </div>
               <div class="toolbar">
-                <a href="/agent" class="button secondary" target="_blank">打开 Agent</a>
+                <a href="/agent" class="button primary">打开 DeepSeek Harness</a>
               </div>
             </div>
-            <label class="field field-inline-tight">
-              <span class="field-label">API 预设</span>
-              <select id="agent-api-preset-select" class="text-input">
-                <option value="">当前应用</option>
-              </select>
-              <span class="field-hint">选择 Agent 直接使用的 Codex_API 预设；"当前应用"跟随设置页当前激活的预设。</span>
-            </label>
-            <div id="agent-effective-preset-info" class="agent-effective-info" hidden>
-              <span class="agent-effective-label">当前实际：</span>
-              <span id="agent-effective-preset-name" class="mono-text"></span>
-              <span id="agent-effective-provider" class="agent-effective-provider"></span>
-              <span class="agent-effective-divider">·</span>
-              <span class="agent-effective-model-label">模型：</span>
-              <span id="agent-effective-model" class="mono-text"></span>
+            <div class="settings-value-list">
+              <div class="settings-value-list-item">
+                <span>Agent 对话、会话、工具与 Skill 执行</span>
+                <span class="mono-text">DeepSeek Harness</span>
+              </div>
+              <div class="settings-value-list-item">
+                <span>服务地址</span>
+                <span class="mono-text">WEBCLX_DEEPSEEK_HARNESS_URL</span>
+              </div>
             </div>
-            <label class="field field-inline-tight">
-              <span class="field-label">默认模型</span>
-              <input
-                id="agent-default-model-input"
-                class="text-input"
-                type="text"
-                placeholder="gpt-4o"
-              />
-              <span class="field-hint">留空则使用 gpt-4o。</span>
-            </label>
-            <label class="field">
-              <span class="field-label">系统提示词覆盖（可选）</span>
-              <textarea
-                id="agent-system-prompt-input"
-                class="text-input"
-                rows="3"
-                placeholder="留空使用内置默认系统提示词。"
-              ></textarea>
-            </label>
           </div>
 
           <div class="settings-card settings-card-wide">
             <div class="panel-head">
               <div>
-                <p class="section-label">额外 Skill 目录</p>
+                <p class="section-label">终端智能体配置</p>
               </div>
               <div class="toolbar">
-                <input
-                  id="agent-skill-dir-input"
-                  class="text-input"
-                  type="text"
-                  placeholder="/home/codes/myProject/.codex/skills"
-                  style="width: 320px;"
-                />
-                <button id="agent-add-skill-dir-btn" class="button secondary" type="button">添加</button>
+                <a href="/agent/profiles" class="button secondary">终端智能体配置</a>
               </div>
             </div>
-            <p class="field-hint">加载项目目录下的 skill。绝对路径，必须已存在。这些目录中的 skill 会与用户全局 skill 合并。</p>
-            <div id="agent-skill-dirs-list" class="settings-value-list"></div>
-          </div>
-
-          <div class="settings-card settings-card-wide">
-            <div class="panel-head">
-              <div>
-                <p class="section-label">Skill 管理</p>
+            <div class="settings-value-list">
+              <div class="settings-value-list-item">
+                <span>Codex / Claude 工作目录、预设、Skill 与会话名称</span>
+                <span class="mono-text">webClx</span>
               </div>
-              <div class="toolbar">
-                <button id="agent-refresh-skills-btn" class="button secondary" type="button">刷新列表</button>
-                <input
-                  id="agent-skill-search-input"
-                  class="text-input"
-                  type="text"
-                  placeholder="搜索 skill..."
-                  style="width: 200px;"
-                />
+              <div class="settings-value-list-item">
+                <span>历史 native profile</span>
+                <span class="mono-text">只读迁移记录</span>
               </div>
-            </div>
-            <p class="field-hint">默认加载全部已识别 skill。切换屏蔽开关可在不删除文件的情况下对 Agent 隐藏指定 skill。</p>
-            <div id="agent-skills-list">
-              <div class="inline-status" data-tone="muted">加载中...</div>
             </div>
           </div>
         </section>
@@ -3600,56 +3756,8 @@
         </div>
       </section>
 
-      <section id="desktop-view" class="panel desktop-panel tab-view" role="tabpanel" aria-labelledby="tab-desktop">
-        <div class="panel-head wide">
-          <div class="desktop-address-bar">
-            <p class="section-label">远程桌面</p>
-            <div class="desktop-url-field">
-              <input
-                id="desktop-url-input"
-                class="text-input mono-text desktop-url-input"
-                type="text"
-                list="desktop-url-history"
-                value="https://HOST:14083/"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <datalist id="desktop-url-history"></datalist>
-              <button id="desktop-apply-url" class="button" type="button" title="应用地址并重新加载">应用</button>
-              <a id="desktop-open-button" class="button" href="#" target="_blank" rel="noopener noreferrer">新窗口打开</a>
-              <button id="desktop-reload" class="button secondary" type="button" title="重新加载远程桌面">重新加载</button>
-            </div>
-          </div>
-        </div>
-        <div class="desktop-frame-wrap">
-          <iframe
-            id="desktop-frame"
-            class="desktop-frame"
-            src="https://HOST:14083/"
-            title="远程桌面"
-            loading="lazy"
-            allow="clipboard-read; clipboard-write; fullscreen"
-            referrerpolicy="no-referrer"
-          ></iframe>
-          <div id="desktop-fallback" class="desktop-fallback" hidden>
-            <p class="desktop-fallback-title">远程桌面尚未加载出来。</p>
-            <p>该地址（<span id="desktop-fallback-url" class="mono-text"></span>）使用的是自签名证书，浏览器默认拒绝在网页内嵌渲染未信任的 HTTPS 站点。</p>
-            <p>请先在新窗口打开该地址，手动信任证书后再回到本页面：</p>
-            <ol class="desktop-fallback-steps">
-              <li>点击下面的「在新窗口打开」；</li>
-              <li>在浏览器证书警告页点「高级 / Advanced」→「继续前往 / Proceed」；</li>
-              <li>回到本页，点「我已信任，重新加载」。</li>
-            </ol>
-            <div class="desktop-fallback-actions">
-              <a id="desktop-fallback-open" class="button" href="#" target="_blank" rel="noopener noreferrer">在新窗口打开</a>
-              <button id="desktop-reload-after-trust" class="button" type="button">我已信任，重新加载</button>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <dialog id="terminal-rename-dialog" class="terminal-rename-dialog" aria-labelledby="terminal-rename-dialog-title">
-        <form id="session-rename-form" class="terminal-rename-dialog-form" method="dialog">
+        <form id="session-rename-form" class="terminal-rename-dialog-form">
           <div class="panel-head wide">
             <div>
               <p class="section-label">终端管理</p>
@@ -3668,7 +3776,6 @@
             placeholder="输入新的终端名称"
           />
           <div
-            id="terminal-rename-dialog-status"
             class="inline-status"
             data-tone="muted"
             role="status"
@@ -3678,6 +3785,36 @@
           <div class="toolbar dialog-actions">
             <button class="button primary" type="submit">保存名称</button>
             <button id="session-rename-cancel" class="button secondary" type="button">取消</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-experience-save-dialog"
+        class="terminal-rename-dialog"
+        aria-labelledby="terminal-experience-save-title"
+      >
+        <form id="terminal-experience-save-form" class="terminal-rename-dialog-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">结束终端</p>
+              <h2 id="terminal-experience-save-title">结束终端</h2>
+            </div>
+          </div>
+          <p class="session-group-help">是否需要经验落盘到运维 skill？选择“是”将后台落盘并在完成后自行关闭；选择“否”或倒计时结束将直接关闭终端；点取消可中止操作。</p>
+          <p id="terminal-experience-save-countdown" class="meta-text" role="status" aria-live="polite">10 秒后默认直接关闭</p>
+          <div
+            id="terminal-experience-save-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-experience-save-cancel" class="button secondary" type="button">取消</button>
+            <button id="terminal-experience-save-yes" class="button secondary" type="button" title="后台落盘并移入隐藏专区，完成后自行关闭">是</button>
+            <button id="terminal-experience-save-no" class="button primary" type="button" title="直接关闭终端">否</button>
           </div>
         </form>
       </dialog>
@@ -3714,6 +3851,280 @@
           <div class="toolbar dialog-actions">
             <button id="workspace-history-preset-cancel" class="button secondary" type="button">取消</button>
             <button id="workspace-history-preset-submit" class="button primary" type="submit">以此预设 fork</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-specified-task-dialog"
+        class="auth-import-dialog terminal-specified-task-dialog"
+        aria-labelledby="terminal-specified-task-title"
+      >
+        <form id="terminal-specified-task-form" class="auth-import-form terminal-specified-task-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">Agent 任务</p>
+              <h2 id="terminal-specified-task-title">指定预设执行</h2>
+            </div>
+            <span id="terminal-specified-task-path" class="sr-only"></span>
+          </div>
+
+          <div
+            id="terminal-specified-task-workspace-field"
+            class="terminal-specified-task-workspace-field"
+          >
+            <label for="terminal-specified-task-workspace">工作目录</label>
+            <select
+              id="terminal-specified-task-workspace"
+              class="text-input mono-text terminal-specified-task-history-select"
+              aria-label="选择历史工作区"
+            ></select>
+            <select
+              id="terminal-specified-task-favorite"
+              class="text-input mono-text terminal-specified-task-favorite-select"
+              aria-label="跳转收藏"
+            >
+              <option value="">跳转收藏</option>
+            </select>
+            <button
+              id="terminal-specified-task-workspace-browse"
+              class="button secondary"
+              type="button"
+              title="浏览并选择工作目录"
+            >浏览…</button>
+          </div>
+
+          <fieldset class="terminal-specified-task-modes terminal-specified-task-agent-modes">
+            <legend>Agent</legend>
+            <span class="terminal-specified-task-group-title" aria-hidden="true">Agent</span>
+            <div id="terminal-specified-task-agent-list" class="terminal-specified-task-agent-list"></div>
+          </fieldset>
+
+          <div id="terminal-specified-task-preset-field" class="terminal-specified-task-field terminal-specified-task-preset-field">
+            <span>Codex 账号</span>
+            <select id="terminal-specified-task-preset" class="text-input" required>
+              <option value="">正在读取预设…</option>
+            </select>
+            <label class="terminal-specified-task-session-only-label">
+              <input id="terminal-specified-task-session-only" type="checkbox" name="terminal-specified-task-session-only" />
+              <span>仅对此会话</span>
+            </label>
+          </div>
+          <label id="terminal-specified-task-other-command-field" class="terminal-specified-task-field" hidden>
+            <span>终端命令</span>
+            <input id="terminal-specified-task-other-command" class="text-input mono-text" value="" placeholder="例如 aider、gemini" autocomplete="off" spellcheck="false" />
+          </label>
+
+           <fieldset class="terminal-specified-task-modes">
+            <legend>执行方式</legend>
+            <span class="terminal-specified-task-group-title" aria-hidden="true">执行方式</span>
+            <label>
+              <input type="radio" name="terminal-specified-task-mode" value="fixed" checked />
+              <span>交互终端</span>
+            </label>
+            <label>
+              <input type="radio" name="terminal-specified-task-mode" value="terminal" />
+              <span>终端任务</span>
+            </label>
+            <label>
+              <input type="radio" name="terminal-specified-task-mode" value="exec" />
+              <span>单次执行</span>
+            </label>
+          </fieldset>
+
+          <div id="terminal-specified-task-fixed-options" class="terminal-specified-task-fixed-options">
+            <fieldset class="terminal-specified-task-modes terminal-specified-task-preset-scope" hidden>
+              <legend>预设作用范围</legend>
+              <span class="terminal-specified-task-group-title" aria-hidden="true">预设作用范围</span>
+              <label>
+                <input
+                  type="radio"
+                  name="terminal-specified-task-preset-scope"
+                  value="terminal"
+                  checked
+                />
+                <span>仅本终端使用该预设</span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="terminal-specified-task-preset-scope"
+                  value="global"
+                />
+                <span>全局切换到该预设</span>
+              </label>
+            </fieldset>
+
+            <fieldset class="terminal-specified-task-modes terminal-specified-task-session-actions">
+              <legend>会话动作</legend>
+              <span class="terminal-specified-task-group-title" aria-hidden="true">会话动作</span>
+              <label>
+                <input type="radio" name="terminal-specified-task-session-action" value="new" checked />
+                <span>新会话</span>
+              </label>
+              <label>
+                <input type="radio" name="terminal-specified-task-session-action" value="resume" />
+                <span>恢复</span>
+              </label>
+            <label>
+              <input type="radio" name="terminal-specified-task-session-action" value="fork" />
+              <span>Fork</span>
+            </label>
+            <label>
+              <input type="radio" name="terminal-specified-task-session-action" value="ask" />
+              <span>提问</span>
+            </label>
+           </fieldset>
+
+            <div
+              id="terminal-specified-task-session-id-field"
+              class="terminal-specified-task-field terminal-specified-task-session-id-field"
+              hidden
+            >
+              <span>Session</span>
+              <input
+                id="terminal-specified-task-session-id"
+                class="text-input mono-text"
+                type="text"
+                maxlength="64"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              />
+              <label
+                id="terminal-specified-task-agy-continue-label"
+                class="terminal-specified-task-session-only-label"
+                hidden
+              >
+                <input
+                  id="terminal-specified-task-agy-continue"
+                  type="checkbox"
+                  name="terminal-specified-task-agy-continue"
+                  checked
+                />
+                <span>默认最后一次会话</span>
+              </label>
+            </div>
+
+            <div
+              id="terminal-specified-task-terminal-name-row"
+              class="terminal-specified-task-terminal-name-row"
+            >
+              <span class="terminal-specified-task-row-title">原终端名</span>
+              <output
+                id="terminal-specified-task-terminal-name"
+                class="terminal-specified-task-original-name"
+                aria-label="原终端名"
+              ></output>
+              <div
+                id="terminal-specified-task-terminal-name-suffix-field"
+                class="terminal-specified-task-suffix-field"
+              >
+                <label class="terminal-specified-task-suffix-label" for="terminal-specified-task-terminal-name-suffix">快速后缀</label>
+                <input
+                  id="terminal-specified-task-terminal-name-suffix"
+                  class="text-input"
+                  type="text"
+                  maxlength="80"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="输入后自动添加到编号后"
+                />
+                <button
+                  id="terminal-specified-task-use-original-suffix"
+                  class="button secondary"
+                  type="button"
+                >提取原后缀</button>
+              </div>
+            </div>
+            <div class="terminal-specified-task-name-preview" aria-live="polite">
+              <span>最终终端名</span>
+              <output id="terminal-specified-task-terminal-name-preview" class="mono-text">自动分配</output>
+            </div>
+          </div>
+
+          <div class="terminal-specified-task-field terminal-specified-task-prompt-field">
+            <div class="terminal-specified-task-prompt-labels">
+              <label id="terminal-specified-task-text-label" for="terminal-specified-task-text">初始提示词</label>
+              <label class="terminal-specified-task-import-title-option">
+                <input
+                  id="terminal-specified-task-import-title"
+                  type="checkbox"
+                  checked
+                />
+                <span>导入标题</span>
+              </label>
+            </div>
+            <textarea
+              id="terminal-specified-task-text"
+              class="dialog-textarea terminal-specified-task-text"
+              maxlength="131072"
+              spellcheck="false"
+              placeholder="可选：启动后立即交给 Agent 的任务"
+            ></textarea>
+          </div>
+
+          <label
+            id="terminal-specified-task-timeout-field"
+            class="terminal-specified-task-field terminal-specified-task-timeout-field"
+            hidden
+          >
+            <span>超时（秒）</span>
+            <input
+              id="terminal-specified-task-timeout"
+              class="text-input"
+              type="number"
+              min="1"
+              max="7200"
+              step="1"
+              value="1800"
+              inputmode="numeric"
+            />
+          </label>
+
+          <div
+            id="terminal-specified-task-status"
+            class="inline-status terminal-specified-task-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <pre id="terminal-specified-task-result" class="terminal-specified-task-result" tabindex="0" hidden></pre>
+
+          <div class="toolbar dialog-actions">
+            <button id="terminal-specified-task-cancel-task" class="button secondary danger" type="button" hidden>取消任务</button>
+            <button id="terminal-specified-task-close" class="button secondary" type="button">关闭</button>
+            <button id="terminal-specified-task-run" class="button primary" type="submit">启动</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-specified-task-path-dialog"
+        class="auth-import-dialog terminal-specified-task-path-dialog"
+        aria-labelledby="terminal-specified-task-path-title"
+      >
+        <form id="terminal-specified-task-path-form" class="path-browse-dialog" method="dialog">
+          <div class="path-browse-dialog-header">
+            <h3 id="terminal-specified-task-path-title">选择目录</h3>
+            <input
+              id="terminal-specified-task-path-input"
+              class="text-input path-browse-dialog-path-input mono-text"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              aria-label="目录路径"
+            />
+          </div>
+          <div id="terminal-specified-task-path-body" class="path-browse-dialog-body"></div>
+          <div class="path-browse-dialog-footer">
+            <span
+              id="terminal-specified-task-path-selected"
+              class="path-browse-selected-display mono-text"
+            ></span>
+            <button id="terminal-specified-task-path-cancel" class="button secondary" type="button">取消</button>
+            <button id="terminal-specified-task-path-confirm" class="button primary" type="submit">确定</button>
           </div>
         </form>
       </dialog>
@@ -3803,32 +4214,30 @@
         </form>
       </dialog>
 
-      <dialog id="api-account-import-dialog" class="auth-import-dialog">
-        <form id="api-account-import-form" class="auth-import-form" method="dialog">
+      <dialog id="agy-import-dialog" class="auth-import-dialog" aria-labelledby="agy-import-title">
+        <form id="agy-import-form" class="auth-import-form" method="dialog">
           <div class="panel-head wide">
             <div>
-              <p class="section-label">API 账号导入</p>
-              <h2>粘贴账号 JSON</h2>
+              <p class="section-label">AGY 导入</p>
+              <h2 id="agy-import-title">导入 refresh token</h2>
             </div>
           </div>
-
-          <p class="meta-text compact-meta">把 sub2api 导出或 OAuth access token 账号 JSON 粘贴到下面，系统会创建 Codex_API 预设，通过本机入口代理。</p>
-
-          <textarea
-            id="api-account-import-text"
-            class="dialog-textarea"
-            spellcheck="false"
-            placeholder='可直接粘贴 sub2api 导出或 {"access_token":"...","account_id":"..."} 格式'
-          ></textarea>
-
-          <div id="api-account-import-dialog-status" class="inline-status" data-tone="muted"></div>
-
+          <p class="field-help">支持 Antigravity Manager 导出的 JSON 文件、粘贴文本或剪贴板。每项需要 email 和 refresh_token，相同邮箱会更新已有账号。导出 JSON 和导出到剪贴板使用同一数组。</p>
+          <div class="toolbar auth-actions">
+            <button id="agy-import-file-button" class="button secondary" type="button">选择文件</button>
+            <input id="agy-import-file" class="sr-only" type="file" accept="application/json,.json,.txt,text/plain" aria-label="选择 AGY 账号 JSON 文件" />
+            <button id="agy-import-clipboard" class="button secondary" type="button">从剪贴板读取</button>
+          </div>
+          <textarea id="agy-import-text" class="dialog-textarea mono-text" spellcheck="false" placeholder='[{"email":"name@gmail.com","refresh_token":"1//..."}]'></textarea>
+          <div id="agy-import-dialog-status" class="inline-status" data-tone="muted" hidden></div>
           <div class="toolbar dialog-actions">
-            <button id="api-account-import-cancel" class="button secondary" type="button">取消</button>
-            <button id="api-account-import-submit" class="button primary" type="submit">导入</button>
+            <button id="agy-import-cancel" class="button secondary" type="button">取消</button>
+            <button id="agy-import-submit" class="button primary" type="submit">导入</button>
           </div>
         </form>
       </dialog>
+
+
 
       <dialog id="remote-copy-dialog" class="remote-copy-dialog">
         <form id="remote-copy-form" class="remote-copy-form" method="dialog">
@@ -3870,6 +4279,153 @@
           </div>
         </form>
       </dialog>
+
+      <dialog id="codebuddy-add-dialog" class="auth-import-dialog" aria-labelledby="codebuddy-add-title">
+        <form id="codebuddy-add-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">CodeBuddy</p>
+              <h2 id="codebuddy-add-title">添加 CodeBuddy 账号</h2>
+            </div>
+          </div>
+
+          <label class="field">
+            <span class="field-label">版本 / 档位</span>
+            <select id="codebuddy-add-variant" class="text-input">
+              <option value="cn" selected>国内版 (codebuddy.cn / workbuddy.cn)</option>
+              <option value="ai">国际版 (workbuddy.ai / codebuddy.ai)</option>
+            </select>
+          </label>
+
+          <div class="toolbar dialog-actions">
+            <button id="codebuddy-oauth-start" class="button primary" type="button">扫码登录</button>
+          </div>
+          <p id="codebuddy-oauth-link-row" hidden>
+            <a id="codebuddy-oauth-link" class="mono-text" target="_blank" rel="noopener noreferrer">打开登录链接</a>
+            <span class="field-help">在浏览器中完成登录后本窗口会自动检测，约 10 分钟内有效。</span>
+          </p>
+
+          <label class="field">
+            <span class="field-label">或手动粘贴 access_token</span>
+            <input
+              id="codebuddy-add-access-token"
+              class="text-input mono-text"
+              type="text"
+              placeholder="粘贴 access_token（可带 Bearer 前缀）"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">refresh_token（可选，用于自动保活）</span>
+            <input
+              id="codebuddy-add-refresh-token"
+              class="text-input mono-text"
+              type="text"
+              placeholder="粘贴 refresh_token"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">备注名（可选）</span>
+            <input
+              id="codebuddy-add-name"
+              class="text-input"
+              type="text"
+              placeholder="未提供时由系统自动识别"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+
+          <div id="codebuddy-add-status" class="inline-status mt-8" data-tone="muted" hidden></div>
+
+          <div class="toolbar dialog-actions">
+            <button id="codebuddy-add-close" class="button secondary" type="button">关闭</button>
+            <button id="codebuddy-add-submit" class="button primary" type="submit">手动添加</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="devin-add-dialog" class="auth-import-dialog" aria-labelledby="devin-add-title">
+        <form id="devin-add-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">Devin</p>
+              <h2 id="devin-add-title">添加 Devin 账号</h2>
+            </div>
+          </div>
+
+          <div class="toolbar dialog-actions">
+            <button id="devin-import-current-btn" class="button secondary" type="button">从当前系统读取</button>
+          </div>
+
+          <label class="field">
+            <span class="field-label">API Key / Token *</span>
+            <input
+              id="devin-add-token"
+              class="text-input mono-text"
+              type="password"
+              placeholder="windsurf_api_key 或 devin token"
+              autocomplete="off"
+              spellcheck="false"
+              required
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">邮箱 / 账号（可选）</span>
+            <input
+              id="devin-add-email"
+              class="text-input"
+              type="text"
+              placeholder="user@example.com"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">组织 Org ID（可选）</span>
+            <input
+              id="devin-add-org-id"
+              class="text-input mono-text"
+              type="text"
+              placeholder="org-..."
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">方案 Plan（可选）</span>
+            <input
+              id="devin-add-plan"
+              class="text-input"
+              type="text"
+              placeholder="如 Pro, Enterprise, Free"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">备注名（可选）</span>
+            <input
+              id="devin-add-name"
+              class="text-input"
+              type="text"
+              placeholder="未填写时自动使用邮箱或 ID"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </label>
+
+          <div id="devin-add-status" class="inline-status mt-8" data-tone="muted" hidden></div>
+
+          <div class="toolbar dialog-actions">
+            <button id="devin-add-close" class="button secondary" type="button">关闭</button>
+            <button id="devin-add-submit" class="button primary" type="submit">添加</button>
+          </div>
+        </form>
+      </dialog>
     </div>
     <div
       id="terminal-android-select-menu"
@@ -3879,5 +4435,206 @@
       hidden
     ></div>
     <div id=webclx-toast-container class=webclx-toast-container aria-live=polite></div>
+  
+      <dialog id="sub2api-manager-dialog" class="auth-import-dialog">
+        <form id="sub2api-manager-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">sub2api 账号管理</p>
+              <h2>从 sub2api 服务器拉取账号与额度</h2>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="sub2api-profile-select">配置方案</label>
+            <select id="sub2api-profile-select" class="select-input"></select>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="sub2api-base-url">服务器地址</label>
+            <input id="sub2api-base-url" class="text-input mono-text" type="url" placeholder="http://HOST:PORT" autocomplete="off" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="sub2api-email">管理员邮箱</label>
+            <input id="sub2api-email" class="text-input" type="email" placeholder="admin@example.com" autocomplete="off" />
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="sub2api-password">密码</label>
+            <input id="sub2api-password" class="text-input" type="password" autocomplete="off" />
+          </div>
+
+          <div id="sub2api-totp-section" hidden>
+            <div class="field">
+              <label class="field-label" for="sub2api-totp-code">TOTP 2FA 验证码</label>
+              <input id="sub2api-totp-code" class="text-input mono-text" type="text" maxlength="6" placeholder="6 位验证码" autocomplete="off" />
+            </div>
+            <input id="sub2api-temp-token" type="hidden" />
+          </div>
+
+          <div class="toolbar sub2api-dialog-toolbar">
+            <button id="sub2api-connect-button" class="button primary" type="button">连接并拉取账号</button>
+            <div class="tabs segmented-tabs sub2api-view-tabs" role="tablist" aria-label="账号视图切换">
+              <button id="sub2api-view-normal" class="tab-button active" data-view="normal" role="tab" aria-selected="true">正常账号</button>
+              <button id="sub2api-view-archived" class="tab-button" data-view="archived" role="tab" aria-selected="false">归档账号</button>
+            </div>
+          </div>
+
+          <div id="sub2api-manager-status" class="inline-status" data-tone="muted" hidden></div>
+
+          <div id="sub2api-accounts-section" hidden>
+            <div class="field">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                <label class="field-label" style="margin-bottom: 0;">发现的账号（勾选需要导入的账号，单击额度查剩余）</label>
+                <label style="font-size: 0.8rem; cursor: pointer; display: flex; align-items: center; gap: 4px; user-select: none;">
+                  <input type="checkbox" id="sub2api-select-all" /> 全选
+                </label>
+              </div>
+              <div id="sub2api-account-list" class="sub2api-account-list"></div>
+            </div>
+            <div class="toolbar dialog-actions">
+              <button id="sub2api-import-selected" class="button primary" type="button">导入已选账号</button>
+              <button id="sub2api-auto-activate" class="button secondary" type="button">设置每日 04:00 自动激活</button>
+            </div>
+          </div>
+
+          <div class="toolbar dialog-actions">
+            <button id="sub2api-manager-cancel" class="button secondary" type="button">关闭</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="llm-account-editor-dialog" class="llm-account-editor-dialog" aria-labelledby="llm-account-editor-title">
+        <div class="llm-account-editor-shell">
+          <div class="panel-head wide llm-account-editor-head">
+            <div><p class="section-label">LLM_API</p><h2 id="llm-account-editor-title">编辑账号</h2></div>
+            <button id="llm-account-editor-close" class="button secondary" type="button" aria-label="关闭编辑窗口">关闭</button>
+          </div>
+          <div id="llm-account-editor-body" class="llm-account-editor-body"></div>
+        </div>
+      </dialog>
+
+      <dialog id="codex-global-settings-dialog" class="global-settings-dialog" aria-labelledby="codex-global-settings-title">
+        <form class="global-settings-dialog-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">全局 / 默认选项</p>
+              <h2 id="codex-global-settings-title">智能体设置</h2>
+            </div>
+            <button id="codex-global-settings-close" class="button secondary" type="submit">关闭</button>
+          </div>
+          <div class="tabs global-settings-subtabs" role="tablist" aria-label="全局设置类型">
+            <button id="global-settings-tab-codex" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="codex-api-global-defaults" data-global-tab="codex">Codex_API</button>
+            <button id="global-settings-tab-claude" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="claude-api-global-defaults" data-global-tab="claude">Claude_API</button>
+          </div>
+
+          <section id="codex-api-global-defaults" class="auth-card api-global-defaults-card" role="tabpanel" aria-labelledby="global-settings-tab-codex">
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">全局 / 默认选项</p>
+                <h2>Codex 公共配置</h2>
+              </div>
+            </div>
+            <div class="codex-common-config-section">
+              <div class="settings-section-head codex-common-config-head">
+                <div>
+                  <h3>当前 config.toml</h3>
+                  <p id="codex-common-config-path" class="meta-text mono-text">正在读取…</p>
+                </div>
+                <div class="toolbar codex-common-config-toolbar">
+                  <button id="codex-common-config-refresh" class="button secondary" type="button">刷新</button>
+                  <button id="codex-common-config-save" class="button primary" type="button">保存当前配置</button>
+                </div>
+              </div>
+              <div class="codex-common-config-options" role="group" aria-label="Codex 当前公共配置">
+                <label class="codex-common-config-option" for="codex-common-approval-never">
+                  <input id="codex-common-approval-never" type="checkbox" />
+                  <span>
+                    <strong>不弹审批</strong>
+                    <code>approval_policy = "never"</code>
+                  </span>
+                </label>
+                <label class="codex-common-config-option" for="codex-common-sandbox-full-access">
+                  <input id="codex-common-sandbox-full-access" type="checkbox" />
+                  <span>
+                    <strong>完全访问</strong>
+                    <code>sandbox_mode = "danger-full-access"</code>
+                  </span>
+                </label>
+                <label class="codex-common-config-option" for="codex-common-animations-disabled">
+                  <input id="codex-common-animations-disabled" type="checkbox" />
+                  <span>
+                    <strong>禁用字符动画</strong>
+                    <code>tui.animations = false</code>
+                  </span>
+                </label>
+                <label class="codex-common-config-option" for="codex-common-alt-screen-disabled">
+                  <input id="codex-common-alt-screen-disabled" type="checkbox" />
+                  <span>
+                    <strong>内联模式（保留终端滚动历史）</strong>
+                    <code>tui.alternate_screen = "never"</code>
+                  </span>
+                </label>
+                <label class="codex-common-config-option" for="codex-common-daemon-disabled">
+                  <input id="codex-common-daemon-disabled" type="checkbox" checked />
+                  <span>
+                    <strong>禁用后台守护进程</strong>
+                    <code>features.daemon_auto_start = false</code>
+                  </span>
+                </label>
+              </div>
+              <div id="codex-common-config-status" class="inline-status" data-tone="muted" role="status" aria-live="polite" hidden></div>
+            </div>
+            <div class="codex-common-config-panel">
+              <h3>模型切换压缩策略（全部 Codex_API 预设）</h3>
+              <label class="codex-common-config-option" for="codex-suppress-comp-hash">
+                <input id="codex-suppress-comp-hash" type="checkbox" disabled />
+                <span><strong>统一为空 hash，避免 hash 差异触发切换压缩</strong><code>comp_hash = null</code></span>
+              </label>
+              <p class="muted">保存后，在下一次应用任意 Codex_API 预设时写入整个模型目录；重新启动 Codex 后读取。只跳过 hash 差异检查，上下文超限或切换到更小窗口仍可能压缩。不会使不同模型的加密压缩内容互相兼容。关闭后，下次应用预设恢复原 hash。Claude 不使用此字段。</p>
+              <div class="toolbar">
+                <button id="codex-comp-hash-save" class="button primary" type="button" disabled>保存压缩策略</button>
+                <button id="codex-comp-hash-refresh" class="button secondary" type="button">刷新策略</button>
+              </div>
+              <div id="codex-comp-hash-status" class="inline-status" role="status" aria-live="polite"></div>
+            </div>
+            <div class="settings-section-head codex-default-config-head">
+              <div><h3>预设默认值</h3></div>
+              <div class="toolbar codex-default-config-toolbar">
+                <button id="codex-default-config-add" class="button secondary" type="button">添加一项</button>
+                <button id="codex-default-config-reset" class="button secondary" type="button">恢复内置</button>
+                <button id="codex-default-config-save" class="button primary" type="button">保存默认值</button>
+              </div>
+            </div>
+            <div class="table-wrap codex-default-config-table-wrap">
+              <table class="entry-table codex-default-config-table" aria-label="Codex 全局默认 config">
+                <thead><tr><th scope="col">键名</th><th scope="col">默认值</th><th scope="col">作用域</th><th scope="col">操作</th></tr></thead>
+                <tbody id="codex-default-config-list"></tbody>
+              </table>
+            </div>
+            <div id="codex-default-config-status" class="inline-status" data-tone="muted" role="status" aria-live="polite" hidden></div>
+          </section>
+
+          <section id="claude-api-global-defaults" class="auth-card api-global-defaults-card" role="tabpanel" aria-labelledby="global-settings-tab-claude" hidden>
+            <div class="panel-head wide">
+              <div><p class="section-label">全局 / 默认选项</p><h2>Claude settings.json env 默认值</h2></div>
+              <div class="toolbar">
+                <button id="claude-default-config-add" class="button secondary" type="button">添加一项</button>
+                <button id="claude-default-config-reset" class="button secondary" type="button">恢复内置</button>
+                <button id="claude-default-config-save" class="button primary" type="button">保存默认值</button>
+              </div>
+            </div>
+            <div class="table-wrap codex-default-config-table-wrap">
+              <table class="entry-table codex-default-config-table" aria-label="Claude 全局默认 env">
+                <thead><tr><th scope="col">环境变量</th><th scope="col">默认值</th><th scope="col">操作</th></tr></thead>
+                <tbody id="claude-default-config-list"></tbody>
+              </table>
+            </div>
+            <div id="claude-default-config-status" class="inline-status" data-tone="muted" role="status" aria-live="polite" hidden></div>
+          </section>
+        </form>
+      </dialog>
+
   </body>
 </html>

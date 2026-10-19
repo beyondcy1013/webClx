@@ -9,10 +9,10 @@ const sessionRenderer = readFileSync(
   new URL("../static/terminal-session-render.js", import.meta.url),
   "utf8",
 );
-const sessionActions = readFileSync(
-  new URL("../static/terminal-sessions.js", import.meta.url),
-  "utf8",
-);
+const sessionActions = [
+  readFileSync(new URL("../static/terminal-sessions.js", import.meta.url), "utf8"),
+  readFileSync(new URL("../static/new-terminal.js", import.meta.url), "utf8"),
+].join("");
 const workflowActions = readFileSync(
   new URL("../static/terminal-tool-actions.js", import.meta.url),
   "utf8",
@@ -43,6 +43,29 @@ test("terminal management lists all active sessions without merging their owners
   );
 });
 
+test("terminal group tokens use a dedicated API and survive shutdown restore", () => {
+  assert.match(
+    terminalBackend,
+    /struct StoredTerminalSession \{[\s\S]*#\[serde\(default\)\][\s\S]*group_token: String,[\s\S]*#\[serde\(default\)\][\s\S]*group_order: u64,/,
+  );
+  assert.match(
+    terminalBackend,
+    /pub struct TerminalSessionInfo \{[\s\S]*group_token: String,[\s\S]*#\[serde\(default\)\][\s\S]*group_order: u64,/,
+  );
+  assert.match(
+    terminalBackend,
+    /pub struct TerminalResumeRestoreRecord \{[\s\S]*#\[serde\(default\)\][\s\S]*pub group_token: String,[\s\S]*#\[serde\(default\)\][\s\S]*pub group_order: u64,/,
+  );
+  assert.match(
+    terminalBackend,
+    /pub async fn update_session_group[\s\S]*manager[\s\S]*update_session_group\([\s\S]*payload\.member_ids,[\s\S]*fixed_order[\s\S]*payload\.group_color/,
+  );
+  assert.match(
+    terminalBackend,
+    /struct RenameSessionRequest \{\s*name: String,\s*\}/,
+  );
+});
+
 test("session origin and owner key are persisted by the terminal service", () => {
   assert.match(
     terminalBackend,
@@ -65,7 +88,12 @@ test("session origin and owner key are persisted by the terminal service", () =>
 test("workflow launch creates only classified sessions and reuses its own agent terminal", () => {
   assert.match(
     sessionActions,
-    /async function createSession\(\{[\s\S]*origin = "normal",[\s\S]*ownerKey = "",[\s\S]*codexApiPresetId = "",[\s\S]*JSON\.stringify\(\{[\s\S]*path,[\s\S]*origin,[\s\S]*owner_key: ownerKey,[\s\S]*codex_api_preset_id: codexApiPresetId/,
+    /async function createSession\(requestJson, options = \{\}\)[\s\S]*origin: String\(options\.origin \|\| "normal"\),[\s\S]*owner_key: String\(options\.ownerKey \|\| ""\),[\s\S]*codex_api_preset_id: String\(options\.codexApiPresetId \|\| ""\),[\s\S]*body: JSON\.stringify\(payload\)/,
+  );
+  assert.match(
+    sessionActions,
+    /origin,\s*ownerKey,\s*codexApiPresetId,\s*\}\);/,
+    "terminal lifecycle creation should forward durable workflow ownership options",
   );
   assert.match(
     workflowActions,

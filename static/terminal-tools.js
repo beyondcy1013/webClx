@@ -6,6 +6,47 @@ const TERMINAL_TOOLS_MENU_GAP_PX = 6;
 let terminalToolsRestoringTriggerFocus = false;
 let terminalToolsMenuActionsBound = false;
 
+function positionCompactTerminalMenu(menu, trigger) {
+  if (!menu || !trigger || menu.hidden) {
+    return;
+  }
+  menu.style.removeProperty("max-height");
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+  const viewportHeight = window.innerHeight;
+  const availableAbove = Math.max(
+    0,
+    triggerRect.top - TERMINAL_TOOLS_MENU_GAP_PX - TERMINAL_TOOLS_MENU_MARGIN_PX,
+  );
+  const availableBelow = Math.max(
+    0,
+    viewportHeight
+      - triggerRect.bottom
+      - TERMINAL_TOOLS_MENU_GAP_PX
+      - TERMINAL_TOOLS_MENU_MARGIN_PX,
+  );
+  const placeAbove = availableAbove >= menuRect.height || availableAbove >= availableBelow;
+  const availableHeight = placeAbove ? availableAbove : availableBelow;
+  if (menuRect.height > availableHeight) {
+    menu.style.maxHeight = `${Math.floor(availableHeight)}px`;
+  }
+  const fittedRect = menu.getBoundingClientRect();
+  const maxLeft = Math.max(
+    TERMINAL_TOOLS_MENU_MARGIN_PX,
+    viewportWidth - fittedRect.width - TERMINAL_TOOLS_MENU_MARGIN_PX,
+  );
+  const left = Math.min(
+    Math.max(triggerRect.left, TERMINAL_TOOLS_MENU_MARGIN_PX),
+    maxLeft,
+  );
+  const top = placeAbove
+    ? triggerRect.top - fittedRect.height - TERMINAL_TOOLS_MENU_GAP_PX
+    : triggerRect.bottom + TERMINAL_TOOLS_MENU_GAP_PX;
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
 function setTerminalToolsStatus(message, tone = "muted") {
   if (!terminalToolsStatusEl) {
     return;
@@ -18,32 +59,7 @@ function setTerminalToolsStatus(message, tone = "muted") {
 }
 
 function positionTerminalToolsMenu() {
-  if (!terminalToolsMenuEl || !terminalToolsButtonEl || terminalToolsMenuEl.hidden) {
-    return;
-  }
-  const triggerRect = terminalToolsButtonEl.getBoundingClientRect();
-  const menuRect = terminalToolsMenuEl.getBoundingClientRect();
-  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const maxLeft = Math.max(
-    TERMINAL_TOOLS_MENU_MARGIN_PX,
-    viewportWidth - menuRect.width - TERMINAL_TOOLS_MENU_MARGIN_PX,
-  );
-  const left = Math.min(
-    Math.max(triggerRect.left, TERMINAL_TOOLS_MENU_MARGIN_PX),
-    maxLeft,
-  );
-  const above = triggerRect.top - menuRect.height - TERMINAL_TOOLS_MENU_GAP_PX;
-  const below = triggerRect.bottom + TERMINAL_TOOLS_MENU_GAP_PX;
-  const maxTop = Math.max(
-    TERMINAL_TOOLS_MENU_MARGIN_PX,
-    viewportHeight - menuRect.height - TERMINAL_TOOLS_MENU_MARGIN_PX,
-  );
-  const top = above >= TERMINAL_TOOLS_MENU_MARGIN_PX
-    ? above
-    : Math.min(Math.max(below, TERMINAL_TOOLS_MENU_MARGIN_PX), maxTop);
-  terminalToolsMenuEl.style.left = `${Math.round(left)}px`;
-  terminalToolsMenuEl.style.top = `${Math.round(top)}px`;
+  positionCompactTerminalMenu(terminalToolsMenuEl, terminalToolsButtonEl);
 }
 
 function setTerminalToolsMenuExpanded(expanded, { restoreFocus = false } = {}) {
@@ -61,6 +77,7 @@ function setTerminalToolsMenuExpanded(expanded, { restoreFocus = false } = {}) {
     }
     terminalToolsMenuEl.style.removeProperty("left");
     terminalToolsMenuEl.style.removeProperty("top");
+    terminalToolsMenuEl.style.removeProperty("max-height");
     if (restoreFocus) {
       terminalToolsRestoringTriggerFocus = true;
       try {

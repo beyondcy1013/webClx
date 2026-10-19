@@ -283,12 +283,6 @@ function showCopyResumeOverlay(value, { successMessage = `已复制：${value}` 
   card.appendChild(btnRow);
   overlay.appendChild(card);
 
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) {
-      overlay.remove();
-    }
-  });
-
   document.body.appendChild(overlay);
   textarea.focus();
   textarea.select();
@@ -344,13 +338,22 @@ async function copyCurrentTerminalName() {
   }
 }
 
+function buildSessionQuestionPrompt(sessionId) {
+  return `调用codex db维护skill读取session id为 ${String(sessionId || "").trim()}并接受指令：`;
+}
+
 async function copyCurrentSessionIdAndAsk() {
   const sourceSessionId = state.activeSessionId;
-  const sourceContext = activeTerminalContext;
-  if (!sourceSessionId || sourceContext?.sessionId !== sourceSessionId) {
-    updateStatus("当前终端尚未连接，无法提取 Session ID。", "warn");
+  if (!sourceSessionId) {
+    updateStatus("当前没有活动终端，无法提取 Session ID。", "warn");
     return;
   }
+
+  // context 不匹配或缺失时不直接失败：detectAgentResumeIdComplete 会先从
+  // 会话缓存解析 context，仍没有则走后端完整探测兜底，先拿到 ID 再拼提问。
+  const sourceContext = activeTerminalContext?.sessionId === sourceSessionId
+    ? activeTerminalContext
+    : null;
 
   updateStatus("正在识别当前会话…", "info");
   try {
@@ -360,7 +363,7 @@ async function copyCurrentSessionIdAndAsk() {
       return;
     }
 
-    const prompt = `调用codex对话数据库skill读取session id为 ${detected.resumeId}并回答我的问题 `;
+    const prompt = buildSessionQuestionPrompt(detected.resumeId);
     const copied = await copyTextToClipboard(prompt);
 
     updateStatus(
@@ -506,6 +509,18 @@ function normalizeTerminalShortcutText(shortcut) {
   return ["Ctrl", "Shift", "Alt", "Meta"].filter((modifier) => modifiers.has(modifier)).concat(key).join("+");
 }
 
+function compactTerminalShortcut(shortcut) {
+  const normalized = normalizeTerminalShortcutText(shortcut);
+  if (!normalized) {
+    return "";
+  }
+  return normalized
+    .replace(/\bCtrl\b/g, "^")
+    .replace(/\bShift\b/g, "↑")
+    .replace(/\bAlt\b/g, "⌥")
+    .replace(/\bMeta\b/g, "◆");
+}
+
 function shouldHandleTerminalFunctionShortcut(event) {
   if (
     event.defaultPrevented ||
@@ -626,11 +641,60 @@ function detectedResumeInfo(info, source = "terminal_buffer") {
 
 const TERMINAL_STATUS_SESSION_TIMEOUT_MS = 6000;
 const TERMINAL_STATUS_SESSION_SCAN_MAX_LINES = 80;
+const TERMINAL_STATUS_AGENT_CHECK_TIMEOUT_MS = 900;
+
+async function terminalStatusAgentAvailable(sessionId) {
+  const targetSessionId = String(sessionId || "").trim();
+  if (!targetSessionId || typeof fetch !== "function") {
+    return false;
+  }
+
+  try {
+    const timeout = AbortSignal.timeout?.(TERMINAL_STATUS_AGENT_CHECK_TIMEOUT_MS)
+      || undefined;
+    const request = typeof fetch === "function" ? fetch : globalThis.fetch;
+    const response = await request(
+      `/api/terminal/sessions/${encodeURIComponent(targetSessionId)}/agent-session`,
+      { method: "GET", signal: timeout },
+    );
+    if (!response.ok) {
+      return false;
+    }
+    const payload = await response.json().catch(() => null);
+    if (!payload) {
+      return false;
+    }
+    if (payload.resume_id) {
+      return true;
+    }
+    // 轻量端点只看进程打开的 rollout FD；Codex 在回合之间常会关闭 FD，
+    // resume_id 为空不代表 agent 不在。/status 探测正是为这种场景准备的，
+    // 因此只要 pane 上仍挂着 Codex/Claude 进程就允许探测。
+    const agents = Array.isArray(payload.agents) ? payload.agents : [];
+    return agents.some((name) => name === "Codex" || name === "Claude");
+  } catch {
+    return false;
+  }
+}
+
+async function terminalStatusProbeAllowed(context, sessionId) {
+  if (!context?.term || !sessionId) {
+    return false;
+  }
+
+  // Screen extraction has already failed. Send /status only while a Codex or
+  // Claude process is still attached to this terminal; otherwise the pane is
+  // at a shell prompt and the complete backend detector is the right fallback.
+  return terminalStatusAgentAvailable(sessionId);
+}
 
 async function probeTerminalStatusResumeId(sourceContext, initialBufferText) {
   const context = sourceContext || {};
   const targetSessionId = String(context.sessionId || "").trim();
   if (!context.term || !targetSessionId) {
+    return null;
+  }
+  if (!await terminalStatusProbeAllowed(context, targetSessionId)) {
     return null;
   }
   const sent = await runTerminalSlashCommandByKey("status", { sessionId: targetSessionId });

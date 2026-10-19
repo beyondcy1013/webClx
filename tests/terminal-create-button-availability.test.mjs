@@ -19,6 +19,11 @@ assert.notEqual(viewportLayoutStart, -1, "terminal page should define refreshTer
 const loadSessionsBody = terminalJs.slice(loadSessionsStart, createSessionStart);
 const createSessionBody = terminalJs.slice(createSessionStart, deleteSessionStart);
 const deleteSessionBody = terminalJs.slice(deleteSessionStart, viewportLayoutStart);
+const createButtonHandlerStart = terminalJs.indexOf(
+  'createSessionButton.addEventListener("click", () => {',
+);
+const createButtonHandlerEnd = terminalJs.indexOf("\n});", createButtonHandlerStart);
+const createButtonHandlerBody = terminalJs.slice(createButtonHandlerStart, createButtonHandlerEnd);
 const syncCreateSessionButtonStart = terminalJs.indexOf("function syncCreateSessionButton()");
 const syncCreateSessionButtonEnd = terminalJs.indexOf("function ", syncCreateSessionButtonStart + 1);
 const syncCreateSessionButtonBody = terminalJs.slice(
@@ -54,4 +59,25 @@ assert.match(
   deleteSessionBody,
   /createSessionButton\.disabled\s*=\s*true[\s\S]*createSessionButton\.disabled\s*=\s*false/,
   "deleting a terminal should still disable the new button while the delete request is in flight",
+);
+
+assert.notEqual(createButtonHandlerStart, -1, "terminal page should bind the new-terminal button");
+assert.match(
+  createButtonHandlerBody,
+  /createSession\(\{\s*enableQuickStart:\s*true,?\s*\}\)/,
+  "the toolbar new-terminal button should retain direct quick-start behavior",
+);
+assert.match(
+  createButtonHandlerBody,
+  /openWithBehavior[\s\S]*openDialog:\s*\(\)\s*=>\s*openTerminalNewSessionDialog\(createSessionButton\)/,
+  "the toolbar new-terminal button should retain its new-session dialog",
+);
+
+const newSessionDialogStart = terminalJs.indexOf("async function openTerminalNewSessionDialog(");
+const newSessionDialogEnd = terminalJs.indexOf("\n}\n\n// 指定预设", newSessionDialogStart);
+const newSessionDialogBody = terminalJs.slice(newSessionDialogStart, newSessionDialogEnd);
+assert.match(
+  newSessionDialogBody,
+  /temporary:\s*options\.temporary === undefined \? false : options\.temporary/,
+  "the new-session dialog should launch the selected agent directly after applying its preset",
 );

@@ -7,6 +7,7 @@ const WEBCLX_CODEX_TASK_FINAL_STATUSES = new Set([
 
 const WEBCLX_CODEX_TASK_POLL_INTERVAL_MS = 800;
 const WEBCLX_AGENT_SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const WEBCLX_EXTERNAL_AGENT_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
 
 function specifiedPresetAgent(agent) {
   return String(agent || "codex").trim().toLowerCase() === "claude" ? "claude" : "codex";
@@ -30,6 +31,11 @@ function specifiedPresetModel(preset, agent = "codex") {
     ).trim();
   }
 
+  const directModel = String(preset?.model || "").trim();
+  if (directModel) {
+    return directModel;
+  }
+
   const overrides = Array.isArray(preset?.config_overrides) ? preset.config_overrides : [];
   for (let index = overrides.length - 1; index >= 0; index -= 1) {
     if (String(overrides[index]?.key || "").trim().toLowerCase() === "model") {
@@ -45,6 +51,13 @@ function specifiedPresetListEndpoint(agent = "codex") {
   return specifiedPresetAgent(agent) === "claude"
     ? "/api/auth/claude-presets"
     : "/api/auth/api-presets";
+}
+
+function specifiedPresetKind(agent = "codex", presetKind = "api") {
+  if (specifiedPresetAgent(agent) === "claude") {
+    return "claude";
+  }
+  return String(presetKind || "api").trim().toLowerCase() === "oauth" ? "oauth" : "api";
 }
 
 function resolveSpecifiedPreset(presets, options = {}) {
@@ -124,6 +137,22 @@ function specifiedPresetLaunchCommand(options = {}) {
   const sessionAction = specifiedPresetSessionAction(options.sessionAction);
   const sessionId = specifiedPresetSessionId(options.sessionId, sessionAction);
   const prompt = String(options.task ?? options.prompt ?? "").trim();
+  if (options.futureTask === true) {
+    const futureArgs = [options.agent === "claude" ? "claude" : "codex"];
+    const presetPrefix = options.agent === "claude" ? "claude" : "api";
+    if (!options.presetId) {
+      throw new Error("未来任务必须提供预设 ID。");
+    }
+    return [
+      "webclx",
+      "run",
+      presetPrefix,
+      shellQuoteSpecifiedPresetArgument(String(options.presetId || "")),
+      "--",
+      ...futureArgs,
+      ...(prompt ? [shellQuoteSpecifiedPresetArgument(prompt)] : []),
+    ].join(" ");
+  }
   const args = [agent];
 
   if (agent === "claude") {
@@ -145,7 +174,7 @@ function specifiedPresetLaunchCommand(options = {}) {
   return args.join(" ");
 }
 
-function specifiedPresetRunCommand(agent, presetId, command) {
+function specifiedPresetRunCommand(agent, presetId, command, presetKind = "api") {
   const normalizedAgent = specifiedPresetAgent(agent);
   const normalizedPresetId = String(presetId || "").trim();
   const launchCommand = String(command || "").trim();
@@ -155,103 +184,8 @@ function specifiedPresetRunCommand(agent, presetId, command) {
   if (!launchCommand) {
     throw new Error("Agent 启动命令为空。");
   }
-  const presetKind = normalizedAgent === "claude" ? "claude" : "api";
-  return `webclx run ${presetKind} ${shellQuoteSpecifiedPresetArgument(normalizedPresetId)} -- ${launchCommand}`;
-}
-
-function specifiedPresetLeaseKind(agent) {
-  return specifiedPresetAgent(agent) === "claude" ? "claude" : "api";
-}
-
-async function acquireSpecifiedPresetLease(options = {}) {
-  const response = await requestJson("/api/auth/preset-run-leases", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      preset_kind: specifiedPresetLeaseKind(options.agent),
-      preset_id: String(options.presetId || "").trim(),
-      project_path: String(options.projectPath || "").trim(),
-      owner: String(options.owner || "terminal-specified-preset").trim() || "terminal-specified-preset",
-    }),
-  });
-  if (!response?.lease_id) {
-    throw new Error("临时预设租约未返回 ID。");
-  }
-  return response;
-}
-
-async function releaseSpecifiedPresetLease(leaseId) {
-  await requestJson(
-    `/api/auth/preset-run-leases/${encodeURIComponent(leaseId)}`,
-    { method: "DELETE" },
-  );
-}
-
-async function waitForSpecifiedPresetAgentStart(
-  sessionId,
-  leaseId,
-  timeoutMs = 120000,
-) {
-  const targetSessionId = String(sessionId || "").trim();
-  if (!targetSessionId) {
-    return false;
-  }
-  const startedAt = Date.now();
-  let lastHeartbeat = 0;
-  while (Date.now() - startedAt < timeoutMs) {
-    try {
-      const response = await requestJson(
-        `/api/terminal/sessions/${encodeURIComponent(targetSessionId)}/agent-session`,
-      );
-      if (response?.resume_id || response?.command) {
-        return true;
-      }
-    } catch {}
-    if (leaseId && Date.now() - lastHeartbeat >= 15000) {
-      try {
-        await requestJson(
-          `/api/auth/preset-run-leases/${encodeURIComponent(leaseId)}/heartbeat`,
-          { method: "PUT" },
-        );
-        lastHeartbeat = Date.now();
-      } catch {}
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 1000));
-  }
-  return false;
-}
-
-async function launchSpecifiedPresetTemporary(options, launchTerminal, terminalOptions) {
-  const lease = await acquireSpecifiedPresetLease({
-    agent: specifiedPresetAgent(options.agent),
-    presetId: options.presetId,
-    projectPath: options.projectPath || options.cwd,
-    owner: options.ownerKey,
-  });
-  let launchResult = null;
-  try {
-    launchResult = await launchTerminal(String(options.cwd || ""), terminalOptions);
-    const sessionId = String(
-      launchResult?.id || launchResult?.sessionId || "",
-    ).trim();
-    await waitForSpecifiedPresetAgentStart(sessionId, lease.lease_id);
-  } catch (error) {
-    try {
-      await releaseSpecifiedPresetLease(lease.lease_id);
-    } catch {}
-    throw error;
-  }
-  await releaseSpecifiedPresetLease(lease.lease_id);
-  return {
-    applied: {
-      deferred: false,
-      temporary: true,
-      name: lease.name,
-      preset_id: lease.preset_id,
-    },
-    lease_id: lease.lease_id,
-    launchResult,
-  };
+  const kind = specifiedPresetKind(normalizedAgent, presetKind);
+  return `webclx run ${kind} ${shellQuoteSpecifiedPresetArgument(normalizedPresetId)} -- ${launchCommand}`;
 }
 
 function specifiedPresetTerminalName(options = {}) {
@@ -259,11 +193,14 @@ function specifiedPresetTerminalName(options = {}) {
   if (explicitName) {
     return explicitName;
   }
+  const sessionAction = specifiedPresetSessionAction(options.sessionAction);
+  if (sessionAction === "new") {
+    return "";
+  }
   const sourceName = String(options.sourceTerminalName || "").trim();
   if (!sourceName) {
     return "";
   }
-  const sessionAction = specifiedPresetSessionAction(options.sessionAction);
   if (sessionAction === "fork") {
     return `${sourceName}_fork`;
   }
@@ -294,11 +231,11 @@ function normalizeSpecifiedPresetSelector(options = {}) {
   return selector;
 }
 
-function specifiedPresetApplyEndpoint({ agent, presetId, projectPath, respectSavedProxyPreference }) {
+function specifiedPresetApplyEndpoint({ agent, presetId, presetKind, projectPath, respectSavedProxyPreference }) {
   const normalizedAgent = specifiedPresetAgent(agent);
   const base = normalizedAgent === "claude"
     ? `/api/auth/claude-presets/${encodeURIComponent(presetId)}/apply`
-    : `/api/auth/api-presets/${encodeURIComponent(presetId)}/apply`;
+    : `/api/auth/codex-accounts/${specifiedPresetKind(agent, presetKind)}/${encodeURIComponent(presetId)}/apply`;
   if (normalizedAgent === "claude") {
     return base;
   }
@@ -339,6 +276,7 @@ async function waitForSpecifiedCodexTask(
 async function executeSpecifiedPreset(options = {}) {
   const selector = normalizeSpecifiedPresetSelector(options);
   const agent = specifiedPresetAgent(options.agent);
+  const presetKind = specifiedPresetKind(agent, options.presetKind);
   const action = String(
     options.action || (options.task ? "task" : options.command ? "launch" : "apply"),
   ).trim().toLowerCase();
@@ -346,6 +284,9 @@ async function executeSpecifiedPreset(options = {}) {
   if (action === "task") {
     if (agent !== "codex") {
       throw new Error("原生任务 API 当前只支持 Codex API 预设。");
+    }
+    if (presetKind === "oauth") {
+      throw new Error("Codex OAuth 账号当前仅支持交互终端。");
     }
     const task = String(options.task || "").trim();
     if (!task) {
@@ -410,26 +351,30 @@ async function executeSpecifiedPreset(options = {}) {
       throw new Error("临时切换不支持嵌套 webclx run 命令。");
     }
     const runCommand = temporaryLaunch
-      ? requestedLaunchCommand
-      : requestedLaunchCommand.startsWith("webclx run ")
-        ? requestedLaunchCommand
-        : specifiedPresetRunCommand(agent, selector.id, requestedLaunchCommand);
+      ? specifiedPresetRunCommand(agent, selector.id, requestedLaunchCommand, presetKind)
+      : requestedLaunchCommand;
     terminalOptions = {
       runCommand,
       quickStart: options.quickStart === true,
       origin: options.origin,
       ownerKey: options.ownerKey,
-      codexApiPresetId: agent === "codex" ? selector.id : "",
+      codexApiPresetId: !temporaryLaunch && agent === "codex" && presetKind === "api" ? selector.id : "",
+      autoCompact: options.autoCompact !== false,
     };
     const terminalName = specifiedPresetTerminalName(options);
     if (terminalName) {
       terminalOptions.terminalName = terminalName;
+    }
+    const terminalNameSuffix = String(options.terminalNameSuffix || "").trim();
+    if (terminalNameSuffix) {
+      terminalOptions.terminalNameSuffix = terminalNameSuffix;
     }
   }
   if (action === "apply") {
     const applied = await requestJson(specifiedPresetApplyEndpoint({
       agent,
       presetId: selector.id,
+      presetKind,
       projectPath: options.projectPath || options.cwd,
       respectSavedProxyPreference: options.respectSavedProxyPreference,
     }), { method: "PUT" });
@@ -437,18 +382,27 @@ async function executeSpecifiedPreset(options = {}) {
     return applied;
   }
   if (temporaryLaunch) {
-    return launchSpecifiedPresetTemporary(options, launchTerminal, terminalOptions);
+    const launchResult = await launchTerminal(String(options.cwd || ""), terminalOptions);
+    return {
+      applied: {
+        deferred: false,
+        temporary: true,
+        preset_id: selector.id,
+      },
+      launchResult,
+    };
   }
-  // A deferred apply is already queued. The terminal still starts, but its
-  // `webclx run` command waits until the queued preset is written before it
-  // launches the agent, so no stale shared config is ever used.
   const applied = await requestJson(specifiedPresetApplyEndpoint({
     agent,
     presetId: selector.id,
+    presetKind,
     projectPath: options.projectPath || options.cwd,
     respectSavedProxyPreference: options.respectSavedProxyPreference,
   }), { method: "PUT" });
   options.onApplied?.(applied);
+  if (applied?.deferred) {
+    return { applied, launchResult: null };
+  }
   const launchResult = await launchTerminal(String(options.cwd || ""), terminalOptions);
   return { applied, launchResult };
 }

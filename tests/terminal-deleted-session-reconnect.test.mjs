@@ -60,6 +60,11 @@ function createLoadSessionsSandbox({ previousSessions, fetchedSessions, activeSe
     mergePendingSessionRefresh() {},
     normalizeTerminalPath: (value) => String(value || ""),
     sortSessionsByRecentActivity: (sessions) => sessions,
+    // 与 terminal-session-activity.js 中的同名实现保持一致。
+    sessionTimestamp: (session, snakeKey, camelKey) => {
+      const rawValue = Number(session?.[snakeKey] ?? session?.[camelKey] ?? 0);
+      return Number.isFinite(rawValue) && rawValue > 0 ? rawValue : 0;
+    },
     pruneTerminalSessionContexts() {},
     maybePlayTerminalCompletionSound() {},
     migrateLegacyIdleSessionIds: async () => {},

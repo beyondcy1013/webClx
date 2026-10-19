@@ -6,26 +6,20 @@ function currentTabPathname() {
     return "/archives";
   }
   if (state.activeTab === "api") {
-    return "/codex_api";
-  }
-  if (state.activeTab === "claude") {
-    return "/claude_api";
+    return window.currentAccountPathname?.() || "/codex_oauth";
   }
   if (state.activeTab === "settings") {
     const settingsTab = state.activeSettingsTab || "system";
     return settingsTab === "system" ? "/settings" : `/settings/${settingsTab}`;
-  }
-  if (state.activeTab === "auth") {
-    return "/codex_oauth";
-  }
-  if (state.activeTab === "desktop") {
-    return "/desktop";
   }
   return "/workspace";
 }
 
 function workspacePathQuery(path) {
   const params = new URLSearchParams();
+  if (document.body.classList.contains("scheduled-tasks-window")) {
+    params.set("compact", "tasks");
+  }
   if (path) {
     params.set("path", path);
   }
@@ -41,9 +35,11 @@ function buildWorkspaceUrl(path) {
   return `/workspace${workspacePathQuery(path)}`;
 }
 
-function syncTabUrl() {
+function syncTabUrl({ push = false } = {}) {
   const nextUrl = `${currentTabPathname()}${workspacePathQuery(state.currentPath)}`;
-  window.history.replaceState({}, "", nextUrl);
+  const currentUrl = window.location.pathname + window.location.search + window.location.hash;
+  if (currentUrl === nextUrl) return;
+  window.history[push ? "pushState" : "replaceState"]({}, "", nextUrl);
 }
 
 function setTabPanelActive(panel, active) {
@@ -129,6 +125,10 @@ function setActiveTab(tab) {
   if (tab === "auth-inspect") {
     tab = "auth";
   }
+  if (tab === "agy_auth") {
+    // 兼容旧调用：agy_auth 已并入 LLM_API 子页签。
+    tab = "api";
+  }
   if (tab === "sessions") {
     tab = "workspace";
   }
@@ -144,9 +144,7 @@ function setActiveTab(tab) {
   setTabPanelActive(terminalArchivesViewEl, tab === "terminal-archives");
   setTabPanelActive(authViewEl, tab === "auth");
   setTabPanelActive(apiViewEl, tab === "api");
-  setTabPanelActive(claudeViewEl, tab === "claude");
   setTabPanelActive(settingsViewEl, tab === "settings");
-  setTabPanelActive(desktopViewEl, tab === "desktop");
   if (tab === "settings") {
     setActiveSettingsTab(state.activeSettingsTab);
     window.requestAnimationFrame(() => {
@@ -186,13 +184,17 @@ function setActiveTab(tab) {
   }
   if (tab === "auth") {
     ensureAuthPresetsLoaded();
+    if (typeof loadCodexAccounts === "function") loadCodexAccounts();
   }
   if (tab === "api") {
+    ensureAuthPresetsLoaded();
     ensureApiPresetsLoaded();
     loadCodexCommonConfig();
-  }
-  if (tab === "claude") {
-    ensureClaudePresetsLoaded();
+    if (typeof loadCodexAccounts === "function") loadCodexAccounts();
+    if (typeof syncAgySubtabVisibility === "function") {
+      // agy 子页签处于激活态时保持其可见并刷新数据。
+      syncAgySubtabVisibility();
+    }
   }
   syncTabUrl();
 }

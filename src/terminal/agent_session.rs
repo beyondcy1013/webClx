@@ -3,19 +3,21 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use anyhow::{Context, Result};
 use terminal_core::{
-    ResumeCommandInfo, claude_session_id_from_path, codex_session_id_from_path,
-    resume_command_for_program, resume_command_info_from_text, system_time_to_millis,
-    tmux_session_name,
+    ResumeCommandInfo, claude_session_id_from_path, codebuddy_session_id_from_path,
+    codex_session_id_from_path, resume_command_for_program, resume_command_info_from_text,
+    system_time_to_millis, tmux_session_name,
 };
 
 use serde_json::Value;
 
-use super::{sanitize_child_command, tmux::capture_tmux_activity_pane_snapshot};
+use super::{
+    sanitize_child_command,
+    tmux::{capture_tmux_activity_pane_snapshot, isolated_tmux_command},
+};
 
 const COMPLETE_DETECTION_SCREEN_LINE_LIMIT: u32 = 240;
 
@@ -47,14 +49,12 @@ pub(super) struct DetectedResumeSession {
 }
 
 pub(super) struct ResumeSessionDetector {
-    pane_pids: HashMap<String, u32>,
     children_by_parent: HashMap<u32, Vec<u32>>,
 }
 
 impl ResumeSessionDetector {
     pub(super) fn new() -> Result<Self> {
         Ok(Self {
-            pane_pids: read_tmux_pane_pids()?,
             children_by_parent: read_proc_children_map(),
         })
     }
@@ -106,7 +106,7 @@ impl ResumeSessionDetector {
         session_id: &str,
         screen_text: Option<&str>,
     ) -> Option<DetectedResumeSession> {
-        if let Some(pane_pid) = self.pane_pids.get(&tmux_session_name(session_id)).copied() {
+        if let Some(pane_pid) = tmux_pane_pid(session_id).ok().flatten() {
             let process_ids =
                 descendant_process_ids_from_children(pane_pid, &self.children_by_parent);
             let mut candidates = Vec::new();
@@ -221,16 +221,20 @@ fn resume_session_from_tmux_snapshot_text(text: &str) -> Option<DetectedResumeSe
 }
 
 fn tmux_pane_pid(session_id: &str) -> Result<Option<u32>> {
-    let mut command = Command::new("tmux");
+    let mut command = isolated_tmux_command(session_id);
     sanitize_child_command(&mut command);
-    let output = command
+    command
         .arg("display-message")
         .arg("-p")
         .arg("-t")
         .arg(tmux_session_name(session_id))
-        .arg("#{pane_pid}")
-        .output()
-        .context("无法读取 tmux pane pid")?;
+        .arg("#{pane_pid}");
+    let output = super::tmux::command_output::bounded_command_output(
+        command,
+        super::tmux::TMUX_COMMAND_TIMEOUT,
+        64 * 1024,
+    )
+    .context("无法读取 tmux pane pid")?;
 
     if !output.status.success() {
         return Ok(None);
@@ -238,29 +242,6 @@ fn tmux_pane_pid(session_id: &str) -> Result<Option<u32>> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     Ok(stdout.trim().parse::<u32>().ok())
-}
-
-fn read_tmux_pane_pids() -> Result<HashMap<String, u32>> {
-    let mut command = Command::new("tmux");
-    sanitize_child_command(&mut command);
-    let output = command
-        .arg("list-panes")
-        .arg("-a")
-        .arg("-F")
-        .arg("#{session_name}\t#{pane_pid}")
-        .output()
-        .context("无法批量读取 tmux pane pid")?;
-    if !output.status.success() {
-        return Ok(HashMap::new());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| {
-            let (session_name, pane_pid) = line.split_once('\t')?;
-            Some((session_name.to_string(), pane_pid.parse().ok()?))
-        })
-        .collect())
 }
 
 fn descendant_process_ids(root_pid: u32) -> Vec<u32> {
@@ -436,15 +417,19 @@ fn agent_session_screen_match_score(path: &Path, screen_text: &str) -> SessionSc
 }
 
 fn tmux_environment_value(session_id: &str, key: &str) -> Option<String> {
-    let mut command = Command::new("tmux");
+    let mut command = isolated_tmux_command(session_id);
     sanitize_child_command(&mut command);
-    let output = command
+    command
         .arg("show-environment")
         .arg("-t")
         .arg(tmux_session_name(session_id))
-        .arg(key)
-        .output()
-        .ok()?;
+        .arg(key);
+    let output = super::tmux::command_output::bounded_command_output(
+        command,
+        super::tmux::TMUX_COMMAND_TIMEOUT,
+        64 * 1024,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -471,16 +456,20 @@ fn claude_config_dir_for_tmux_session(session_id: &str) -> Option<PathBuf> {
 }
 
 pub(super) fn tmux_pane_current_path(session_id: &str) -> Option<PathBuf> {
-    let mut command = Command::new("tmux");
+    let mut command = isolated_tmux_command(session_id);
     sanitize_child_command(&mut command);
-    let output = command
+    command
         .arg("display-message")
         .arg("-p")
         .arg("-t")
         .arg(tmux_session_name(session_id))
-        .arg("#{pane_current_path}")
-        .output()
-        .ok()?;
+        .arg("#{pane_current_path}");
+    let output = super::tmux::command_output::bounded_command_output(
+        command,
+        super::tmux::TMUX_COMMAND_TIMEOUT,
+        64 * 1024,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -796,14 +785,16 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
 /// 检测终端当前 agent 会话对应的真实 rollout 文件路径。
 ///
 /// 通过 /proc/<pid>/fd 找到 agent 进程正在打开的 Codex/Claude 会话 jsonl。
+/// CodeBuddy 常常不长期持有 jsonl 描述符，改从 `--resume` 和该进程 HOME
+/// 下的 `.codebuddy/projects/<cwd-key>/<uuid>.jsonl` 定位。
 /// 返回按修改时间最新优先的第一条命中路径。
 pub(super) fn detect_current_session_rollout_path(session_id: &str) -> Option<PathBuf> {
     let pane_pid = tmux_pane_pid(session_id).ok().flatten()?;
     let process_ids = descendant_process_ids(pane_pid);
 
     let mut best: Option<(u64, PathBuf)> = None;
-    for process_id in process_ids {
-        for candidate in agent_session_candidates_from_process(process_id) {
+    for process_id in &process_ids {
+        for candidate in agent_session_candidates_from_process(*process_id) {
             match &best {
                 Some((current_modified, _)) if candidate.modified_at <= *current_modified => {}
                 _ => best = Some((candidate.modified_at, candidate.path)),
@@ -813,18 +804,161 @@ pub(super) fn detect_current_session_rollout_path(session_id: &str) -> Option<Pa
     if let Some((_, path)) = best {
         return Some(path);
     }
+    for process_id in &process_ids {
+        if let Some(path) = codebuddy_rollout_path_for_process(*process_id) {
+            return Some(path);
+        }
+    }
     let snapshot =
         capture_tmux_activity_pane_snapshot(session_id, COMPLETE_DETECTION_SCREEN_LINE_LIMIT)
             .ok()?;
     claude_rollout_path_for_terminal(session_id, &String::from_utf8_lossy(&snapshot))
 }
 
-/// 从 Codex/Claude rollout 文件中提取真实用户消息（对话历史）。
+fn process_cmdline_args(process_id: u32) -> Vec<String> {
+    let Ok(bytes) = fs::read(format!("/proc/{process_id}/cmdline")) else {
+        return Vec::new();
+    };
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .map(|part| String::from_utf8_lossy(part).into_owned())
+        .collect()
+}
+
+fn process_home_dir(process_id: u32) -> Option<PathBuf> {
+    let bytes = fs::read(format!("/proc/{process_id}/environ")).ok()?;
+    for entry in bytes.split(|byte| *byte == 0) {
+        let Ok(entry) = std::str::from_utf8(entry) else {
+            continue;
+        };
+        let Some(value) = entry.strip_prefix("HOME=") else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+pub(super) fn is_codebuddy_launch_args(args: &[String]) -> bool {
+    let Some(argv0) = args.first() else {
+        return false;
+    };
+    let executable = Path::new(argv0)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if executable.eq_ignore_ascii_case("codebuddy") {
+        return true;
+    }
+    if executable != "node" {
+        return false;
+    }
+    let Some(script) = args.get(1) else {
+        return false;
+    };
+    let script_name = Path::new(script)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    script_name == "codebuddy" || script.contains("@tencent-ai/codebuddy-code")
+}
+
+pub(super) fn codebuddy_resume_id_from_args(args: &[String]) -> Option<String> {
+    for (index, arg) in args.iter().enumerate() {
+        let raw = if let Some(value) = arg.strip_prefix("--resume=") {
+            value
+        } else if arg == "--resume" {
+            args.get(index + 1)?
+        } else {
+            continue;
+        };
+        return codebuddy_session_id_from_path(Path::new(&format!(
+            "/.codebuddy/projects/session/{raw}.jsonl"
+        )));
+    }
+    None
+}
+
+/// 在终端用户 HOME 的 CodeBuddy projects 目录里找这次 resume 的 jsonl。
+pub(super) fn codebuddy_rollout_file(home: &Path, resume_id: &str) -> Option<PathBuf> {
+    let resume_id = codebuddy_session_id_from_path(Path::new(&format!(
+        "/.codebuddy/projects/session/{resume_id}.jsonl"
+    )))?;
+    let projects = home.join(".codebuddy").join("projects");
+    let mut matches = Vec::new();
+    let direct = projects.join(format!("{resume_id}.jsonl"));
+    if direct.is_file() {
+        matches.push(direct);
+    }
+    if let Ok(entries) = fs::read_dir(&projects) {
+        for entry in entries.flatten() {
+            let directory = entry.path();
+            if !directory.is_dir() {
+                continue;
+            }
+            let candidate = directory.join(format!("{resume_id}.jsonl"));
+            if candidate.is_file() {
+                matches.push(candidate);
+            }
+        }
+    }
+    matches.into_iter().max_by_key(|path| {
+        fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(system_time_to_millis)
+            .unwrap_or(0)
+    })
+}
+
+fn codebuddy_rollout_from_open_fds(process_id: u32) -> Option<PathBuf> {
+    let mut best: Option<(u64, PathBuf)> = None;
+    let entries = fs::read_dir(format!("/proc/{process_id}/fd")).ok()?;
+    for entry in entries.flatten() {
+        let Ok(target) = fs::read_link(entry.path()) else {
+            continue;
+        };
+        if codebuddy_session_id_from_path(&target).is_none() {
+            continue;
+        }
+        let modified = fs::metadata(&target)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .map(system_time_to_millis)
+            .unwrap_or(0);
+        match &best {
+            Some((current, _)) if *current >= modified => {}
+            _ => best = Some((modified, target)),
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
+fn codebuddy_rollout_path_for_process(process_id: u32) -> Option<PathBuf> {
+    if let Some(path) = codebuddy_rollout_from_open_fds(process_id) {
+        return Some(path);
+    }
+    let args = process_cmdline_args(process_id);
+    if !is_codebuddy_launch_args(&args) {
+        return None;
+    }
+    let resume_id = codebuddy_resume_id_from_args(&args)?;
+    let home = process_home_dir(process_id)?;
+    codebuddy_rollout_file(&home, &resume_id)
+}
+
+/// 从 Codex/Claude/CodeBuddy rollout 文件中提取真实用户消息（对话历史）。
 ///
 /// Codex: payload.type=="message" && role=="user" 的纯文本 content，
 ///        或 event_msg.payload.type=="user_message" 的 message 字段。
 /// Claude: type=="user" 且 message.role=="user"，content 为字符串
 ///        （列表型 content 是 tool_result，跳过）。
+/// CodeBuddy: type=="message" && role=="user"，content 为 input_text 数组，
+///        timestamp 是毫秒整数。
 ///
 /// 自动跳过 base_instructions / AGENTS.md / 系统注入的大段文本，只保留
 /// 用户实际输入的对话内容。
@@ -834,7 +968,9 @@ pub(super) fn parse_rollout_user_messages(path: &Path) -> Vec<(String, u64)> {
     };
     let text = String::from_utf8_lossy(&bytes);
 
-    let is_codex = path.to_string_lossy().contains("/.codex/sessions/");
+    let path_text = path.to_string_lossy();
+    let is_codex = path_text.contains("/.codex/sessions/");
+    let is_codebuddy = path_text.contains("/.codebuddy/projects/");
 
     // 先按行顺序收集所有候选 (text, timestamp)，再统一去重。
     let mut candidates: Vec<(String, u64)> = Vec::new();
@@ -845,7 +981,15 @@ pub(super) fn parse_rollout_user_messages(path: &Path) -> Vec<(String, u64)> {
 
         let record_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-        if is_codex {
+        if is_codebuddy {
+            if record_type == "message"
+                && value.get("role").and_then(|v| v.as_str()) == Some("user")
+                && let Some(text) = extract_input_text_content(&value)
+                && is_real_user_message(&text)
+            {
+                candidates.push((text, record_timestamp_millis(&value)));
+            }
+        } else if is_codex {
             // Codex: response_item.payload.message.user
             if record_type == "response_item"
                 && let Some(payload) = value.get("payload")
@@ -928,17 +1072,26 @@ pub(super) fn parse_rollout_user_messages(path: &Path) -> Vec<(String, u64)> {
     messages
 }
 
-/// 从 Codex response_item.payload 中提取用户文本。
-fn extract_codex_user_text(payload: &Value) -> Option<String> {
-    let content = payload.get("content")?;
-    if let Some(s) = content.as_str() {
-        return Some(s.to_string());
+fn record_timestamp_millis(value: &Value) -> u64 {
+    match value.get("timestamp") {
+        Some(Value::Number(number)) => number.as_u64().unwrap_or(0),
+        Some(Value::String(text)) => parse_rollout_timestamp(text).unwrap_or(0),
+        _ => 0,
     }
-    if let Some(arr) = content.as_array() {
+}
+
+/// 从带 content 字段的记录里取出用户输入文本。
+/// 字符串 content 原样返回；数组只收 `input_text`，跳过 tool_result / output_text。
+fn extract_input_text_content(value: &Value) -> Option<String> {
+    let content = value.get("content")?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    if let Some(items) = content.as_array() {
         let mut parts = Vec::new();
-        for item in arr {
-            if item.get("type").and_then(|v| v.as_str()) == Some("input_text")
-                && let Some(text) = item.get("text").and_then(|v| v.as_str())
+        for item in items {
+            if item.get("type").and_then(|kind| kind.as_str()) == Some("input_text")
+                && let Some(text) = item.get("text").and_then(|text| text.as_str())
             {
                 parts.push(text.to_string());
             }
@@ -949,6 +1102,11 @@ fn extract_codex_user_text(payload: &Value) -> Option<String> {
         return Some(parts.join("\n"));
     }
     None
+}
+
+/// 从 Codex response_item.payload 中提取用户文本。
+fn extract_codex_user_text(payload: &Value) -> Option<String> {
+    extract_input_text_content(payload)
 }
 
 /// 判断是否是用户真实输入的对话消息，而非系统注入的上下文。
@@ -1088,14 +1246,14 @@ mod tests {
                 &format!(r#"{{"session_id":"{newer_id}","ts":20,"text":"完全无关的新对话内容"}}"#),
             ],
             &[
-                &format!(r#"{{"id":"{matched_id}","cwd":"/home/codes/webClx"}}"#),
-                &format!(r#"{{"id":"{newer_id}","cwd":"/home/codes/webClx"}}"#),
+                &format!(r#"{{"id":"{matched_id}","cwd":"/home/codes/tools/webClx"}}"#),
+                &format!(r#"{{"id":"{newer_id}","cwd":"/home/codes/tools/webClx"}}"#),
             ],
         );
 
         let detected = resume_session_from_codex_history(
             &codex_home,
-            Some(Path::new("/home/codes/webClx")),
+            Some(Path::new("/home/codes/tools/webClx")),
             "正在处理：统一获取 Session ID 的检测顺序\n继续",
         )
         .unwrap();
@@ -1113,13 +1271,13 @@ mod tests {
                 r#"{{"session_id":"{recent_id}","ts":20,"text":"最近修改但与屏幕无关的会话"}}"#
             )],
             &[&format!(
-                r#"{{"id":"{recent_id}","cwd":"/home/codes/webClx"}}"#
+                r#"{{"id":"{recent_id}","cwd":"/home/codes/tools/webClx"}}"#
             )],
         );
 
         let detected = resume_session_from_codex_history(
             &codex_home,
-            Some(Path::new("/home/codes/webClx")),
+            Some(Path::new("/home/codes/tools/webClx")),
             "当前屏幕展示另一段完全不同的工作内容",
         );
         let _ = std::fs::remove_dir_all(&codex_home);
@@ -1162,13 +1320,13 @@ mod tests {
         let wrong_cwd = project_dir.join("a8509791-52b5-46e0-899d-9a96fe9b18af.jsonl");
         std::fs::write(
             &current,
-            r#"{"type":"user","cwd":"/home/codes/webClx","message":{"role":"user","content":"后台终端可靠提交验收"},"timestamp":"2026-07-26T10:28:33.114Z"}
+            r#"{"type":"user","cwd":"/home/codes/tools/webClx","message":{"role":"user","content":"后台终端可靠提交验收"},"timestamp":"2026-07-26T10:28:33.114Z"}
 "#,
         )
         .unwrap();
         std::fs::write(
             &unrelated,
-            r#"{"type":"user","cwd":"/home/codes/webClx","message":{"role":"user","content":"同目录的另一段工作"},"timestamp":"2026-07-26T10:29:33.114Z"}
+            r#"{"type":"user","cwd":"/home/codes/tools/webClx","message":{"role":"user","content":"同目录的另一段工作"},"timestamp":"2026-07-26T10:29:33.114Z"}
 "#,
         )
         .unwrap();
@@ -1181,12 +1339,12 @@ mod tests {
 
         let selected = claude_rollout_path_from_projects(
             &claude_config,
-            Path::new("/home/codes/webClx"),
+            Path::new("/home/codes/tools/webClx"),
             "❯ 后台终端可靠提交验收",
         );
         let no_match = claude_rollout_path_from_projects(
             &claude_config,
-            Path::new("/home/codes/webClx"),
+            Path::new("/home/codes/tools/webClx"),
             "屏幕上完全无关的内容",
         );
         let _ = std::fs::remove_dir_all(root);
@@ -1325,6 +1483,56 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].0, "操作系统有新版，查下如何升级");
         assert_eq!(messages[1].0, "真升级SP4");
+    }
+
+    #[test]
+    fn parses_codebuddy_user_messages_and_keeps_scheduled_marker() {
+        let root = std::env::temp_dir().join(format!(
+            "webclx-codebuddy-rollout-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let session_dir = root.join(".codebuddy/projects/home-codes-lyyStock");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join("01a0c4d5-fa86-7677-bab4-3742957560fd.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"function_call","timestamp":1790058630000,"name":"read"}"#,
+                "\n",
+                r#"{"type":"message","role":"assistant","timestamp":1790058631000,"content":[{"type":"output_text","text":"已处理"}]}"#,
+                "\n",
+                r#"{"type":"message","role":"user","timestamp":1790058631195,"content":[{"type":"input_text","text":"[scheduled:paste-1790058625106-7872] 合并竞态修正"}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let messages = parse_rollout_user_messages(&path);
+        let found = codebuddy_rollout_file(&root, "01a0c4d5-fa86-7677-bab4-3742957560fd");
+        let args = vec![
+            "node".to_string(),
+            "/usr/local/bin/codebuddy".to_string(),
+            "--resume=01a0c4d5-fa86-7677-bab4-3742957560fd".to_string(),
+        ];
+        let _ = std::fs::remove_dir_all(root);
+
+        assert_eq!(messages.len(), 1);
+        assert!(
+            messages[0]
+                .0
+                .contains("[scheduled:paste-1790058625106-7872]")
+        );
+        assert_eq!(messages[0].1, 1790058631195);
+        assert_eq!(found.as_deref(), Some(path.as_path()));
+        assert!(is_codebuddy_launch_args(&args));
+        assert_eq!(
+            codebuddy_resume_id_from_args(&args).as_deref(),
+            Some("01a0c4d5-fa86-7677-bab4-3742957560fd")
+        );
+        assert!(!is_codebuddy_launch_args(&["rg".to_string(), "codebuddy".to_string()]));
     }
 
     #[test]

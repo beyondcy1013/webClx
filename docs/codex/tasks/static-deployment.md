@@ -1,42 +1,32 @@
-# 静态文件源码与部署副本
+# 静态资源位置与上线验证
 
-## 现象与根因
+## 权威目录
 
-代码已经修改，但页面仍缺少功能或保持旧样式，通常不是浏览器缓存，而是运行目录中的静态文件落后。
+`/home/codes/tools/webClx/static/` 是静态资源的唯一实体目录和 Git 权威来源。
+`/home/bin/webclx/static` 必须为指向该目录的绝对符号链接；当前 canonical
+仓库路径为 `/home/codes/tools/webClx`。修改前检查 `readlink /home/bin/webclx/static`。
+链接正确时两个路径访问同一文件，禁止在两者之间复制或 rsync。
 
-- 源码目录：`/home/codes/webClx/static/`
-- 服务运行目录：`/home/bin/webclx/`
-- 实际读取目录：`/home/bin/webclx/static/`
+静态修改立即对服务可见，不需要重建或重启二进制。改变脚本后同步更新引用入口
+HTML 的版本参数，避免浏览器继续使用缓存；检查每个引用入口，不重复加载同一模块。
+`tests/static-entry-assets.mjs` 按入口读取脚本包，可用于相关回归。
 
-后端通过 `current_dir()/static` 读取资源。只修改源码目录，或只更新二进制，都不会自动更新运行中的前端。
+## 提交与审查
 
-## 当前处理方式
+Git 直接跟踪源码 `static/` 中的文件。只提交本次修改的文件或 hunk，保留并发
+工作；不要改动链接方向或创建第二份静态目录。旧记录中源码指向运行目录的布局
+已不适用，部署门禁也必须按当前项目 AGENTS.md 校验运行链接指向源码。
 
-使用 [webClx rebuild skill](../skills/webclx-rebuild/SKILL.md) 的 deploy API。部署脚本会统一完成：
+## 验证与后端部署
 
-1. 构建 release 二进制。
-2. 安装实际 `cargo metadata` 指向的产物。
-3. 同步整个 `static/` 目录，而不是维护单个文件白名单。
-4. 重启并检查 `webclx.service`。
+- 对实际文件执行相关语法与行为检查；按项目规则经 compile API 排队。
+- 回读线上 HTML，确认它引用新的资源版本；回读带版本的资源，核对 HTTP 200
+  与本地权威文件 SHA-256 一致。
+- 界面行为变更补充对应浏览器验收；认证或 WebSocket 失败与静态资源错误分别记录。
+- 后端修改使用 compile/deploy API 和 `scripts/rebuild-and-deploy.sh`。脚本在
+  源/目标目录解析一致时不复制静态文件，安装二进制后重启；部署完成仍须核对运行进程、
+  产物哈希及服务健康。
 
-不要把 `/home/bin/webclx/static/` 当成源码目录，也不要只在那里做长期修复；下一次部署会覆盖它。
-
-工作树存在其它未发布的静态改动时，先用 `rsync -ani --delete static/ /home/bin/webclx/static/`
-确认差异。若全量同步会捎带无关改动，可通过 deploy API 调用
-`scripts/deploy-static-assets.sh <relative-file>...`，仅安装本次已验证的文件；脚本会拒绝绝对路径和
-`..` 路径，并逐文件 `cmp` 验证。正常的干净发布仍使用全量同步，避免运行目录长期漂移。
-
-## 排查
-
-```bash
-systemctl show webclx.service -p WorkingDirectory -p MainPID
-diff -qr /home/codes/webClx/static /home/bin/webclx/static
-```
-
-如果只想核对某个资源，可比较源码和部署副本的 `sha256sum`。确认部署副本一致后，再检查浏览器缓存、Service Worker 或反向代理缓存。
-
-## 验证
-
-- 页面引用的所有本地脚本和样式都能返回 HTTP 200。
-- 源码与部署副本内容一致。
-- 页面加载后无静态资源 404 和 JavaScript 初始化错误。
+原生 `<dialog>` 遮罩不可作为关闭控件，`dialog-backdrop-guard.js` 吸收遮罩 click；
+从内容拖到遮罩松开的合成 click 也不得关闭。固定 overlay 使用
+`bindBackdropDismissal()` 保持相同行为。

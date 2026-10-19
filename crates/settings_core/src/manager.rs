@@ -33,8 +33,10 @@ impl SettingsManager {
                     terminal_command_collections: default_terminal_command_collections(),
                     terminal_tool_entries: default_terminal_tool_entries(),
                     terminal_rename_presets: default_terminal_rename_presets(),
+                    terminal_agent_commands: default_terminal_agent_commands(),
                     show_dot_entries: default_show_dot_entries(),
                     show_all_workspace_sessions: default_show_all_workspace_sessions(),
+                    terminal_new_session_behavior: default_terminal_new_session_behavior(),
                     desktop_terminal_soft_keyboard_enabled:
                         default_desktop_terminal_soft_keyboard_enabled(),
                     terminal_soft_keyboard_scale: default_terminal_soft_keyboard_scale(),
@@ -56,6 +58,8 @@ impl SettingsManager {
                         default_terminal_auto_continue_backoff_max_minutes(),
                     terminal_auto_continue_respect_manual_interrupt:
                         default_terminal_auto_continue_respect_manual_interrupt(),
+                    terminal_auto_compact_skip_codebuddy:
+                        default_terminal_auto_compact_skip_codebuddy(),
                     terminal_auto_continue_time_patterns:
                         default_terminal_auto_continue_time_patterns(),
                     terminal_auto_continue_active_window:
@@ -112,8 +116,10 @@ impl SettingsManager {
                     terminal_command_collections: default_terminal_command_collections(),
                     terminal_tool_entries: default_terminal_tool_entries(),
                     terminal_rename_presets: default_terminal_rename_presets(),
+                    terminal_agent_commands: default_terminal_agent_commands(),
                     show_dot_entries: default_show_dot_entries(),
                     show_all_workspace_sessions: default_show_all_workspace_sessions(),
+                    terminal_new_session_behavior: default_terminal_new_session_behavior(),
                     desktop_terminal_soft_keyboard_enabled:
                         default_desktop_terminal_soft_keyboard_enabled(),
                     terminal_soft_keyboard_scale: default_terminal_soft_keyboard_scale(),
@@ -135,6 +141,8 @@ impl SettingsManager {
                         default_terminal_auto_continue_backoff_max_minutes(),
                     terminal_auto_continue_respect_manual_interrupt:
                         default_terminal_auto_continue_respect_manual_interrupt(),
+                    terminal_auto_compact_skip_codebuddy:
+                        default_terminal_auto_compact_skip_codebuddy(),
                     terminal_auto_continue_time_patterns:
                         default_terminal_auto_continue_time_patterns(),
                     terminal_auto_continue_active_window:
@@ -189,8 +197,10 @@ impl SettingsManager {
             &loaded.terminal_command_collections,
             &loaded.terminal_tool_entries,
             &loaded.terminal_rename_presets,
+            &loaded.terminal_agent_commands,
             loaded.show_dot_entries,
             loaded.show_all_workspace_sessions,
+            loaded.terminal_new_session_behavior.clone(),
             loaded.desktop_terminal_soft_keyboard_enabled,
             loaded.terminal_soft_keyboard_scale,
             loaded.terminal_floating_button_offset_vh,
@@ -205,6 +215,7 @@ impl SettingsManager {
             loaded.terminal_auto_continue_backoff_factor,
             loaded.terminal_auto_continue_backoff_max_minutes,
             loaded.terminal_auto_continue_respect_manual_interrupt,
+            loaded.terminal_auto_compact_skip_codebuddy,
             &loaded.terminal_auto_continue_time_patterns,
             &loaded.terminal_auto_continue_active_window,
             &loaded.terminal_scheduled_input_avoid_window,
@@ -259,8 +270,12 @@ impl SettingsManager {
             )),
             terminal_tool_entries: Arc::new(RwLock::new(loaded.terminal_tool_entries)),
             terminal_rename_presets: Arc::new(RwLock::new(loaded.terminal_rename_presets)),
+            terminal_agent_commands: Arc::new(RwLock::new(loaded.terminal_agent_commands)),
             show_dot_entries: Arc::new(RwLock::new(loaded.show_dot_entries)),
             show_all_workspace_sessions: Arc::new(RwLock::new(loaded.show_all_workspace_sessions)),
+            terminal_new_session_behavior: Arc::new(RwLock::new(
+                loaded.terminal_new_session_behavior,
+            )),
             desktop_terminal_soft_keyboard_enabled: Arc::new(RwLock::new(
                 loaded.desktop_terminal_soft_keyboard_enabled,
             )),
@@ -294,6 +309,9 @@ impl SettingsManager {
             )),
             terminal_auto_continue_respect_manual_interrupt: Arc::new(RwLock::new(
                 loaded.terminal_auto_continue_respect_manual_interrupt,
+            )),
+            terminal_auto_compact_skip_codebuddy: Arc::new(RwLock::new(
+                loaded.terminal_auto_compact_skip_codebuddy,
             )),
             terminal_auto_continue_time_patterns: Arc::new(RwLock::new(
                 loaded.terminal_auto_continue_time_patterns,
@@ -440,6 +458,13 @@ impl SettingsManager {
             .clone()
     }
 
+    pub fn terminal_agent_commands(&self) -> Vec<TerminalAgentCommand> {
+        self.terminal_agent_commands
+            .read()
+            .expect("workspace settings poisoned")
+            .clone()
+    }
+
     pub fn terminal_default_env_entries(&self) -> Vec<(String, String)> {
         self.terminal_default_env_vars()
             .into_iter()
@@ -498,6 +523,13 @@ impl SettingsManager {
             .show_all_workspace_sessions
             .read()
             .expect("workspace settings poisoned")
+    }
+
+    pub fn terminal_new_session_behavior(&self) -> String {
+        self.terminal_new_session_behavior
+            .read()
+            .expect("workspace settings poisoned")
+            .clone()
     }
 
     pub fn desktop_terminal_soft_keyboard_enabled(&self) -> bool {
@@ -594,6 +626,13 @@ impl SettingsManager {
     pub fn terminal_auto_continue_respect_manual_interrupt(&self) -> bool {
         *self
             .terminal_auto_continue_respect_manual_interrupt
+            .read()
+            .expect("workspace settings poisoned")
+    }
+
+    pub fn terminal_auto_compact_skip_codebuddy(&self) -> bool {
+        *self
+            .terminal_auto_compact_skip_codebuddy
             .read()
             .expect("workspace settings poisoned")
     }
@@ -815,8 +854,10 @@ impl SettingsManager {
             &self.terminal_command_collections(),
             &self.terminal_tool_entries(),
             &self.terminal_rename_presets(),
+            &self.terminal_agent_commands(),
             self.show_dot_entries(),
             self.show_all_workspace_sessions(),
+            self.terminal_new_session_behavior(),
             self.desktop_terminal_soft_keyboard_enabled(),
             self.terminal_soft_keyboard_scale(),
             self.terminal_floating_button_offset_vh(),
@@ -831,6 +872,7 @@ impl SettingsManager {
             self.terminal_auto_continue_backoff_factor(),
             self.terminal_auto_continue_backoff_max_minutes(),
             self.terminal_auto_continue_respect_manual_interrupt(),
+            self.terminal_auto_compact_skip_codebuddy(),
             &self.terminal_auto_continue_time_patterns(),
             &self.terminal_auto_continue_active_window(),
             &self.terminal_scheduled_input_avoid_window(),
@@ -889,8 +931,10 @@ impl SettingsManager {
         terminal_command_collections: Vec<TerminalCommandCollection>,
         terminal_tool_entries: Vec<TerminalToolEntry>,
         terminal_rename_presets: Vec<String>,
+        terminal_agent_commands: Vec<TerminalAgentCommand>,
         show_dot_entries: bool,
         show_all_workspace_sessions: bool,
+        terminal_new_session_behavior: String,
         desktop_terminal_soft_keyboard_enabled: bool,
         terminal_soft_keyboard_scale: f32,
         terminal_floating_button_offset_vh: f32,
@@ -905,6 +949,7 @@ impl SettingsManager {
         terminal_auto_continue_backoff_factor: f64,
         terminal_auto_continue_backoff_max_minutes: u32,
         terminal_auto_continue_respect_manual_interrupt: bool,
+        terminal_auto_compact_skip_codebuddy: bool,
         terminal_auto_continue_time_patterns: Vec<String>,
         terminal_auto_continue_active_window: String,
         terminal_scheduled_input_avoid_window: String,
@@ -982,6 +1027,10 @@ impl SettingsManager {
             .write()
             .expect("workspace settings poisoned") = terminal_rename_presets;
         *self
+            .terminal_agent_commands
+            .write()
+            .expect("workspace settings poisoned") = terminal_agent_commands;
+        *self
             .show_dot_entries
             .write()
             .expect("workspace settings poisoned") = show_dot_entries;
@@ -989,6 +1038,10 @@ impl SettingsManager {
             .show_all_workspace_sessions
             .write()
             .expect("workspace settings poisoned") = show_all_workspace_sessions;
+        *self
+            .terminal_new_session_behavior
+            .write()
+            .expect("workspace settings poisoned") = terminal_new_session_behavior;
         *self
             .desktop_terminal_soft_keyboard_enabled
             .write()
@@ -1046,6 +1099,10 @@ impl SettingsManager {
             .write()
             .expect("workspace settings poisoned") =
             terminal_auto_continue_respect_manual_interrupt;
+        *self
+            .terminal_auto_compact_skip_codebuddy
+            .write()
+            .expect("workspace settings poisoned") = terminal_auto_compact_skip_codebuddy;
         *self
             .terminal_auto_continue_time_patterns
             .write()

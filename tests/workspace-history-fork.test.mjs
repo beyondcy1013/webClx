@@ -51,8 +51,8 @@ assert.match(
 
 assert.match(
   appJs,
-  /async function launchWorkspaceHistoryPresetFork\(\)[\s\S]*?executeSpecifiedPreset\(\{[\s\S]*?action: "launch"[\s\S]*?presetId: selectedPresetId[\s\S]*?sessionAction: "fork"[\s\S]*?sessionId: target\.item\.sessionId[\s\S]*?sourceTerminalName: target\.item\.activeTerminalName/,
-  "workspace history preset fork should pass session and naming inputs through the shared preset action",
+  /async function launchWorkspaceHistoryPresetFork\(\)[\s\S]*?executeSpecifiedPreset\(\{[\s\S]*?action: "launch"[\s\S]*?temporary: true[\s\S]*?presetId: selectedPresetId[\s\S]*?sessionAction: "fork"[\s\S]*?sessionId: target\.item\.sessionId[\s\S]*?sourceTerminalName: target\.item\.activeTerminalName/,
+  "workspace history preset fork should use a temporary lease and pass session naming inputs through the shared preset action",
 );
 
 assert.match(

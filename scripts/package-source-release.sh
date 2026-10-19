@@ -35,7 +35,7 @@ rm -rf \
   "$STAGE/.qoder" \
   "$STAGE/.zcode" \
   "$STAGE/docs/cross-model-verification"
-rm -f "$STAGE/AGENTS.MD" "$STAGE/scripts/deploy-remote-servers.sh"
+rm -f "$STAGE/AGENTS.md" "$STAGE/AGENTS.MD" "$STAGE/scripts/deploy-remote-servers.sh"
 
 ARCHIVE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$STAGE/Cargo.toml" | head -n 1)"
 if [ "$ARCHIVE_VERSION" != "$VERSION" ]; then

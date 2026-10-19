@@ -22,7 +22,10 @@ async def main():
             headless=True,
             args=["--no-sandbox", "--disable-gpu"],
         )
-        context = await browser.new_context(viewport={"width": 1280, "height": 900})
+        context = await browser.new_context(
+            viewport={"width": 1280, "height": 900},
+            locale="zh-CN",
+        )
         page = await context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
         launched_agent_session = False
@@ -94,7 +97,7 @@ async def main():
             await route.fallback()
 
         await page.route("**/*", handle_agent_terminal_route)
-        await page.goto(f"{BASE_URL}/agent", wait_until="domcontentloaded")
+        await page.goto(f"{BASE_URL}/agent/profiles", wait_until="domcontentloaded")
         await page.wait_for_selector(".agent-profile-item")
         await page.wait_for_selector(".agent-terminal-shell.ready")
         restored_url = await page.locator(".agent-terminal-frame").get_attribute("src")
@@ -102,10 +105,13 @@ async def main():
         assert "agent_profile" not in restored_url, restored_url
         labels = await page.locator(".agent-profile-name").all_inner_texts()
         assert labels[:2] == ["代理设置", "工作代理"], labels
-        card_text = await page.locator('.agent-profile-item:has-text("智能体工厂")').inner_text()
+        legacy_card = page.locator('.agent-profile-item:has-text("智能体工厂")')
+        card_text = await legacy_card.inner_text()
         assert "api-1776989731419" not in card_text, card_text
         assert "$webclx-codex-api-terminal-ops" not in card_text, card_text
-        assert "/home/codes/webClx" not in card_text, card_text
+        assert "/home/codes/tools/webClx" not in card_text, card_text
+        assert "已由 DeepSeek Harness 接管" in card_text, card_text
+        assert await legacy_card.locator('a[href="/agent"]').count() == 1
         desktop_controls = await page.locator(".agent-profile-controls").first.evaluate(
             """element => ({
                 width: element.getBoundingClientRect().width,
@@ -164,9 +170,6 @@ async def main():
         await page.set_viewport_size({"width": 375, "height": 812})
         await page.reload(wait_until="domcontentloaded")
         await page.wait_for_selector(".agent-profile-item")
-        assert not await page.locator("#agent-sidebar").evaluate("el => el.classList.contains('open')")
-        await page.locator("[data-agent-sidebar-toggle]").first.click()
-        assert await page.locator("#agent-sidebar").evaluate("el => el.classList.contains('open')")
         assert await page.locator('.agent-profile-item:has-text("代理设置")').is_visible()
         mobile_controls = await page.locator(".agent-profile-controls").first.evaluate(
             """element => ({
@@ -182,7 +185,6 @@ async def main():
         assert not any(button["wraps"] for button in mobile_controls["buttons"])
         assert all(button["width"] <= 54 for button in mobile_controls["buttons"])
         results["mobile"] = {
-            "sidebar_open": True,
             "controls": mobile_controls,
             "overflow": await page.evaluate("document.documentElement.scrollWidth > innerWidth"),
         }

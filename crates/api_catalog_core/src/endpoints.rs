@@ -38,7 +38,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
             notes: PATH_SCOPE_NOTES,
             request_example: Some("/api/entries?path=src"),
             response_example: Some(
-                r#"{"path":"src","display_path":"/home/codes/webClx/src","parent_path":"","entries":[{"name":"main.rs","path":"src/main.rs","kind":"file","size":8192}]}"#,
+                r#"{"path":"src","display_path":"/home/codes/tools/webClx/src","parent_path":"","entries":[{"name":"main.rs","path":"src/main.rs","kind":"file","size":8192}]}"#,
             ),
         }],
     },
@@ -58,7 +58,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: FILE_READ_NOTES,
                 request_example: Some("/api/file?path=src/main.rs"),
                 response_example: Some(
-                    r#"{"path":"src/main.rs","display_path":"/home/codes/webClx/src/main.rs","editable":true,"size":8192,"content":"fn main() {}\n","message":null}"#,
+                    r#"{"path":"src/main.rs","display_path":"/home/codes/tools/webClx/src/main.rs","editable":true,"size":8192,"content":"fn main() {}\n","message":null}"#,
                 ),
             },
             ApiOperation {
@@ -90,7 +90,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
             notes: FILE_RENAME_NOTES,
             request_example: Some(r#"{"path":"src/main.rs","name":"lib.rs"}"#),
             response_example: Some(
-                r#"{"ok":true,"old_path":"src/main.rs","path":"src/lib.rs","display_path":"/home/codes/webClx/src/lib.rs","kind":"file"}"#,
+                r#"{"ok":true,"old_path":"src/main.rs","path":"src/lib.rs","display_path":"/home/codes/tools/webClx/src/lib.rs","kind":"file"}"#,
             ),
         }],
     },
@@ -110,7 +110,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: APPLY_PRESET_NOTES,
                 request_example: Some("/api/settings"),
                 response_example: Some(
-                    r#"{"workspace_dir":"/home/codes","default_workspace_dir":"/home/codes","host_name":"openeuler","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"favorite_paths":[],"workspace_history":[],"claude_model_options":[],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high","config_file":"/home/codes/webClx/webclx-settings.json"}"#,
+                    r#"{"workspace_dir":"/home/codes","default_workspace_dir":"/home/codes","host_name":"openeuler","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"favorite_paths":[],"workspace_history":[],"claude_model_options":[],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high","config_file":"/home/codes/tools/webClx/webclx-settings.json"}"#,
                 ),
             },
             ApiOperation {
@@ -123,10 +123,10 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 response_body: Some(SAVE_SETTINGS_RESPONSE_BODY),
                 notes: SETTINGS_SAVE_NOTES,
                 request_example: Some(
-                    r#"{"workspace_dir":"/home/codes/webClx","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"workspace_history":[{"path":"/home/codes/webClx","last_opened_at":1712640000123}],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high"}"#,
+                    r#"{"workspace_dir":"/home/codes/tools/webClx","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"workspace_history":[{"path":"/home/codes/tools/webClx","last_opened_at":1712640000123}],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high"}"#,
                 ),
                 response_example: Some(
-                    r#"{"ok":true,"workspace_dir":"/home/codes/webClx","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"favorite_paths":[],"workspace_history":[{"path":"/home/codes/webClx","last_opened_at":1712640000123}],"claude_model_options":[],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high"}"#,
+                    r#"{"ok":true,"workspace_dir":"/home/codes/tools/webClx","show_dot_entries":true,"show_all_workspace_sessions":true,"desktop_terminal_soft_keyboard_enabled":false,"terminal_soft_keyboard_scale":1.08,"favorite_paths":[],"workspace_history":[{"path":"/home/codes/tools/webClx","last_opened_at":1712640000123}],"claude_model_options":[],"codex_config_key":"model","codex_config_value":"gpt-5.4","codex_secondary_config_key":"model_reasoning_effort","codex_secondary_config_value":"high"}"#,
                 ),
             },
         ],
@@ -147,7 +147,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: APPLY_PRESET_NOTES,
                 request_example: Some("/api/auth/presets"),
                 response_example: Some(
-                    r#"{"auth_file":"/home/example/.codex/auth.json","config_file":"/home/example/.codex/config.toml","preset_file":"/home/codes/webClx/webclx-auth-presets.json","current_mode":"auth","current_auth":{"account_id":"acct_123456","short_id":"123456","email":"user@example.com","plan_type":"plus","last_refresh":"2026-04-09T00:00:00Z"},"current_api":null,"current_auth_error":null,"current_config_error":null,"presets":[]}"#,
+                    r#"{"auth_file":"/home/example/.codex/auth.json","config_file":"/home/example/.codex/config.toml","preset_file":"/home/codes/tools/webClx/webclx-auth-presets.json","current_mode":"auth","current_auth":{"account_id":"acct_123456","short_id":"123456","email":"user@example.com","plan_type":"plus","last_refresh":"2026-04-09T00:00:00Z"},"current_api":null,"current_auth_error":null,"current_config_error":null,"presets":[]}"#,
                 ),
             },
             ApiOperation {
@@ -184,7 +184,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: APPLY_PRESET_NOTES,
                 request_example: Some("/api/auth/api-presets"),
                 response_example: Some(
-                    r#"{"auth_file":"/home/example/.codex/auth.json","config_file":"/home/example/.codex/config.toml","preset_file":"/home/codes/webClx/webclx-api-presets.json","current_mode":"api","current_auth":null,"current_api":{"provider_id":"webclx_api","provider_name":"OpenAI","base_url":"https://api.openai.com/v1","wire_api":"responses","masked_api_key":"sk-...cret","preset_name":"OpenAI default","management_url":"https://platform.openai.com/api-keys"},"current_auth_error":null,"current_config_error":null,"presets":[]}"#,
+                    r#"{"auth_file":"/home/example/.codex/auth.json","config_file":"/home/example/.codex/config.toml","preset_file":"/home/codes/tools/webClx/webclx-api-presets.json","current_mode":"api","current_auth":null,"current_api":{"provider_id":"webclx_api","provider_name":"OpenAI","base_url":"https://api.openai.com/v1","wire_api":"responses","masked_api_key":"sk-...cret","preset_name":"OpenAI default","management_url":"https://platform.openai.com/api-keys"},"current_auth_error":null,"current_config_error":null,"presets":[]}"#,
                 ),
             },
             ApiOperation {
@@ -221,7 +221,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: APPLY_PRESET_NOTES,
                 request_example: Some("/api/auth/claude-presets"),
                 response_example: Some(
-                    r#"{"settings_file":"/home/example/.claude/settings.json","preset_file":"/home/codes/webClx/webclx-claude-presets.json","current_claude":{"provider_name":"Anthropic","base_url":"https://api.anthropic.com","management_url":"https://console.anthropic.com/settings/keys","default_haiku_model":"claude-3-5-haiku-latest","default_sonnet_model":"claude-sonnet-4-0","default_opus_model":"claude-opus-4-0","third_party_model":null,"masked_auth_token":"sk-ant-...cret","preset_name":"Anthropic default"},"current_settings_error":null,"presets":[]}"#,
+                    r#"{"settings_file":"/home/example/.claude/settings.json","preset_file":"/home/codes/tools/webClx/webclx-claude-presets.json","current_claude":{"provider_name":"Anthropic","base_url":"https://api.anthropic.com","management_url":"https://console.anthropic.com/settings/keys","default_haiku_model":"claude-3-5-haiku-latest","default_sonnet_model":"claude-sonnet-4-0","default_opus_model":"claude-opus-4-0","third_party_model":null,"masked_auth_token":"sk-ant-...cret","preset_name":"Anthropic default"},"current_settings_error":null,"presets":[]}"#,
                 ),
             },
             ApiOperation {
@@ -518,10 +518,10 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 "A process or structured-output failure returns HTTP 200 with ok=false and error details; request validation returns HTTP 400.",
             ],
             request_example: Some(
-                r#"{"preset":{"name":"DeepSeek Codex"},"cwd":"/home/codes/webClx","task":"Review the change without modifying files.","timeout_secs":600,"reasoning_effort":"high","output_schema":{"type":"object"}}"#,
+                r#"{"preset":{"name":"DeepSeek Codex"},"cwd":"/home/codes/tools/webClx","task":"Review the change without modifying files.","timeout_secs":600,"reasoning_effort":"high","output_schema":{"type":"object"}}"#,
             ),
             response_example: Some(
-                r#"{"ok":true,"preset":{"id":"api-1712640000","name":"DeepSeek Codex","index":25,"model":"deepseek-v4-pro"},"cwd":"/home/codes/webClx","sandbox":"read-only","ephemeral":true,"elapsed_ms":1234,"exit_code":0,"output":"{\"status\":\"agree\"}","structured_output":{"status":"agree"}}"#,
+                r#"{"ok":true,"preset":{"id":"api-1712640000","name":"DeepSeek Codex","index":25,"model":"deepseek-v4-pro"},"cwd":"/home/codes/tools/webClx","sandbox":"read-only","ephemeral":true,"elapsed_ms":1234,"exit_code":0,"output":"{\"status\":\"agree\"}","structured_output":{"status":"agree"}}"#,
             ),
         }],
     },
@@ -582,7 +582,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
             notes: APPLY_PRESET_NOTES,
             request_example: Some("/api/auth/claude-presets/claude-1712640000/apply-opencode"),
             response_example: Some(
-                r#"{"ok":true,"preset_id":"claude-1712640000","name":"Anthropic default","settings_file":"/home/codes/webClx/opencode.json"}"#,
+                r#"{"ok":true,"preset_id":"claude-1712640000","name":"Anthropic default","settings_file":"/home/codes/tools/webClx/opencode.json"}"#,
             ),
         }],
     },
@@ -604,10 +604,10 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 "Use /api/build/deploy when a successful compile must be followed by a project-owned install script.",
             ],
             request_example: Some(
-                r#"{"source_terminal_name":"signIn_5","source_terminal_id":"s1547","source_tmux_session":"webclx_s1547","project_path":"signIn","project":"signIn","project_dir":"/home/codes/signIn","command":["cargo","build","--release"],"note":"Codex finished edits; please continue after compile","debounce_secs":0}"#,
+                r#"{"source_terminal_name":"signIn_5","source_terminal_id":"s1547","source_tmux_session":"webclx_s1547","project_path":"signIn","project":"signIn","project_dir":"/home/codes/apps/signIn","command":["cargo","build","--release"],"note":"Codex finished edits; please continue after compile","debounce_secs":0}"#,
             ),
             response_example: Some(
-                r#"{"ok":true,"request_id":"1712640000000000000-1234","request_kind":"compile","project":"signIn","project_dir":"/home/codes/signIn","source_terminal_id":"s1547","source_terminal_name":"signIn_5","source_tmux_session":"webclx_s1547","queued":true,"debounce_secs":0,"command":["cargo","build","--release"],"install_command":[],"audit_paths":[],"queue_dir":"/home/codes/webClx/.webclx-compile-queue"}"#,
+                r#"{"ok":true,"request_id":"1712640000000000000-1234","request_kind":"compile","project":"signIn","project_dir":"/home/codes/apps/signIn","source_terminal_id":"s1547","source_terminal_name":"signIn_5","source_tmux_session":"webclx_s1547","queued":true,"debounce_secs":0,"command":["cargo","build","--release"],"install_command":[],"audit_paths":[],"queue_dir":"/home/codes/tools/webClx/.webclx-compile-queue"}"#,
             ),
         }],
     },
@@ -631,10 +631,10 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 "Build logs and install audit reports are retained under the webClx-owned queue directory, never under project_dir.",
             ],
             request_example: Some(
-                r#"{"source_terminal_name":"signIn_5","source_terminal_id":"s1547","source_tmux_session":"webclx_s1547","project_path":"signIn","project":"signIn","project_dir":"/home/codes/signIn","command":["cargo","build","--release"],"install_command":["bash","scripts/install-service.sh"],"audit_paths":["/home/bin/signIn/signIn"],"note":"Codex finished edits; please deploy","debounce_secs":0}"#,
+                r#"{"source_terminal_name":"signIn_5","source_terminal_id":"s1547","source_tmux_session":"webclx_s1547","project_path":"signIn","project":"signIn","project_dir":"/home/codes/apps/signIn","command":["cargo","build","--release"],"install_command":["bash","scripts/install-service.sh"],"audit_paths":["/home/bin/signIn/signIn"],"note":"Codex finished edits; please deploy","debounce_secs":0}"#,
             ),
             response_example: Some(
-                r#"{"ok":true,"request_id":"1712640000000000000-1234","request_kind":"deploy","project":"signIn","project_dir":"/home/codes/signIn","source_terminal_id":"s1547","source_terminal_name":"signIn_5","source_tmux_session":"webclx_s1547","queued":true,"debounce_secs":0,"command":["cargo","build","--release"],"install_command":["bash","scripts/install-service.sh"],"audit_paths":["/home/bin/signIn/signIn"]}"#,
+                r#"{"ok":true,"request_id":"1712640000000000000-1234","request_kind":"deploy","project":"signIn","project_dir":"/home/codes/apps/signIn","source_terminal_id":"s1547","source_terminal_name":"signIn_5","source_tmux_session":"webclx_s1547","queued":true,"debounce_secs":0,"command":["cargo","build","--release"],"install_command":["bash","scripts/install-service.sh"],"audit_paths":["/home/bin/signIn/signIn"]}"#,
             ),
         }],
     },
@@ -658,6 +658,26 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
             response_example: Some(
                 r#"{"ok":true,"project":"webClx","queue_dir":"/home/bin/webclx/compile","pending_count":2,"run_count":1,"latest_log":"/home/bin/webclx/compile/runs/20260612T095400-1234/run.log","pending_requests":[],"runs":[{"run_id":"20260612T095400-1234","status":"success","request_count":2,"projects":["webClx"],"targets":["webClx_1"],"log_path":"/home/bin/webclx/compile/runs/20260612T095400-1234/run.log"}]}"#,
             ),
+        }],
+    },
+    ApiEndpoint {
+        path: "/api/build/compile/history",
+        methods: DELETE_ONLY,
+        description: "Clear completed compile run history while preserving active and pending work.",
+        operations: &[ApiOperation {
+            method: "DELETE",
+            description: "Delete all successful, failed, and timed-out compile run records.",
+            success_status: 200,
+            path_params: EMPTY_FIELDS,
+            query_params: EMPTY_FIELDS,
+            request_body: None,
+            response_body: Some(CLEAR_COMPILE_HISTORY_RESPONSE_BODY),
+            notes: &[
+                "Running and stalled run directories are preserved.",
+                "Pending compile requests are not modified.",
+            ],
+            request_example: Some("DELETE /api/build/compile/history"),
+            response_example: Some(r#"{"ok":true,"deleted_count":12}"#),
         }],
     },
     ApiEndpoint {
@@ -702,7 +722,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: TERMINAL_LIST_NOTES,
                 request_example: Some("/api/terminal/sessions?path=src"),
                 response_example: Some(
-                    r#"{"all":false,"path":"src","display_path":"/home/codes/webClx/src","sessions":[{"id":"1","name":"webClx-1","title":"cargo test","path":"src","display_path":"/home/codes/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}]}"#,
+                    r#"{"all":false,"path":"src","display_path":"/home/codes/tools/webClx/src","sessions":[{"id":"1","name":"webClx-1","title":"cargo test","path":"src","display_path":"/home/codes/tools/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}]}"#,
                 ),
             },
             ApiOperation {
@@ -716,7 +736,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: TERMINAL_CREATE_NOTES,
                 request_example: Some(r#"{"path":"src"}"#),
                 response_example: Some(
-                    r#"{"id":"1","name":"webClx-1","title":null,"path":"src","display_path":"/home/codes/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712640000123}"#,
+                    r#"{"id":"1","name":"webClx-1","title":null,"path":"src","display_path":"/home/codes/tools/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712640000123}"#,
                 ),
             },
         ],
@@ -737,7 +757,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: TERMINAL_RENAME_NOTES,
                 request_example: Some(r#"PUT /api/terminal/sessions/1 {"name":"backend-test"}"#),
                 response_example: Some(
-                    r#"{"id":"1","name":"backend-test","title":"cargo test","path":"src","display_path":"/home/codes/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}"#,
+                    r#"{"id":"1","name":"backend-test","title":"cargo test","path":"src","display_path":"/home/codes/tools/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}"#,
                 ),
             },
             ApiOperation {
@@ -751,7 +771,7 @@ pub(crate) static API_ENDPOINTS: &[ApiEndpoint] = &[
                 notes: APPLY_PRESET_NOTES,
                 request_example: Some("/api/terminal/sessions/1"),
                 response_example: Some(
-                    r#"{"id":"1","name":"backend-test","title":"cargo test","path":"src","display_path":"/home/codes/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}"#,
+                    r#"{"id":"1","name":"backend-test","title":"cargo test","path":"src","display_path":"/home/codes/tools/webClx/src","alive":true,"created_at":1712640000123,"last_opened_at":1712643600456}"#,
                 ),
             },
         ],

@@ -1,4 +1,7 @@
 const TERMINAL_IN_PLACE_PRESET_EXIT_TIMEOUT_MS = 12000;
+// Codex may release the rollout writer shortly after the shell prompt is redrawn.
+// Keep the in-place resume path aligned with the backend interrupt/resume flow.
+const TERMINAL_IN_PLACE_PRESET_WRITER_SETTLE_MS = 250;
 
 let terminalInPlacePresetTarget = null;
 let terminalInPlacePresetTrigger = null;
@@ -80,7 +83,7 @@ function waitForTerminalInPlacePresetShell(
   });
 }
 
-async function executeTerminalInPlacePresetSwitch(target, presetSelection) {
+async function executeTerminalInPlacePresetSwitch(target, presetSelection, options = {}) {
   const selection = presetSelection && typeof presetSelection === "object"
     ? presetSelection
     : { id: presetSelection };
@@ -90,16 +93,27 @@ async function executeTerminalInPlacePresetSwitch(target, presetSelection) {
     throw new Error("终端、Session 或预设无效。");
   }
 
-  if (!target.agentExited) {
+  if (!target.agentExited && !(target.exitWaitTimedOut && options.ignoreExitError === true)) {
     const initialLine = terminalInPlacePresetCursorLine(target.sourceContext);
     target.onStage?.("exiting");
     const exitSent = sendSlashCommand("/exit", { sessionId: target.sessionId });
     if (!exitSent) {
       throw new Error("无法向当前 Agent 发送 /exit。");
     }
-    await mobileKeySendQueue;
+    await (typeof mobileKeySendQueue === "undefined" ? Promise.resolve() : mobileKeySendQueue);
     await waitForTerminalInPlacePresetShell(target.sourceContext, initialLine);
     target.agentExited = true;
+  }
+  if (target.exitWaitTimedOut && options.ignoreExitError === true) {
+    target.agentExited = true;
+  }
+
+  if (sessionAction === "resume" && !target.writerSettled) {
+    await new Promise((resolve) => window.setTimeout(
+      resolve,
+      TERMINAL_IN_PLACE_PRESET_WRITER_SETTLE_MS,
+    ));
+    target.writerSettled = true;
   }
 
   target.onStage?.(sessionAction === "new" ? "starting" : "resuming");
@@ -108,29 +122,19 @@ async function executeTerminalInPlacePresetSwitch(target, presetSelection) {
     sessionAction,
     sessionId: sessionAction === "resume" ? target.resumeId : "",
   });
-  const lease = await acquireSpecifiedPresetLease({
-    agent: target.agent,
-    presetId: normalizedPresetId,
-    projectPath: target.cwd,
-    owner: "terminal-in-place-preset",
+  const temporaryCommand = specifiedPresetRunCommand(
+    target.agent,
+    normalizedPresetId,
+    agentCommand,
+  );
+  const resumed = await sendTerminalAutoTypedInput(temporaryCommand, {
+    sessionId: target.sessionId,
+    throwOnError: true,
   });
-  try {
-    const resumed = await sendTerminalAutoTypedInput(agentCommand, {
-      sessionId: target.sessionId,
-      throwOnError: true,
-    });
-    if (!resumed) {
-      throw new Error("resume 命令为空，未发送。");
-    }
-    await waitForSpecifiedPresetAgentStart(target.sessionId, lease.lease_id);
-    await releaseSpecifiedPresetLease(lease.lease_id);
-    return agentCommand;
-  } catch (error) {
-    try {
-      await releaseSpecifiedPresetLease(lease.lease_id);
-    } catch {}
-    throw error;
+  if (!resumed) {
+    throw new Error("resume 命令为空，未发送。");
   }
+  return temporaryCommand;
 }
 
 async function loadTerminalInPlacePresetOptions(agent) {
@@ -162,6 +166,35 @@ async function loadTerminalInPlacePresetOptions(agent) {
   preset.disabled = false;
 }
 
+async function resolveTerminalInPlacePresetSessionAction({
+  agent,
+  cwd,
+  requestedAction,
+  resumeId,
+}) {
+  if (requestedAction === "new" || specifiedPresetAgent(agent) !== "codex") {
+    return requestedAction === "new" ? "new" : "resume";
+  }
+
+  try {
+    const normalizedCwd = String(cwd || "").trim();
+    const endpoint = normalizedCwd
+      ? `/api/terminal/codex-conversations?cwd=${encodeURIComponent(normalizedCwd)}`
+      : "/api/terminal/codex-conversations";
+    const response = await requestJson(endpoint);
+    const normalizedResumeId = String(resumeId || "").trim().toLowerCase();
+    const persisted = Array.isArray(response?.conversations)
+      && response.conversations.some(
+        (conversation) => String(conversation?.session_id || "").trim().toLowerCase()
+          === normalizedResumeId,
+      );
+    return persisted ? "resume" : "new";
+  } catch {
+    // Preserve the existing resume behavior if persistence cannot be checked.
+    return "resume";
+  }
+}
+
 async function openTerminalInPlacePresetSwitchDialog(trigger = null, options = {}) {
   if (terminalInPlacePresetOpening) {
     updateStatus("正在读取当前 Session…", "info");
@@ -188,7 +221,13 @@ async function openTerminalInPlacePresetSwitchDialog(trigger = null, options = {
     }
 
     const agent = specifiedPresetAgent(detected.program);
-    const sessionAction = options.sessionAction === "new" ? "new" : "resume";
+    const requestedAction = options.sessionAction === "new" ? "new" : "resume";
+    const sessionAction = await resolveTerminalInPlacePresetSessionAction({
+      agent,
+      requestedAction,
+      resumeId: detected.resumeId,
+    });
+    const unpersistedSession = requestedAction === "resume" && sessionAction === "new";
     terminalInPlacePresetTarget = {
       agent,
       cwd: String(sessionPath(sourceSession) ?? state.currentPath),
@@ -210,7 +249,11 @@ async function openTerminalInPlacePresetSwitchDialog(trigger = null, options = {
     }
     if (dom.agent) dom.agent.value = agent === "claude" ? "Claude" : "Codex";
     if (dom.session) {
-      dom.session.value = sessionAction === "resume" ? detected.resumeId : "新会话（不恢复）";
+      dom.session.value = sessionAction === "resume"
+        ? detected.resumeId
+        : unpersistedSession
+          ? "新会话（当前 Session 尚未持久化）"
+          : "新会话（不恢复）";
     }
     if (dom.submit) {
       dom.submit.textContent = sessionAction === "new" ? "切换并新建" : "切换并恢复";
@@ -225,10 +268,12 @@ async function openTerminalInPlacePresetSwitchDialog(trigger = null, options = {
       setTerminalInPlacePresetStatus(`读取预设失败：${error.message}`, "warn");
     }
     updateStatus(
-      sessionAction === "new"
+      unpersistedSession
+        ? "当前 Session 尚无可恢复的对话记录，将使用所选预设启动新会话。"
+        : sessionAction === "new"
         ? "已识别当前 Agent，请选择新会话使用的预设。"
         : `已保存 Session ${shortResumeId(detected.resumeId)}，请选择预设。`,
-      "ok",
+      unpersistedSession ? "info" : "ok",
     );
   } catch (error) {
     terminalInPlacePresetTarget = null;

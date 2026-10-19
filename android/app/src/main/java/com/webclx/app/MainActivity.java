@@ -7,16 +7,20 @@ import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.content.res.TypedArray;
 import android.database.Cursor;
 import android.graphics.Color;
+import android.graphics.Rect;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -30,8 +34,10 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -49,6 +55,7 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
@@ -65,15 +72,25 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
 
 public final class MainActivity extends Activity {
     static final String APK_MIME_TYPE = "application/vnd.android.package-archive";
+    private static final int HARNESS_PORT = 3080;
     private static final int FILE_CHOOSER_REQUEST = 7001;
     private static final int STORAGE_PERMISSION_REQUEST = 7002;
+
+    private static final String STATE_SELECTED_SOURCE = "selected_source";
+    private static final String STATE_SELECTED_ORIGIN = "selected_source_origin";
+    private static final String STATE_LOADED_URL = "last_loaded_url";
+    private static final int MAX_RENDER_PROCESS_RETRIES = 3;
 
     private final ExecutorService resolverExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService probeExecutor =
         Executors.newFixedThreadPool(SourceRegistry.URLS.length);
+    private final ExecutorService updateVerifyExecutor = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService updatePollExecutor =
+        Executors.newSingleThreadScheduledExecutor();
     private final boolean[] rejectedSources = new boolean[SourceRegistry.URLS.length];
     private final BroadcastReceiver downloadCompleteReceiver = new BroadcastReceiver() {
         @Override
@@ -93,6 +110,7 @@ public final class MainActivity extends Activity {
             }
         }
     };
+    private FrameLayout contentRoot;
     private WebView webView;
     private View connectionPanel;
     private ProgressBar connectionProgress;
@@ -104,11 +122,22 @@ public final class MainActivity extends Activity {
     private String selectedSourceOrigin;
     private boolean sourceResolutionInProgress;
     private boolean sourceReevaluationInProgress;
+    private boolean sourceReevaluationPending;
     private boolean activityResumed;
+    private boolean webViewPausedSinceResume;
+    private volatile boolean systemKeyboardVisible;
     private boolean downloadReceiverRegistered;
     private boolean automaticUpdateCheckStarted;
     private boolean updateVerificationInProgress;
     private AlertDialog updateProgressDialog;
+    private ProgressBar updateProgressBar;
+    private long updateProgressDownloadId = UpdateManager.NO_DOWNLOAD;
+    private int updateProgressGeneration;
+    private Future<?> updateCheckFuture;
+    private UpdateManager.UpdateManifest pendingUpdateManifest;
+    private int sourceSelectionGeneration;
+    private String lastLoadedUrl;
+    private int renderProcessFailures;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private String createdThemeMode;
     private ConnectivityManager connectivityManager;
@@ -119,29 +148,126 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         createdThemeMode = AppPreferences.themeMode(this);
         AppPreferences.applyTheme(this);
+        applyScreenOrientation(AppPreferences.screenOrientation(this));
         super.onCreate(savedInstanceState);
 
         int contentBackgroundColor = resolveWindowBackgroundColor();
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(contentBackgroundColor);
+        contentRoot = new FrameLayout(this);
+        contentRoot.setBackgroundColor(contentBackgroundColor);
 
-        webView = new WebView(this);
-        webView.setBackgroundColor(contentBackgroundColor);
-        root.addView(webView, new FrameLayout.LayoutParams(
+        webView = createWebView(contentBackgroundColor);
+        contentRoot.addView(webView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
         connectionPanel = createConnectionPanel();
-        root.addView(connectionPanel, new FrameLayout.LayoutParams(
+        contentRoot.addView(connectionPanel, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
-        setContentView(root);
+        setContentView(contentRoot);
 
         registerDownloadCompleteReceiver();
         configureWebView();
         registerNetworkCallback();
-        beginSourceResolution(true);
+        if (!restoreInstanceState(savedInstanceState)) {
+            beginSourceResolution(true);
+        }
+    }
+
+    // minSdk is 24, so isDestroyed() (API 17) is always available.
+    private boolean isActivityUsable() {
+        return !destroyed && !isFinishing() && !isDestroyed();
+    }
+
+    private WebView createWebView(int backgroundColor) {
+        WebView view = new WebView(this);
+        view.setBackgroundColor(backgroundColor);
+        bindKeyboardVisibility(view);
+        return view;
+    }
+
+    private void bindKeyboardVisibility(WebView view) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // API 30+ reports the IME window directly; no geometry guessing.
+            view.setOnApplyWindowInsetsListener((target, insets) -> {
+                systemKeyboardVisible = insets.isVisible(WindowInsets.Type.ime());
+                return target.onApplyWindowInsets(insets);
+            });
+            return;
+        }
+        view.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
+            Rect visibleFrame = new Rect();
+            view.getWindowVisibleDisplayFrame(visibleFrame);
+            int rootHeight = view.getRootView().getHeight();
+            int obscuredHeight = Math.max(0, rootHeight - visibleFrame.bottom);
+            systemKeyboardVisible = rootHeight > 0 && obscuredHeight > rootHeight * 0.15;
+        });
+    }
+
+    private boolean restoreInstanceState(Bundle savedInstanceState) {
+        if (savedInstanceState == null || !savedInstanceState.containsKey(STATE_LOADED_URL)) {
+            return false;
+        }
+        String savedUrl = savedInstanceState.getString(STATE_LOADED_URL);
+        String savedOrigin = savedInstanceState.getString(STATE_SELECTED_ORIGIN);
+        int savedSource = savedInstanceState.getInt(STATE_SELECTED_SOURCE, -1);
+        if (!isRestorableSelectedPage(savedUrl, savedOrigin, savedSource)) {
+            return false;
+        }
+        // Only assign selection state after the bundle passed full validation.
+        selectedSource = savedSource;
+        selectedSourceOrigin = savedOrigin;
+        lastLoadedUrl = savedUrl;
+        connectionMessage.setText(R.string.connecting);
+        webView.loadUrl(savedUrl);
+        return true;
+    }
+
+    /**
+     * A saved page is restorable only when it still belongs to the saved
+     * selected origin — including custom sources picked via openInWebView —
+     * or to the debug harness port on the selected host.  The persisted
+     * source index must agree with the origin it names, and anything else
+     * (other trusted sites, malformed URIs, user-info URLs) is rejected so
+     * restoration never silently expands navigation scope.
+     */
+    private boolean isRestorableSelectedPage(String url, String origin, int sourceIndex) {
+        if (url == null || url.isEmpty() || origin == null || origin.isEmpty()) {
+            return false;
+        }
+        Uri selected = Uri.parse(origin);
+        String selectedScheme = selected.getScheme();
+        if (!("http".equalsIgnoreCase(selectedScheme) || "https".equalsIgnoreCase(selectedScheme))
+            || selected.getHost() == null || selected.getHost().isEmpty()
+            || selected.getUserInfo() != null) {
+            return false;
+        }
+        if (sourceIndexForOrigin(selected) != sourceIndex) {
+            return false;
+        }
+        Uri page = Uri.parse(url);
+        String pageScheme = page.getScheme();
+        if (!("http".equalsIgnoreCase(pageScheme) || "https".equalsIgnoreCase(pageScheme))
+            || page.getHost() == null || page.getHost().isEmpty()
+            || page.getUserInfo() != null) {
+            return false;
+        }
+        if (equalsIgnoreCase(page.getScheme(), selected.getScheme())
+            && equalsIgnoreCase(page.getHost(), selected.getHost())
+            && effectivePort(page) == effectivePort(selected)) {
+            return true;
+        }
+        return equalsIgnoreCase(page.getHost(), selected.getHost())
+            && effectivePort(page) == HARNESS_PORT;
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        outState.putInt(STATE_SELECTED_SOURCE, selectedSource);
+        outState.putString(STATE_SELECTED_ORIGIN, selectedSourceOrigin);
+        outState.putString(STATE_LOADED_URL, lastLoadedUrl);
     }
 
     private int resolveWindowBackgroundColor() {
@@ -157,11 +283,12 @@ public final class MainActivity extends Activity {
 
     private void registerDownloadCompleteReceiver() {
         IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(downloadCompleteReceiver, filter, Context.RECEIVER_EXPORTED);
-        } else {
-            registerReceiver(downloadCompleteReceiver, filter);
-        }
+        ContextCompat.registerReceiver(
+            this,
+            downloadCompleteReceiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        );
         downloadReceiverRegistered = true;
     }
 
@@ -177,22 +304,31 @@ public final class MainActivity extends Activity {
     }
 
     private void rememberPendingApkDownload(long downloadId) {
-        downloadPreferences().edit()
+        UpdateManager.mutatePreferences(this, editor -> editor
             .putLong(UpdateManager.PENDING_APK_DOWNLOAD_ID, downloadId)
             .putBoolean(UpdateManager.WAITING_FOR_INSTALL_PERMISSION, false)
             .remove(UpdateManager.EXPECTED_SHA256)
             .remove(UpdateManager.EXPECTED_SIZE)
             .remove(UpdateManager.EXPECTED_VERSION_CODE)
             .remove(UpdateManager.VERIFIED_DOWNLOAD_ID)
-            .remove(UpdateManager.INSTALLER_LAUNCHED_DOWNLOAD_ID)
-            .apply();
+            .remove(UpdateManager.VERIFIED_APK_PATH)
+            .remove(UpdateManager.INSTALLER_LAUNCHED_DOWNLOAD_ID));
     }
 
-    private void clearPendingApkDownload() {
-        UpdateManager.clearPending(this);
+    private void clearPendingApkDownload(long downloadId) {
+        UpdateManager.clearPending(this, downloadId);
     }
 
     private boolean installPendingApk(boolean requestPermission) {
+        if (!isActivityUsable()) {
+            return true;
+        }
+        if (!activityResumed) {
+            // Nothing in this method may touch UI (installer, permission
+            // settings, dialogs) while paused; a verified commit made in the
+            // background is picked up by the next onResume.
+            return true;
+        }
         long downloadId = pendingApkDownloadId();
         if (downloadId == UpdateManager.NO_DOWNLOAD) {
             return false;
@@ -202,14 +338,14 @@ public final class MainActivity extends Activity {
             -1
         );
         if (expectedVersion > 0 && expectedVersion <= UpdateManager.currentVersionCode(this)) {
-            UpdateManager.clearPending(this);
+            UpdateManager.clearPending(this, downloadId);
             return false;
         }
 
         DownloadManager manager = downloadManager();
         int status = downloadStatus(manager, downloadId);
         if (status == DownloadManager.STATUS_FAILED) {
-            clearPendingApkDownload();
+            clearPendingApkDownload(downloadId);
             Toast.makeText(this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
             return true;
         }
@@ -236,7 +372,9 @@ public final class MainActivity extends Activity {
         }
 
         String downloadedMimeType = manager.getMimeTypeForDownloadedFile(downloadId);
-        String verifiedPath = preferences.getString(UpdateManager.VERIFIED_APK_PATH, "");
+        String verifiedPath = verifiedDownloadId == downloadId
+            ? preferences.getString(UpdateManager.VERIFIED_APK_PATH, "")
+            : "";
         Uri apkUri = !verifiedPath.isEmpty()
             ? FileProvider.getUriForFile(
                 this,
@@ -245,7 +383,7 @@ public final class MainActivity extends Activity {
             )
             : manager.getUriForDownloadedFile(downloadId);
         if (!APK_MIME_TYPE.equalsIgnoreCase(downloadedMimeType) || apkUri == null) {
-            clearPendingApkDownload();
+            clearPendingApkDownload(downloadId);
             Toast.makeText(this, R.string.invalid_apk_download, Toast.LENGTH_LONG).show();
             return true;
         }
@@ -283,57 +421,113 @@ public final class MainActivity extends Activity {
         if (updateVerificationInProgress) {
             return;
         }
+        // Capture the expected fields atomically before the worker starts; the
+        // validator never touches shared preferences afterwards.
+        UpdateManager.PendingUpdateSnapshot snapshot =
+            UpdateManager.pendingSnapshot(this, downloadId);
+        if (snapshot == null) {
+            // Pending state moved on already; just re-evaluate whatever is current.
+            installPendingApk(requestPermission);
+            return;
+        }
         updateVerificationInProgress = true;
         Toast.makeText(this, R.string.update_verifying, Toast.LENGTH_SHORT).show();
-        resolverExecutor.execute(() -> {
-            int error = validatePendingUpdate(downloadId);
-            runOnUiThread(() -> {
+        updateVerifyExecutor.execute(() -> {
+            ValidationResult result = validatePendingUpdate(snapshot);
+            mainHandler.post(() -> {
                 updateVerificationInProgress = false;
-                if (error != 0) {
-                    UpdateManager.clearPending(this);
+                if (!isActivityUsable()) {
+                    deleteStagedUpdate(result.stagedPath);
+                    return;
+                }
+                // A newer download may have replaced this one while
+                // verification ran; never commit or clear state that belongs
+                // to another pending id. The newer pending may have been
+                // blocked behind the in-flight flag, so start its normal
+                // flow now (installPendingApk is id-safe and only launches
+                // the installer while resumed).
+                if (!UpdateManager.isCurrentPending(this, snapshot.downloadId)) {
+                    deleteStagedUpdate(result.stagedPath);
+                    installPendingApk(requestPermission);
+                    return;
+                }
+                if (result.error != 0) {
+                    UpdateManager.clearPending(this, snapshot.downloadId);
                     if (updateProgressDialog != null) {
                         updateProgressDialog.dismiss();
                         updateProgressDialog = null;
                     }
-                    Toast.makeText(this, error, Toast.LENGTH_LONG).show();
+                    Toast.makeText(this, result.error, Toast.LENGTH_LONG).show();
                     return;
                 }
-                downloadPreferences().edit()
-                    .putLong(UpdateManager.VERIFIED_DOWNLOAD_ID, downloadId)
-                    .apply();
+                if (!UpdateManager.commitVerifiedApk(this, snapshot.downloadId, result.stagedPath)) {
+                    deleteStagedUpdate(result.stagedPath);
+                    return;
+                }
+                // Commit may run while paused; installPendingApk only launches
+                // the installer when the activity is resumed and re-runs on
+                // the next onResume.
                 installPendingApk(requestPermission);
             });
         });
     }
 
-    private int validatePendingUpdate(long downloadId) {
-        SharedPreferences preferences = downloadPreferences();
-        String expectedSha256 = preferences.getString(UpdateManager.EXPECTED_SHA256, "");
-        long expectedSize = preferences.getLong(UpdateManager.EXPECTED_SIZE, -1);
-        long expectedVersionCode = preferences.getLong(UpdateManager.EXPECTED_VERSION_CODE, -1);
-        Uri source = downloadManager().getUriForDownloadedFile(downloadId);
-        if (source == null || expectedSize <= 0 || expectedVersionCode <= 0) {
-            return R.string.update_integrity_failed;
+    private void deleteStagedUpdate(String path) {
+        if (path == null || path.isEmpty()) {
+            return;
         }
-        File updateDir = new File(getFilesDir(), "updates");
-        File staged = new File(updateDir, "verified-webclx-update.apk");
         try {
-            if (!updateDir.isDirectory() && !updateDir.mkdirs()) {
-                return R.string.update_integrity_failed;
+            File updatesDir = new File(getFilesDir(), "updates").getCanonicalFile();
+            File file = new File(path).getCanonicalFile();
+            if (file.getName().startsWith("verified-webclx-update-")
+                && updatesDir.equals(file.getParentFile())) {
+                file.delete();
             }
+        } catch (Exception ignored) {
+            // Only ever delete app-owned staged update files.
+        }
+    }
+
+    private ValidationResult validatePendingUpdate(UpdateManager.PendingUpdateSnapshot snapshot) {
+        String expectedSha256 = snapshot.sha256;
+        long expectedSize = snapshot.size;
+        long expectedVersionCode = snapshot.versionCode;
+        File updateDir = new File(getFilesDir(), "updates");
+        File staged = null;
+        boolean keepStaged = false;
+        try {
+            // DownloadManager queries can throw; keep everything inside try so
+            // a stale/destroyed worker always returns a bounded result.
+            Uri source = downloadManager().getUriForDownloadedFile(snapshot.downloadId);
+            if (source == null || expectedSize <= 0 || expectedVersionCode <= 0) {
+                return new ValidationResult(null, R.string.update_integrity_failed);
+            }
+            if (!updateDir.isDirectory() && !updateDir.mkdirs()) {
+                return new ValidationResult(null, R.string.update_integrity_failed);
+            }
+            // Unique per-attempt staging: an overlapping task for the same
+            // download id can never collide with or delete this file.
+            staged = File.createTempFile(
+                "verified-webclx-update-" + snapshot.downloadId + "-",
+                ".apk",
+                updateDir
+            );
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             long copied = 0;
             try (InputStream input = getContentResolver().openInputStream(source);
                  FileOutputStream output = new FileOutputStream(staged, false)) {
                 if (input == null) {
-                    return R.string.update_integrity_failed;
+                    return new ValidationResult(staged.getAbsolutePath(), R.string.update_integrity_failed);
                 }
                 byte[] buffer = new byte[32 * 1024];
                 int read;
                 while ((read = input.read(buffer)) >= 0) {
+                    if (Thread.currentThread().isInterrupted() || destroyed) {
+                        return new ValidationResult(staged.getAbsolutePath(), R.string.update_integrity_failed);
+                    }
                     copied += read;
                     if (copied > expectedSize) {
-                        return R.string.update_integrity_failed;
+                        return new ValidationResult(staged.getAbsolutePath(), R.string.update_integrity_failed);
                     }
                     digest.update(buffer, 0, read);
                     output.write(buffer, 0, read);
@@ -341,7 +535,7 @@ public final class MainActivity extends Activity {
                 output.getFD().sync();
             }
             if (copied != expectedSize || !hex(digest.digest()).equals(expectedSha256)) {
-                return R.string.update_integrity_failed;
+                return new ValidationResult(staged.getAbsolutePath(), R.string.update_integrity_failed);
             }
             int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
                 ? PackageManager.GET_SIGNING_CERTIFICATES
@@ -356,17 +550,17 @@ public final class MainActivity extends Activity {
                 || packageVersionCode(archive) != expectedVersionCode
                 || expectedVersionCode <= packageVersionCode(installed)
                 || !signatureDigests(archive).equals(signatureDigests(installed))) {
-                return R.string.update_identity_failed;
+                return new ValidationResult(staged.getAbsolutePath(), R.string.update_identity_failed);
             }
-            downloadPreferences().edit()
-                .putString(UpdateManager.VERIFIED_APK_PATH, staged.getAbsolutePath())
-                .apply();
-            return 0;
+            keepStaged = true;
+            return new ValidationResult(staged.getAbsolutePath(), 0);
         } catch (Exception error) {
-            return R.string.update_integrity_failed;
+            return new ValidationResult(
+                staged == null ? null : staged.getAbsolutePath(),
+                R.string.update_integrity_failed
+            );
         } finally {
-            if (!downloadPreferences().contains(UpdateManager.VERIFIED_APK_PATH)
-                && staged.exists()) {
+            if (!keepStaged && staged != null && staged.exists()) {
                 staged.delete();
             }
         }
@@ -409,7 +603,7 @@ public final class MainActivity extends Activity {
         DownloadManager.Query query = new DownloadManager.Query().setFilterById(downloadId);
         try (Cursor cursor = manager.query(query)) {
             if (cursor == null || !cursor.moveToFirst()) {
-                clearPendingApkDownload();
+                clearPendingApkDownload(downloadId);
                 return -1;
             }
             int statusColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS);
@@ -500,7 +694,12 @@ public final class MainActivity extends Activity {
         retryButton.setText(R.string.retry);
         retryButton.setAllCaps(false);
         retryButton.setVisibility(View.GONE);
-        retryButton.setOnClickListener(view -> beginSourceResolution(true));
+        // An explicit retry also resets the renderer crash counter so the user
+        // can truly retry after repeated crashes.
+        retryButton.setOnClickListener(view -> {
+            renderProcessFailures = 0;
+            beginSourceResolution(true);
+        });
         LinearLayout.LayoutParams retryParams = new LinearLayout.LayoutParams(dp(120), dp(48));
         retryParams.topMargin = dp(18);
         panel.addView(retryButton, retryParams);
@@ -535,6 +734,10 @@ public final class MainActivity extends Activity {
                 ValueCallback<Uri[]> callback,
                 FileChooserParams params
             ) {
+                if (view != webView || !isActivityUsable()) {
+                    callback.onReceiveValue(null);
+                    return true;
+                }
                 if (fileChooserCallback != null) {
                     fileChooserCallback.onReceiveValue(null);
                 }
@@ -556,8 +759,31 @@ public final class MainActivity extends Activity {
             }
 
             @Override
+            public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
+                // Remember the last validated selected-origin URL so a render
+                // process crash or Activity recreation can reload exactly it.
+                // Only the live view's selected-source or debug-harness page
+                // counts; anything else stays untracked.
+                if (view != webView || !isActivityUsable()) {
+                    return;
+                }
+                Uri uri = Uri.parse(url);
+                if (isSelectedSourceUrl(url) || isHarnessOrigin(uri)) {
+                    lastLoadedUrl = url;
+                }
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
-                if (!sourceResolutionInProgress && isSelectedSourceUrl(url)) {
+                if (view != webView || !isActivityUsable()) {
+                    return;
+                }
+                // A harness page is a fully connected state too: after a
+                // renderer recovery onto it the panel must still clear.
+                Uri uri = Uri.parse(url);
+                if (!sourceResolutionInProgress
+                    && (isSelectedSourceUrl(url) || isHarnessOrigin(uri))) {
+                    renderProcessFailures = 0;
                     applyWebPreferences();
                     connectionPanel.setVisibility(View.GONE);
                     webView.setVisibility(View.VISIBLE);
@@ -566,12 +792,18 @@ public final class MainActivity extends Activity {
             }
 
             @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                return handleRenderProcessGone(view);
+            }
+
+            @Override
             public void onReceivedError(
                 WebView view,
                 WebResourceRequest request,
                 WebResourceError error
             ) {
-                if (request.isForMainFrame()
+                if (view == webView && isActivityUsable()
+                    && request.isForMainFrame()
                     && isSelectedSourceUrl(request.getUrl().toString())) {
                     retryAlternateSource();
                 }
@@ -583,7 +815,8 @@ public final class MainActivity extends Activity {
                 WebResourceRequest request,
                 WebResourceResponse response
             ) {
-                if (request.isForMainFrame()
+                if (view == webView && isActivityUsable()
+                    && request.isForMainFrame()
                     && response.getStatusCode() >= 500
                     && isSelectedSourceUrl(request.getUrl().toString())) {
                     retryAlternateSource();
@@ -592,6 +825,86 @@ public final class MainActivity extends Activity {
         });
         webView.setDownloadListener(this::requestDownload);
         settings.setTextZoom(AppPreferences.textZoom(this));
+    }
+
+    /**
+     * The renderer process crashed (OOM/kill). Returning true acknowledges the
+     * crash — the failed WebView must never be used again, so we dispose it and
+     * build a fresh view, then reload the last validated selected-origin URL
+     * or fall back to normal source resolution.
+     */
+    private boolean handleRenderProcessGone(WebView failedView) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            return false;
+        }
+        if (failedView != webView) {
+            // A stale view we already replaced: only detach/destroy it. It must
+            // not complete the current view's file chooser or mutate live state.
+            if (contentRoot != null) {
+                contentRoot.removeView(failedView);
+            }
+            failedView.destroy();
+            return true;
+        }
+        if (fileChooserCallback != null) {
+            fileChooserCallback.onReceiveValue(null);
+            fileChooserCallback = null;
+        }
+        if (contentRoot != null) {
+            contentRoot.removeView(failedView);
+        }
+        failedView.destroy();
+        webView = null;
+        if (!isActivityUsable()) {
+            return true;
+        }
+        // Any in-flight source probe/re-evaluation result refers to the dead
+        // view and must not drive the replacement.
+        sourceSelectionGeneration++;
+        sourceResolutionInProgress = false;
+        sourceReevaluationInProgress = false;
+        sourceReevaluationPending = false;
+        renderProcessFailures++;
+
+        if (renderProcessFailures > MAX_RENDER_PROCESS_RETRIES) {
+            webView = createWebView(resolveWindowBackgroundColor());
+            if (contentRoot != null) {
+                contentRoot.addView(webView, 0, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                ));
+            }
+            configureWebView();
+            connectionPanel.setVisibility(View.VISIBLE);
+            webView.setVisibility(View.GONE);
+            showConnectionFailure();
+            connectionMessage.setText(R.string.connection_failed);
+            return true;
+        }
+
+        webView = createWebView(resolveWindowBackgroundColor());
+        if (contentRoot != null) {
+            // Keep the connection panel above the terminal view.
+            contentRoot.addView(webView, 0, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ));
+        }
+        configureWebView();
+
+        String recoverUrl = lastLoadedUrl;
+        // lastLoadedUrl is only ever a selected-source (including custom
+        // openInWebView origins) or debug-harness page, so reuse the same
+        // tracking predicate — plain isTrustedOrigin would reject custom picks.
+        if (recoverUrl != null
+            && (isSelectedSourceUrl(recoverUrl) || isHarnessOrigin(Uri.parse(recoverUrl)))) {
+            connectionMessage.setText(R.string.connecting);
+            connectionPanel.setVisibility(View.VISIBLE);
+            webView.loadUrl(recoverUrl);
+        } else {
+            beginSourceResolution(true);
+        }
+        return true;
     }
 
     private void applyWebPreferences() {
@@ -615,18 +928,39 @@ public final class MainActivity extends Activity {
         );
     }
 
+    private void applyScreenOrientation(String mode) {
+        int orientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
+        if (AppPreferences.ORIENTATION_LANDSCAPE.equals(mode)) {
+            orientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE;
+        } else if (AppPreferences.ORIENTATION_SYSTEM.equals(mode)) {
+            orientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        }
+        setRequestedOrientation(orientation);
+    }
+
     private void maybeCheckForUpdate() {
         if (automaticUpdateCheckStarted || !AppPreferences.autoUpdate(this)) {
             return;
         }
         automaticUpdateCheckStarted = true;
-        UpdateManager.check(this, selectedSource, new UpdateManager.Callback() {
+        updateCheckFuture = UpdateManager.check(this, selectedSource, new UpdateManager.Callback() {
             @Override
             public void onSuccess(UpdateManager.UpdateManifest manifest) {
                 if (!UpdateManager.isNewer(MainActivity.this, manifest)) {
                     return;
                 }
-                runOnUiThread(() -> showUpdatePrompt(manifest));
+                runOnUiThread(() -> {
+                    if (destroyed || isFinishing()) {
+                        return;
+                    }
+                    // Never pop a dialog over a paused/backgrounded activity;
+                    // keep the manifest and prompt once on the next resume.
+                    if (!activityResumed) {
+                        pendingUpdateManifest = manifest;
+                        return;
+                    }
+                    showUpdatePrompt(manifest);
+                });
             }
 
             @Override
@@ -637,6 +971,13 @@ public final class MainActivity extends Activity {
     }
 
     private void showUpdatePrompt(UpdateManager.UpdateManifest manifest) {
+        if (destroyed || isFinishing()) {
+            return;
+        }
+        if (!activityResumed) {
+            pendingUpdateManifest = manifest;
+            return;
+        }
         String notes = manifest.notes.trim().isEmpty()
             ? getString(R.string.update_available, manifest.version)
             : manifest.notes.trim();
@@ -649,8 +990,12 @@ public final class MainActivity extends Activity {
             ))
             .setNegativeButton(R.string.update_later, null)
             .setPositiveButton(R.string.update_now, (dialog, which) -> {
-                long downloadId = UpdateManager.enqueue(this, manifest);
-                showUpdateProgress(downloadId);
+                try {
+                    long downloadId = UpdateManager.enqueue(this, manifest);
+                    showUpdateProgress(downloadId);
+                } catch (RuntimeException error) {
+                    Toast.makeText(this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
+                }
             })
             .show();
     }
@@ -665,45 +1010,136 @@ public final class MainActivity extends Activity {
             .setView(progress)
             .setNegativeButton(R.string.update_later, null)
             .create();
+        updateProgressDialog.setOnDismissListener(dialog -> {
+            // Only the dialog that owns the field may invalidate the poll
+            // generation; a stale dialog closing late must not kill a newer
+            // download's polling.
+            if (dialog == updateProgressDialog) {
+                updateProgressDialog = null;
+                stopUpdateProgressPolling();
+            }
+        });
         updateProgressDialog.show();
-        Runnable poll = new Runnable() {
-            @Override
-            public void run() {
-                if (updateProgressDialog == null || !updateProgressDialog.isShowing()) {
-                    return;
-                }
-                DownloadManager.Query query = new DownloadManager.Query().setFilterById(downloadId);
-                try (Cursor cursor = downloadManager().query(query)) {
-                    if (cursor == null || !cursor.moveToFirst()) {
-                        updateProgressDialog.dismiss();
-                        return;
-                    }
-                    int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
-                    long downloaded = cursor.getLong(
+        updateProgressBar = progress;
+        updateProgressDownloadId = downloadId;
+        startUpdateProgressPolling();
+    }
+
+    // DownloadManager.query hits a provider; each poll runs one background
+    // query and posts its result. Only the main-thread result handler re-arms
+    // the next query, so a stopped/paused/new-generation dialog can never be
+    // touched by a queued result or accumulate unbounded posts.
+    private void startUpdateProgressPolling() {
+        int generation = ++updateProgressGeneration;
+        final long downloadId = updateProgressDownloadId;
+        if (!isActivityUsable() || !activityResumed || updateProgressDialog == null
+            || !updateProgressDialog.isShowing()
+            || downloadId == UpdateManager.NO_DOWNLOAD) {
+            return;
+        }
+        updatePollExecutor.execute(() -> runUpdateProgressQuery(generation, downloadId));
+    }
+
+    private void stopUpdateProgressPolling() {
+        updateProgressGeneration++;
+    }
+
+    private void runUpdateProgressQuery(int generation, long downloadId) {
+        boolean missing = false;
+        boolean queryFailed = false;
+        int status = 0;
+        long downloaded = 0;
+        long total = 0;
+        try {
+            DownloadManager.Query query = new DownloadManager.Query().setFilterById(downloadId);
+            try (Cursor cursor = downloadManager().query(query)) {
+                if (cursor == null || !cursor.moveToFirst()) {
+                    missing = true;
+                } else {
+                    status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                    downloaded = cursor.getLong(
                         cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR)
                     );
-                    long total = cursor.getLong(
+                    total = cursor.getLong(
                         cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES)
                     );
-                    if (total > 0) {
-                        progress.setIndeterminate(false);
-                        progress.setProgress((int) Math.min(100, downloaded * 100 / total));
-                    }
-                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                        updateProgressDialog.setTitle(R.string.update_verifying);
-                        progress.setIndeterminate(true);
-                        return;
-                    }
-                    if (status == DownloadManager.STATUS_FAILED) {
-                        updateProgressDialog.dismiss();
-                        Toast.makeText(MainActivity.this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
-                        return;
-                    }
                 }
-                mainHandler.postDelayed(this, 500);
             }
-        };
-        mainHandler.post(poll);
+        } catch (RuntimeException error) {
+            queryFailed = true;
+        }
+        final int resultStatus = status;
+        final long resultDownloaded = downloaded;
+        final long resultTotal = total;
+        final boolean resultMissing = missing;
+        final boolean resultFailed = queryFailed;
+        mainHandler.post(() ->
+            handleUpdateProgressResult(
+                generation, downloadId, resultStatus, resultDownloaded, resultTotal,
+                resultMissing, resultFailed
+            )
+        );
+    }
+
+    private void handleUpdateProgressResult(
+        int generation,
+        long downloadId,
+        int status,
+        long downloaded,
+        long total,
+        boolean missing,
+        boolean queryFailed
+    ) {
+        if (generation != updateProgressGeneration || !isActivityUsable()) {
+            return;
+        }
+        if (updateProgressDialog == null || !updateProgressDialog.isShowing()
+            || updateProgressBar == null
+            || downloadId != updateProgressDownloadId
+            || downloadId != pendingApkDownloadId()
+            || !activityResumed) {
+            return;
+        }
+        if (queryFailed) {
+            stopUpdateProgressPolling();
+            updateProgressDialog.dismiss();
+            Toast.makeText(this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
+            return;
+        }
+        if (missing) {
+            stopUpdateProgressPolling();
+            updateProgressDialog.dismiss();
+            updateProgressDialog = null;
+            return;
+        }
+        if (total > 0) {
+            updateProgressBar.setIndeterminate(false);
+            updateProgressBar.setProgress((int) Math.min(100, downloaded * 100 / total));
+        }
+        if (status == DownloadManager.STATUS_SUCCESSFUL) {
+            stopUpdateProgressPolling();
+            updateProgressDialog.setTitle(R.string.update_verifying);
+            updateProgressBar.setIndeterminate(true);
+            // installPendingApk deduplicates via INSTALLER_LAUNCHED_DOWNLOAD_ID.
+            installPendingApk(true);
+            return;
+        }
+        if (status == DownloadManager.STATUS_FAILED) {
+            stopUpdateProgressPolling();
+            updateProgressDialog.dismiss();
+            clearPendingApkDownload(downloadId);
+            Toast.makeText(this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
+            return;
+        }
+        // Arm the next query only while this generation still owns the dialog.
+        mainHandler.postDelayed(() -> {
+            if (generation == updateProgressGeneration && isActivityUsable()
+                && activityResumed
+                && updateProgressDialog != null && updateProgressDialog.isShowing()
+                && downloadId == updateProgressDownloadId) {
+                updatePollExecutor.execute(() -> runUpdateProgressQuery(generation, downloadId));
+            }
+        }, 500);
     }
 
     private String formatBytes(long bytes) {
@@ -767,11 +1203,35 @@ public final class MainActivity extends Activity {
      * but the current server is still perfectly reachable.
      */
     private void requestSourceReevaluation() {
-        mainHandler.post(this::reevaluateCurrentSource);
+        mainHandler.post(() -> {
+            if (sourceResolutionInProgress || sourceReevaluationInProgress) {
+                sourceReevaluationPending = true;
+                return;
+            }
+            reevaluateCurrentSource();
+        });
+    }
+
+    private void replayPendingSourceReevaluation() {
+        if (!sourceReevaluationPending || destroyed) {
+            return;
+        }
+        sourceReevaluationPending = false;
+        mainHandler.post(this::requestSourceReevaluation);
+    }
+
+    private void finishSourceResolution() {
+        sourceResolutionInProgress = false;
+        replayPendingSourceReevaluation();
+    }
+
+    private void finishSourceReevaluation() {
+        sourceReevaluationInProgress = false;
+        replayPendingSourceReevaluation();
     }
 
     private void reevaluateCurrentSource() {
-        if (destroyed || webView == null) {
+        if (!isActivityUsable() || webView == null) {
             return;
         }
         if (sourceResolutionInProgress || sourceReevaluationInProgress) {
@@ -785,6 +1245,7 @@ public final class MainActivity extends Activity {
 
         int currentSource = selectedSource;
         String currentOrigin = selectedSourceOrigin;
+        final int generation = sourceSelectionGeneration;
         if (currentOrigin != null && !currentOrigin.isEmpty()) {
             sourceReevaluationInProgress = true;
             resolverExecutor.execute(() -> {
@@ -792,10 +1253,13 @@ public final class MainActivity extends Activity {
                     ? SourceRegistry.probe(currentSource)
                     : SourceRegistry.probeUrl(currentOrigin);
                 runOnUiThread(() -> {
-                    sourceReevaluationInProgress = false;
-                    if (destroyed) {
+                    // A newer selection (loadSource/failure) made while the
+                    // probe ran owns the in-progress flags now; a stale result
+                    // must not clear them.
+                    if (!isActivityUsable() || generation != sourceSelectionGeneration) {
                         return;
                     }
+                    finishSourceReevaluation();
                     if (!currentOrigin.equals(selectedSourceOrigin)) {
                         return;
                     }
@@ -817,6 +1281,9 @@ public final class MainActivity extends Activity {
         if (sourceResolutionInProgress || sourceReevaluationInProgress) {
             return;
         }
+        if (!isActivityUsable() || webView == null) {
+            return;
+        }
         Arrays.fill(rejectedSources, false);
         int preferred = AppPreferences.preferredSource(this);
         if (preferred >= 0) {
@@ -824,9 +1291,15 @@ public final class MainActivity extends Activity {
             if (foreground) {
                 showConnectingState();
             }
+            final int generation = sourceSelectionGeneration;
             resolverExecutor.execute(() -> {
                 SourceRegistry.ProbeResult result = SourceRegistry.probe(preferred);
                 runOnUiThread(() -> {
+                    // Guard before clearing the flag: a stale result must not
+                    // unlock a newer resolution that already started.
+                    if (!isActivityUsable() || generation != sourceSelectionGeneration) {
+                        return;
+                    }
                     sourceResolutionInProgress = false;
                     if (result.healthy) {
                         loadSource(preferred);
@@ -844,6 +1317,9 @@ public final class MainActivity extends Activity {
         if (sourceResolutionInProgress) {
             return;
         }
+        if (!isActivityUsable() || webView == null) {
+            return;
+        }
         if (excludedSource >= 0) {
             rejectedSources[excludedSource] = true;
         }
@@ -851,13 +1327,20 @@ public final class MainActivity extends Activity {
         if (foreground) {
             showConnectingState();
         }
+        final int generation = sourceSelectionGeneration;
+        final boolean[] rejectedSnapshot =
+            Arrays.copyOf(rejectedSources, SourceRegistry.URLS.length);
 
         resolverExecutor.execute(() -> {
+            // Probe against an immutable snapshot of rejected sources; failure
+            // marks are merged on the main thread only while this operation is
+            // still the current selection attempt.
+            final boolean[] failed = new boolean[SourceRegistry.URLS.length];
             CompletionService<Integer> completion =
                 new ExecutorCompletionService<>(probeExecutor);
             List<Future<Integer>> probes = new ArrayList<>();
             for (int index = 0; index < SourceRegistry.URLS.length; index++) {
-                if (rejectedSources[index]) {
+                if (rejectedSnapshot[index]) {
                     continue;
                 }
                 int source = index;
@@ -872,10 +1355,16 @@ public final class MainActivity extends Activity {
                     int result = completion.take().get();
                     if (result >= 0) {
                         cancelProbes(probes);
-                        runOnUiThread(() -> loadSource(result));
+                        runOnUiThread(() -> {
+                            if (!isActivityUsable() || generation != sourceSelectionGeneration) {
+                                return;
+                            }
+                            mergeRejectedSources(failed);
+                            loadSource(result);
+                        });
                         return;
                     }
-                    rejectedSources[-result - 1] = true;
+                    failed[-result - 1] = true;
                 } catch (InterruptedException error) {
                     cancelProbes(probes);
                     Thread.currentThread().interrupt();
@@ -885,16 +1374,27 @@ public final class MainActivity extends Activity {
                 }
             }
             runOnUiThread(() -> {
+                if (!isActivityUsable() || generation != sourceSelectionGeneration) {
+                    return;
+                }
+                mergeRejectedSources(failed);
                 if (foreground) {
                     showConnectionFailure();
                 } else {
-                    sourceResolutionInProgress = false;
+                    finishSourceResolution();
                 }
             });
         });
     }
 
+    private void mergeRejectedSources(boolean[] failed) {
+        for (int index = 0; index < failed.length && index < rejectedSources.length; index++) {
+            rejectedSources[index] |= failed[index];
+        }
+    }
+
     private void showConnectingState() {
+        sourceSelectionGeneration++;
         selectedSource = -1;
         webView.stopLoading();
         webView.setVisibility(View.GONE);
@@ -911,7 +1411,7 @@ public final class MainActivity extends Activity {
     }
 
     private void loadSource(int source) {
-        sourceResolutionInProgress = false;
+        sourceSelectionGeneration++;
         selectedSource = source;
         selectedSourceOrigin = source >= 0 && source < SourceRegistry.URLS.length
             ? SourceRegistry.URLS[source]
@@ -921,16 +1421,20 @@ public final class MainActivity extends Activity {
             .putInt(AppPreferences.KEY_ACTIVE_SOURCE, source)
             .putLong(AppPreferences.KEY_ACTIVE_SOURCE_AT, System.currentTimeMillis())
             .apply();
-        webView.loadUrl(SourceRegistry.URLS[source] + AppPreferences.startPath(this));
+        String targetUrl = SourceRegistry.URLS[source] + AppPreferences.startPath(this);
+        lastLoadedUrl = targetUrl;
+        webView.loadUrl(targetUrl);
+        finishSourceResolution();
     }
 
     private void showConnectionFailure() {
-        sourceResolutionInProgress = false;
+        sourceSelectionGeneration++;
         selectedSource = -1;
         selectedSourceOrigin = null;
         connectionProgress.setVisibility(View.GONE);
         connectionMessage.setText(R.string.connection_failed);
         retryButton.setVisibility(View.VISIBLE);
+        finishSourceResolution();
     }
 
     private void retryAlternateSource() {
@@ -962,41 +1466,45 @@ public final class MainActivity extends Activity {
     }
 
     private final class AndroidWebViewBridge {
-        /**
-         * Native HTTP probe for the terminal server-probe JS module.
-         * Called from {@code TERMINAL_SERVER_PROBE.probeHostViaNative()}
-         * to test cross-origin server reachability without CORS restrictions
-         * and with accurate latency measurement.
-         *
-         * @param url     full URL to probe (e.g. http://HOST:PORT/favicon.svg)
-         * @param timeoutMs connect/read timeout in milliseconds
-         * @return JSON object string: {"ok":true/false,"latency":<ms>} or null on error
-         */
         @JavascriptInterface
-        public String probeHost(String url, int timeoutMs) {
-            java.net.HttpURLConnection connection = null;
-            long startedAt = System.nanoTime();
+        public boolean isSystemKeyboardVisible() {
+            return systemKeyboardVisible;
+        }
+
+        @JavascriptInterface
+        public String getScreenOrientation() {
+            return AppPreferences.screenOrientation(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public boolean setScreenOrientation(String mode) {
+            if (!AppPreferences.ORIENTATION_PORTRAIT.equals(mode)
+                && !AppPreferences.ORIENTATION_LANDSCAPE.equals(mode)
+                && !AppPreferences.ORIENTATION_SYSTEM.equals(mode)) {
+                return false;
+            }
+            AppPreferences.get(MainActivity.this)
+                .edit()
+                .putString(AppPreferences.KEY_SCREEN_ORIENTATION, mode)
+                .apply();
+            mainHandler.post(() -> applyScreenOrientation(mode));
+            return true;
+        }
+
+        @JavascriptInterface
+        public boolean copyText(String text) {
+            if (text == null || text.length() > 1_048_576) {
+                return false;
+            }
             try {
-                java.net.URL target = new java.net.URL(url);
-                connection = (java.net.HttpURLConnection) target.openConnection();
-                connection.setRequestMethod("GET");
-                connection.setConnectTimeout(Math.max(500, timeoutMs));
-                connection.setReadTimeout(Math.max(500, timeoutMs));
-                connection.setInstanceFollowRedirects(true);
-                connection.setUseCaches(false);
-                int status = connection.getResponseCode();
-                long latencyMs = Math.max(1, (System.nanoTime() - startedAt) / 1_000_000);
-                // Any HTTP response (200, 303, 401, etc.) proves the server is alive.
-                boolean reachable = status > 0;
-                connection.disconnect();
-                return "{\"ok\":" + reachable + ",\"latency\":" + latencyMs + "}";
-            } catch (Exception error) {
-                long latencyMs = Math.max(1, (System.nanoTime() - startedAt) / 1_000_000);
-                return "{\"ok\":false,\"latency\":" + latencyMs + "}";
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
+                ClipboardManager clipboard = getSystemService(ClipboardManager.class);
+                if (clipboard == null) {
+                    return false;
                 }
+                clipboard.setPrimaryClip(ClipData.newPlainText("webClx", text));
+                return true;
+            } catch (RuntimeException error) {
+                return false;
             }
         }
 
@@ -1014,9 +1522,18 @@ public final class MainActivity extends Activity {
                 return;
             }
             mainHandler.post(() -> {
+                if (!isActivityUsable() || webView == null) {
+                    return;
+                }
+                // A manual server pick invalidates any in-flight probe results.
+                sourceSelectionGeneration++;
+                sourceResolutionInProgress = false;
+                sourceReevaluationInProgress = false;
+                sourceReevaluationPending = false;
                 selectedSource = sourceIndexForOrigin(target);
                 selectedSourceOrigin = sourceOrigin(target);
-                webView.loadUrl(target.toString());
+                lastLoadedUrl = target.toString();
+                webView.loadUrl(lastLoadedUrl);
             });
         }
     }
@@ -1047,6 +1564,9 @@ public final class MainActivity extends Activity {
     }
 
     private boolean isTrustedOrigin(Uri uri) {
+        if (isHarnessOrigin(uri)) {
+            return true;
+        }
         for (String candidate : SourceRegistry.URLS) {
             Uri trusted = Uri.parse(candidate);
             if (equalsIgnoreCase(uri.getScheme(), trusted.getScheme())
@@ -1056,6 +1576,17 @@ public final class MainActivity extends Activity {
             }
         }
         return false;
+    }
+
+    private boolean isHarnessOrigin(Uri uri) {
+        if (selectedSourceOrigin == null || selectedSourceOrigin.isEmpty()) {
+            return false;
+        }
+        Uri selected = Uri.parse(selectedSourceOrigin);
+        return ("http".equalsIgnoreCase(uri.getScheme())
+                || "https".equalsIgnoreCase(uri.getScheme()))
+            && equalsIgnoreCase(uri.getHost(), selected.getHost())
+            && effectivePort(uri) == HARNESS_PORT;
     }
 
     private boolean isSelectedSourceUrl(String url) {
@@ -1183,7 +1714,7 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView.canGoBack()) {
+        if (webView != null && webView.canGoBack()) {
             webView.goBack();
         } else {
             super.onBackPressed();
@@ -1193,7 +1724,11 @@ public final class MainActivity extends Activity {
     @Override
     protected void onPause() {
         activityResumed = false;
-        webView.onPause();
+        webViewPausedSinceResume = true;
+        stopUpdateProgressPolling();
+        if (webView != null) {
+            webView.onPause();
+        }
         super.onPause();
     }
 
@@ -1201,7 +1736,9 @@ public final class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         activityResumed = true;
-        webView.onResume();
+        if (webView != null) {
+            webView.onResume();
+        }
         boolean returningFromInstallPermission = downloadPreferences().getBoolean(
             UpdateManager.WAITING_FOR_INSTALL_PERMISSION,
             false
@@ -1214,15 +1751,48 @@ public final class MainActivity extends Activity {
             recreate();
             return;
         }
-        webView.getSettings().setTextZoom(AppPreferences.textZoom(this));
+        if (webView != null) {
+            webView.getSettings().setTextZoom(AppPreferences.textZoom(this));
+        }
+        if (webViewPausedSinceResume && !returningFromInstallPermission) {
+            webViewPausedSinceResume = false;
+            // No reload on an ordinary resume: JS terminal state, drafts, and
+            // scroll survive. A synthetic pageshow reaches the existing
+            // refreshSessionsAfterPageResume handlers, and a native re-probe
+            // revalidates the current origin in the background.
+            if (webView != null) {
+                webView.evaluateJavascript(
+                    "window.dispatchEvent(new Event('pageshow'))",
+                    null
+                );
+            }
+            requestSourceReevaluation();
+        }
+        if (pendingUpdateManifest != null) {
+            UpdateManager.UpdateManifest manifest = pendingUpdateManifest;
+            pendingUpdateManifest = null;
+            showUpdatePrompt(manifest);
+        }
+        if (updateProgressDialog != null && updateProgressDialog.isShowing()) {
+            // Restart the generation-guarded query loop paused by onPause.
+            startUpdateProgressPolling();
+        }
     }
 
     @Override
     protected void onDestroy() {
         unregisterNetworkCallback();
         destroyed = true;
+        if (updateCheckFuture != null) {
+            updateCheckFuture.cancel(true);
+            updateCheckFuture = null;
+        }
+        stopUpdateProgressPolling();
+        updateProgressDownloadId = UpdateManager.NO_DOWNLOAD;
         resolverExecutor.shutdownNow();
         probeExecutor.shutdownNow();
+        updateVerifyExecutor.shutdownNow();
+        updatePollExecutor.shutdownNow();
         if (downloadReceiverRegistered) {
             unregisterReceiver(downloadCompleteReceiver);
             downloadReceiverRegistered = false;
@@ -1236,13 +1806,26 @@ public final class MainActivity extends Activity {
             updateProgressDialog.dismiss();
             updateProgressDialog = null;
         }
-        webView.stopLoading();
-        webView.destroy();
+        if (webView != null) {
+            webView.stopLoading();
+            webView.destroy();
+            webView = null;
+        }
         super.onDestroy();
     }
 
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private static final class ValidationResult {
+        final String stagedPath;
+        final int error;
+
+        ValidationResult(String stagedPath, int error) {
+            this.stagedPath = stagedPath;
+            this.error = error;
+        }
     }
 
     private static final class PendingDownload {

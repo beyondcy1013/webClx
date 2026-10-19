@@ -29,3 +29,17 @@
 node tests/terminal-resume-extract.test.mjs
 for test_file in tests/*.test.mjs; do node "$test_file" || exit 1; done
 ```
+
+## AGY 屏幕恢复命令
+
+- `Ctrl+Alt+R` 的 `extract_resume` 动作通过统一提取器识别 `agy --conversation=<UUID>`，发送时保留 AGY 命令，不转换成 Codex。
+- 同时接受空格分隔参数、带引号 UUID 和 UUID 硬换行；多个工具命令按最近完整 UUID 选择，跳过末尾半截 AGY UUID。Codex 的说明文字扫描遇到 AGY 命令时停止，避免借用其它工具的会话 ID。
+- 入口资源版本：`terminal-resume-extract.js?v=20260916a`。当前 `static` 是运行目录的符号链接，资源修改直接生效；Git 仅跟踪该链接，本次回归测试和说明纳入提交。
+
+## Devin 屏幕恢复命令
+
+- `Ctrl+Alt+R` 提取器识别 `devin -r <slug>` 与 `devin --resume <slug>`，发送时统一改写为 `devin -r <slug>`。slug 只允许 ASCII 字母数字按连字符分段（每段非空、至少一个连字符、≤160 字符）；选项与 slug 之间只接受同行空白，不跨硬换行借参数；引号/反引号按既有清洗规则剥离。
+- Devin slug 与 UUID 同级按出现位置取最新：更新的 UUID 仍优先，更新的 Devin slug 也能盖过旧 UUID；裸 `devin -r` 选择器、`devin -r lists recent sessions` 这类说明文字、悬挂连字符、缺失参数和 shell 元字符一律不匹配，也不会覆盖更早的有效命令。
+- Codex/Claude 说明文字的 UUID 上下文扫描遇到 `devin -r` / `devin --resume` 即停止，不借用其后的 UUID；后端 `extract_resume_info_from_text` 对 Devin 走直接参数分支（要求 slug 与命令同行），同样不借下游 UUID。
+- 未加命令标签的裸 slug 仍按既有逻辑解释为 Codex resume id，不做 Devin 推断。
+- 入口资源版本：`terminal-resume-extract.js?v=20261007-devin`。

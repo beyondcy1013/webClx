@@ -3,7 +3,7 @@ use std::{
     io::{Cursor, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use auth_core::{
@@ -19,7 +19,10 @@ use tokio::{
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::apply::local_codex_config_requires_preset_sync;
-use super::preset_tests::test_stored_chatgpt_oauth_api_preset_with_endpoint;
+use super::preset_tests::{
+    await_api_preset_test_with_timeout, test_stored_chatgpt_oauth_api_preset_with_endpoint,
+};
+use super::save_imported_auth_accounts;
 use super::{
     TerminalAuthFiles, build_preset_test_client_from_env, collect_terminal_auth_target_users,
     parse_codex_bundled_model_catalog, reorder_presets_by_ids, sync_api_preset_configs,
@@ -27,10 +30,11 @@ use super::{
     test_stored_auth_preset_with_endpoint, verify_api_preset_targets, write_api_auth_files,
     write_claude_preset_to_targets, write_login_auth_files,
 };
+use auth_core::AuthPresetManager;
 
 #[test]
 fn project_config_requires_preset_sync_only_for_model_or_provider_overrides() {
-    let project_header = r#"project_doc_fallback_filenames = ["AGENTS.MD"]
+    let project_header = r#"project_doc_fallback_filenames = ["AGENTS.md"]
 project_doc_max_bytes = 65536
 "#;
     let project_only = format!(
@@ -106,6 +110,47 @@ fn codex_bundled_model_catalog_parser_requires_models_array() {
 
     assert_eq!(catalog["models"][0]["slug"], "future-bundled-model");
     assert!(error.to_string().contains("models"));
+}
+
+#[tokio::test]
+async fn sub2api_export_routes_to_codex_oauth_presets() {
+    let root = test_temp_dir("sub2api-import");
+    let state = test_app_state(&root);
+    let payload = r#"{
+      "type": "sub2api-data",
+      "version": 1,
+      "exported_at": "2026-09-22T09:52:19.087Z",
+      "proxies": [],
+      "accounts": [{
+        "name": "imported-account",
+        "platform": "openai",
+        "type": "oauth",
+        "credentials": {
+          "access_token": "access-token",
+          "chatgpt_account_id": "account-id",
+          "id_token": "id-token",
+          "refresh_token": "refresh-token"
+        },
+        "extra": {"email": "imported@example.com"},
+        "plan_type": "business"
+      }]
+    }"#;
+    let parsed = auth_core::parse_imported_accounts(payload).unwrap();
+    let response = save_imported_auth_accounts(&state, parsed).await.unwrap();
+
+    assert_eq!(response.saved_count, 1);
+    let manager = &state.auth_manager;
+    let auth_presets = manager.auth_presets_snapshot();
+    assert_eq!(auth_presets.len(), 1);
+    assert_eq!(auth_presets[0].auth.tokens.account_id, "account-id");
+    assert_eq!(auth_presets[0].auth.tokens.refresh_token, "refresh-token");
+    assert_eq!(auth_presets[0].details.email.as_deref(), Some("imported@example.com"));
+    assert_eq!(auth_presets[0].details.plan_type.as_deref(), Some("BUSINESS"));
+    assert!(manager.api_presets_snapshot().is_empty());
+
+    // The persisted file proves the route survives a manager reload.
+    let reloaded = AuthPresetManager::load(&root).unwrap();
+    assert_eq!(reloaded.auth_presets_snapshot().len(), 1);
 }
 
 #[test]
@@ -297,6 +342,7 @@ async fn api_preset_verification_reads_back_auth_config_and_model() {
     )
     .unwrap();
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-verify".to_string(),
         name: "Verify API".to_string(),
         saved_at: 0,
@@ -320,6 +366,7 @@ async fn api_preset_verification_reads_back_auth_config_and_model() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let config_targets = vec![ResolvedConfigTarget {
@@ -405,10 +452,11 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
     fs::write(&target.claude_settings_file, r#"{"env":{"KEEP_ME":"1"}}"#).unwrap();
     fs::write(
         temp_root.join("alice/.claude.json"),
-        r#"{"hasCompletedOnboarding":false,"projects":{"/home/codes/webClx":{"hasTrustDialogAccepted":true}}}"#,
+        r#"{"hasCompletedOnboarding":false,"projects":{"/home/codes/tools/webClx":{"hasTrustDialogAccepted":true}}}"#,
     )
     .unwrap();
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-relay".to_string(),
         name: "Claude Relay".to_string(),
         saved_at: 1,
@@ -445,7 +493,7 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
     );
     assert_eq!(
         claude_json
-            .pointer("/projects/~1home~1codes~1webClx/hasTrustDialogAccepted")
+            .pointer("/projects/~1home~1codes~1tools~1webClx/hasTrustDialogAccepted")
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
@@ -454,9 +502,53 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
 }
 
 #[tokio::test]
+async fn api_preset_test_total_timeout_returns_a_visible_failure() {
+    let preset = StoredApiPreset {
+        interchange_source: None,
+        id: "api-timeout".to_string(),
+        name: "Timeout API".to_string(),
+        saved_at: 0,
+        provider_name: "timeout-provider".to_string(),
+        base_url: "https://timeout.example/v1".to_string(),
+        management_url: None,
+        wire_api: Some("responses".to_string()),
+        responses_proxy: None,
+        apply_upstream_proxy_on_switch: false,
+        config_overrides: Vec::new(),
+        legacy_config_key: None,
+        legacy_config_value: None,
+        legacy_secondary_config_key: None,
+        legacy_secondary_config_value: None,
+        terminal_env: Vec::new(),
+        terminal_startup_script: None,
+        api_key: "test-key".to_string(),
+        access_token: String::new(),
+        account_id: String::new(),
+        access_mode: None,
+        favorite: false,
+        switch_count: 0,
+    };
+
+    let result = await_api_preset_test_with_timeout(
+        &preset,
+        "https://timeout.example/v1/responses".to_string(),
+        Duration::from_millis(1),
+        std::future::pending(),
+    )
+    .await
+    .unwrap();
+
+    assert!(!result.ok, "{result:?}");
+    assert_eq!(result.preset_id, preset.id);
+    assert_eq!(result.latency_ms, 1);
+    assert!(result.message.contains("已停止等待上游响应"), "{}", result.message);
+}
+
+#[tokio::test]
 async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
     let (base_url, paths) = spawn_preset_test_server(2).await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test-env".to_string(),
         name: "API Test Env".to_string(),
         saved_at: 0,
@@ -477,6 +569,7 @@ async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let invalid_proxy_env = vec![
@@ -509,6 +602,7 @@ async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
 async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
     let (base_url, paths) = spawn_preset_test_server(2).await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
         saved_at: 0,
@@ -529,6 +623,7 @@ async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -554,6 +649,7 @@ async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
 async fn api_preset_test_rejects_responses_stream_without_completion_event() {
     let base_url = spawn_incomplete_responses_preset_test_server(false).await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test-incomplete-sse".to_string(),
         name: "API Test Incomplete SSE".to_string(),
         saved_at: 0,
@@ -574,6 +670,7 @@ async fn api_preset_test_rejects_responses_stream_without_completion_event() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -594,6 +691,7 @@ async fn api_preset_test_rejects_responses_stream_without_completion_event() {
 async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
     let base_url = spawn_incomplete_responses_preset_test_server(true).await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test-disconnected-sse".to_string(),
         name: "API Test Disconnected SSE".to_string(),
         saved_at: 0,
@@ -614,6 +712,7 @@ async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -634,6 +733,7 @@ async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
 async fn auth_preset_test_uses_saved_oauth_account_for_responses() {
     let (endpoint, request) = spawn_codex_oauth_test_server().await;
     let preset = StoredAuthPreset {
+        interchange_source: None,
         id: "auth-test".to_string(),
         name: "OAuth Test".to_string(),
         saved_at: 0,
@@ -670,6 +770,7 @@ async fn auth_preset_test_uses_saved_oauth_account_for_responses() {
 async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
     let (endpoint, request) = spawn_codex_oauth_test_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-oauth-test".to_string(),
         name: "Imported OAuth".to_string(),
         saved_at: 0,
@@ -690,6 +791,7 @@ async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
         access_token: "access-token".to_string(),
         account_id: "acct-123456".to_string(),
         access_mode: Some(ApiAccessMode::ChatgptOauth),
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::new();
@@ -711,6 +813,7 @@ async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
 async fn api_preset_test_uses_model_override_for_responses_when_models_is_missing() {
     let (base_url, paths) = spawn_responses_preset_test_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
         saved_at: 0,
@@ -734,6 +837,7 @@ async fn api_preset_test_uses_model_override_for_responses_when_models_is_missin
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -769,6 +873,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
     )
     .await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
         saved_at: 0,
@@ -792,6 +897,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -818,6 +924,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
 #[test]
 fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test".to_string(),
         name: "Zhipu 5.1".to_string(),
         saved_at: 0,
@@ -841,6 +948,7 @@ fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
 
@@ -860,6 +968,7 @@ fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
 async fn claude_preset_test_uses_preset_model_when_models_endpoint_is_missing() {
     let (base_url, paths) = spawn_claude_models_404_preset_test_server().await;
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-test".to_string(),
         name: "DeepSeek Claude 官方 Anthropic".to_string(),
         saved_at: 0,
@@ -918,6 +1027,7 @@ async fn claude_preset_test_uses_preset_model_when_models_endpoint_is_missing() 
 async fn claude_preset_test_uses_inherited_env_model_when_model_fields_are_empty() {
     let (base_url, paths) = spawn_claude_models_404_preset_test_server().await;
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-global-test".to_string(),
         name: "Claude inherited model".to_string(),
         saved_at: 0,
@@ -961,6 +1071,7 @@ async fn claude_preset_test_uses_inherited_env_model_when_model_fields_are_empty
 #[test]
 fn claude_preset_test_target_uses_local_proxy_credentials_when_enabled() {
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-local-test".to_string(),
         name: "Claude Local Test".to_string(),
         saved_at: 0,
@@ -1014,6 +1125,7 @@ fn claude_preset_test_target_uses_local_proxy_credentials_when_enabled() {
 #[test]
 fn claude_preset_test_target_keeps_minimax_anthropic_direct_when_account_proxy_disabled() {
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: "claude-minimax-direct".to_string(),
         name: "MiniMax Claude Direct".to_string(),
         saved_at: 0,
@@ -1066,6 +1178,7 @@ fn claude_preset_test_target_keeps_minimax_anthropic_direct_when_account_proxy_d
 async fn api_preset_test_retries_v1_when_root_models_is_not_json_models() {
     let (base_url, paths) = spawn_v1_fallback_preset_test_server().await;
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
         saved_at: 0,
@@ -1086,6 +1199,7 @@ async fn api_preset_test_retries_v1_when_root_models_is_not_json_models() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -1173,6 +1287,7 @@ Connection: close
     auth_core::set_local_webclx_origin(format!("http://{addr}"));
 
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-test-zhipu".to_string(),
         name: "智谱5.1".to_string(),
         saved_at: 0,
@@ -1196,6 +1311,7 @@ Connection: close
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let client = reqwest::Client::builder()
@@ -1641,4 +1757,498 @@ fn test_temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("webclx-{label}-{}-{nonce}", std::process::id()));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn test_app_state(app_dir: &Path) -> crate::AppState {
+    fs::create_dir_all(app_dir).unwrap();
+    crate::AppState {
+        static_dir: app_dir.join("static"),
+        listen_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+        version: "test".to_string(),
+        app_dir: app_dir.to_path_buf(),
+        local_api_token: std::sync::Arc::from("test-local-api-token"),
+        workspace_settings: crate::settings::SettingsManager::load(app_dir).unwrap(),
+        auth_manager: crate::auth::AuthPresetManager::load(app_dir).unwrap(),
+        codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+            app_dir.to_path_buf(),
+            std::env::temp_dir(),
+        )
+        .unwrap(),
+        agy_manager: crate::agy::Manager::load(app_dir.to_path_buf(), std::env::temp_dir()),
+        devin_manager: crate::devin::DevinManager::load(
+            app_dir.to_path_buf(),
+            std::env::temp_dir(),
+        ),
+        codex_oauth_manager: crate::auth::CodexOAuthManager::new(),
+        codex_proxy_history: crate::codex_proxy::CodexProxyHistory::new(),
+        proxy_manager: crate::proxy::ProxyManager::load(app_dir).unwrap(),
+        quota_reset_cache: crate::quota_reset_cache::QuotaResetCache::new(),
+        quota_manager: crate::quota::QuotaConfigManager::load(app_dir),
+        frpc_manager: crate::frpc::FrpcManager::load(app_dir, 0).unwrap(),
+        frps_manager: crate::frpc::FrpsManager::load(app_dir).unwrap(),
+        frp_role_manager: crate::frpc::FrpRoleManager::load(app_dir, 0).unwrap(),
+        terminal_manager: crate::terminal::TerminalManager::new(
+            app_dir.join(".webclx-terminal-sessions.json"),
+        ),
+        preset_test_scheduler: crate::auth::PresetTestScheduler::new(
+            &app_dir.join(".webclx-terminal-sessions.json"),
+        ),
+        agent_manager: crate::agent::AgentManager::new(app_dir),
+        agent_config: crate::agent::AgentConfigManager::new(app_dir),
+        collaboration_manager: crate::collaboration::CollaborationManager::new(app_dir),
+    }
+}
+
+fn fake_jwt_with_email(email: &str) -> String {
+    use base64::{Engine as _, engine::general_purpose};
+    let encoded =
+        general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({"email": email}).to_string());
+    format!("header.{encoded}.signature")
+}
+
+fn capture_test_auth(
+    account_id: &str,
+    email: &str,
+    access_token: &str,
+    refresh_token: &str,
+    last_refresh: &str,
+) -> AuthFile {
+    AuthFile {
+        openai_api_key: None,
+        last_refresh: last_refresh.to_string(),
+        tokens: AuthTokens {
+            access_token: access_token.to_string(),
+            account_id: account_id.to_string(),
+            id_token: if email.is_empty() {
+                "id-token".to_string()
+            } else {
+                fake_jwt_with_email(email)
+            },
+            refresh_token: refresh_token.to_string(),
+        },
+    }
+}
+
+fn stored_auth_preset(id: &str, name: &str, auth: AuthFile) -> StoredAuthPreset {
+    StoredAuthPreset {
+        interchange_source: None,
+        id: id.to_string(),
+        name: name.to_string(),
+        saved_at: 1,
+        details: AuthPresetDetails::default(),
+        config_overrides: Vec::new(),
+        legacy_config_key: None,
+        legacy_config_value: None,
+        legacy_secondary_config_key: None,
+        legacy_secondary_config_value: None,
+        auth,
+        switch_count: 0,
+    }
+}
+
+async fn seed_capture_presets(
+    state: &crate::AppState,
+    presets: Vec<StoredAuthPreset>,
+) -> Vec<TerminalAuthFiles> {
+    super::persist_auth_presets_async(&state.auth_manager, &presets)
+        .await
+        .unwrap();
+    let root = state.app_dir.join("homes");
+    vec![test_terminal_auth_files(&root, "alice")]
+}
+
+#[tokio::test]
+async fn apply_other_preset_captures_rotated_live_tokens() {
+    let root = test_temp_dir("capture-apply-other");
+    let state = test_app_state(&root);
+    let stale_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "stale-access-a",
+        "stale-refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let auth_b = capture_test_auth(
+        "acct-b",
+        "b@example.com",
+        "access-b",
+        "refresh-b",
+        "2026-09-21T00:00:00Z",
+    );
+    let targets = seed_capture_presets(
+        &state,
+        vec![
+            stored_auth_preset("preset-a", "A", stale_a),
+            stored_auth_preset("preset-b", "B", auth_b.clone()),
+        ],
+    )
+    .await;
+    let rotated_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "rotated-access-a",
+        "rotated-refresh-a",
+        "2026-09-22T11:21:00Z",
+    );
+    write_login_auth_files(&targets, &rotated_a).await.unwrap();
+
+    super::apply::apply_auth_preset_to_targets(&state, "preset-b", "", true, &targets[0], &targets)
+        .await
+        .unwrap();
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    let stored_a = presets
+        .iter()
+        .find(|preset| preset.id == "preset-a")
+        .unwrap();
+    assert_eq!(stored_a.auth.tokens.refresh_token, "rotated-refresh-a");
+    assert_eq!(stored_a.auth.tokens.access_token, "rotated-access-a");
+    assert_eq!(stored_a.auth.last_refresh, "2026-09-22T11:21:00Z");
+
+    let written = fs::read_to_string(&targets[0].auth_file).unwrap();
+    assert!(written.contains("\"refresh_token\": \"refresh-b\""), "{written}");
+}
+
+#[tokio::test]
+async fn apply_same_preset_writes_rotated_tokens() {
+    let root = test_temp_dir("capture-apply-same");
+    let state = test_app_state(&root);
+    let stale_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "stale-access-a",
+        "stale-refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let targets =
+        seed_capture_presets(&state, vec![stored_auth_preset("preset-a", "A", stale_a)]).await;
+    let rotated_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "rotated-access-a",
+        "rotated-refresh-a",
+        "2026-09-22T11:21:00Z",
+    );
+    write_login_auth_files(&targets, &rotated_a).await.unwrap();
+
+    super::apply::apply_auth_preset_to_targets(&state, "preset-a", "", true, &targets[0], &targets)
+        .await
+        .unwrap();
+
+    let written = fs::read_to_string(&targets[0].auth_file).unwrap();
+    assert!(written.contains("\"refresh_token\": \"rotated-refresh-a\""), "{written}");
+    assert!(!written.contains("stale-refresh-a"), "{written}");
+}
+
+#[tokio::test]
+async fn apply_preset_does_not_capture_when_email_differs() {
+    let root = test_temp_dir("capture-email-mismatch");
+    let state = test_app_state(&root);
+    let stale_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "stale-access-a",
+        "stale-refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let auth_b = capture_test_auth(
+        "acct-b",
+        "b@example.com",
+        "access-b",
+        "refresh-b",
+        "2026-09-21T00:00:00Z",
+    );
+    let targets = seed_capture_presets(
+        &state,
+        vec![
+            stored_auth_preset("preset-a", "A", stale_a),
+            stored_auth_preset("preset-b", "B", auth_b),
+        ],
+    )
+    .await;
+    // Team workspaces share an account_id; a different email must not match.
+    let rotated_other_user = capture_test_auth(
+        "acct-a",
+        "other@example.com",
+        "rotated-access-x",
+        "rotated-refresh-x",
+        "2026-09-22T11:21:00Z",
+    );
+    write_login_auth_files(&targets, &rotated_other_user)
+        .await
+        .unwrap();
+
+    super::apply::apply_auth_preset_to_targets(&state, "preset-b", "", true, &targets[0], &targets)
+        .await
+        .unwrap();
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    let stored_a = presets
+        .iter()
+        .find(|preset| preset.id == "preset-a")
+        .unwrap();
+    assert_eq!(stored_a.auth.tokens.refresh_token, "stale-refresh-a");
+}
+
+#[tokio::test]
+async fn apply_preset_keeps_newer_preset_last_refresh() {
+    let root = test_temp_dir("capture-newer-preset");
+    let state = test_app_state(&root);
+    // webClx refreshed the preset more recently than the live file reports.
+    let newer_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "preset-access-a",
+        "preset-refresh-a",
+        "2026-09-23T00:00:00Z",
+    );
+    let auth_b = capture_test_auth(
+        "acct-b",
+        "b@example.com",
+        "access-b",
+        "refresh-b",
+        "2026-09-21T00:00:00Z",
+    );
+    let targets = seed_capture_presets(
+        &state,
+        vec![
+            stored_auth_preset("preset-a", "A", newer_a),
+            stored_auth_preset("preset-b", "B", auth_b),
+        ],
+    )
+    .await;
+    let older_live = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "rotated-access-a",
+        "rotated-refresh-a",
+        "2026-09-22T11:21:00Z",
+    );
+    write_login_auth_files(&targets, &older_live).await.unwrap();
+
+    super::apply::apply_auth_preset_to_targets(&state, "preset-b", "", true, &targets[0], &targets)
+        .await
+        .unwrap();
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    let stored_a = presets
+        .iter()
+        .find(|preset| preset.id == "preset-a")
+        .unwrap();
+    assert_eq!(stored_a.auth.tokens.refresh_token, "preset-refresh-a");
+    assert_eq!(stored_a.auth.last_refresh, "2026-09-23T00:00:00Z");
+}
+
+#[tokio::test]
+async fn apply_preset_without_live_login_auth_is_noop() {
+    for (label, api_key_auth) in [("missing", false), ("api-key", true)] {
+        let root = test_temp_dir(&format!("capture-noop-{label}"));
+        let state = test_app_state(&root);
+        let stale_a = capture_test_auth(
+            "acct-a",
+            "a@example.com",
+            "stale-access-a",
+            "stale-refresh-a",
+            "2026-09-22T00:27:00Z",
+        );
+        let auth_b = capture_test_auth(
+            "acct-b",
+            "b@example.com",
+            "access-b",
+            "refresh-b",
+            "2026-09-21T00:00:00Z",
+        );
+        let targets = seed_capture_presets(
+            &state,
+            vec![
+                stored_auth_preset("preset-a", "A", stale_a),
+                stored_auth_preset("preset-b", "B", auth_b),
+            ],
+        )
+        .await;
+        if api_key_auth {
+            write_api_auth_files(
+                &targets,
+                &ApiAuthFile {
+                    openai_api_key: "sk-test".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        }
+
+        super::apply::apply_auth_preset_to_targets(
+            &state,
+            "preset-b",
+            "",
+            true,
+            &targets[0],
+            &targets,
+        )
+        .await
+        .unwrap();
+
+        let presets = state.auth_manager.auth_presets_snapshot();
+        let stored_a = presets
+            .iter()
+            .find(|preset| preset.id == "preset-a")
+            .unwrap();
+        assert_eq!(stored_a.auth.tokens.refresh_token, "stale-refresh-a");
+        let written = fs::read_to_string(&targets[0].auth_file).unwrap();
+        assert!(written.contains("\"refresh_token\": \"refresh-b\""), "{written}");
+    }
+}
+
+#[tokio::test]
+async fn save_current_auth_preset_updates_tokens_only_for_existing_account() {
+    let root = test_temp_dir("save-current-existing");
+    let state = test_app_state(&root);
+    let stale_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "stale-access-a",
+        "stale-refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let auth_b = capture_test_auth(
+        "acct-b",
+        "b@example.com",
+        "access-b",
+        "refresh-b",
+        "2026-09-21T00:00:00Z",
+    );
+    let mut preset_a = stored_auth_preset("preset-a", "OK派大星越南", stale_a);
+    preset_a.details.account_name = Some("Team Workspace".to_string());
+    preset_a.details.login_method = Some("Google".to_string());
+    preset_a.config_overrides = vec![PresetConfigOverride {
+        key: Some("model".to_string()),
+        value: Some("\"gpt-5.5\"".to_string()),
+    }];
+    preset_a.switch_count = 17;
+    seed_capture_presets(&state, vec![stored_auth_preset("preset-b", "B", auth_b), preset_a]).await;
+
+    let rotated_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "rotated-access-a",
+        "rotated-refresh-a",
+        "2026-09-22T11:21:00Z",
+    );
+    let response =
+        super::save_current_auth_preset_for_login(&state, "", "auth.json".to_string(), rotated_a)
+            .await
+            .unwrap();
+    assert!(response.ok);
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    assert_eq!(presets.len(), 2);
+    // Position and identity are unchanged: preset A is still at index 1.
+    let stored_a = &presets[1];
+    assert_eq!(stored_a.id, "preset-a");
+    assert_eq!(stored_a.name, "OK派大星越南");
+    assert_eq!(stored_a.details.account_name.as_deref(), Some("Team Workspace"));
+    assert_eq!(stored_a.details.login_method.as_deref(), Some("Google"));
+    assert_eq!(stored_a.details.email.as_deref(), Some("a@example.com"));
+    assert_eq!(stored_a.config_overrides.len(), 1);
+    assert_eq!(stored_a.switch_count, 17);
+    assert_eq!(stored_a.auth.tokens.refresh_token, "rotated-refresh-a");
+    assert_eq!(stored_a.auth.tokens.access_token, "rotated-access-a");
+    assert_eq!(stored_a.auth.last_refresh, "2026-09-22T11:21:00Z");
+    assert!(stored_a.saved_at > 1);
+}
+
+#[tokio::test]
+async fn save_current_auth_preset_creates_new_preset_when_email_differs() {
+    let root = test_temp_dir("save-current-new");
+    let state = test_app_state(&root);
+    let stale_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "stale-access-a",
+        "stale-refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let preset_a = stored_auth_preset("preset-a", "A", stale_a);
+    seed_capture_presets(&state, vec![preset_a]).await;
+
+    // Same account_id but a different email is a different team user.
+    let other_user_auth = capture_test_auth(
+        "acct-a",
+        "other@example.com",
+        "new-access-x",
+        "new-refresh-x",
+        "2026-09-22T11:21:00Z",
+    );
+    let response = super::save_current_auth_preset_for_login(
+        &state,
+        "",
+        "auth.json".to_string(),
+        other_user_auth,
+    )
+    .await
+    .unwrap();
+    assert!(response.ok);
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    assert_eq!(presets.len(), 2);
+    let stored_a = presets
+        .iter()
+        .find(|preset| preset.id == "preset-a")
+        .unwrap();
+    assert_eq!(stored_a.auth.tokens.refresh_token, "stale-refresh-a");
+    let new_preset = presets
+        .iter()
+        .find(|preset| preset.id != "preset-a")
+        .unwrap();
+    assert_eq!(new_preset.auth.tokens.refresh_token, "new-refresh-x");
+    assert!(new_preset.name.starts_with("账号 "));
+}
+
+#[tokio::test]
+async fn update_auth_preset_preserves_switch_count() {
+    let root = test_temp_dir("update-preset-switch-count");
+    let state = test_app_state(&root);
+    let auth_a = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "access-a",
+        "refresh-a",
+        "2026-09-22T00:27:00Z",
+    );
+    let mut preset_a = stored_auth_preset("preset-a", "A", auth_a.clone());
+    preset_a.switch_count = 42;
+    seed_capture_presets(&state, vec![preset_a]).await;
+
+    let edited_auth = capture_test_auth(
+        "acct-a",
+        "a@example.com",
+        "edited-access-a",
+        "edited-refresh-a",
+        "2026-09-22T11:21:00Z",
+    );
+    super::update_auth_preset(
+        axum::extract::State(state.clone()),
+        axum::extract::Path("preset-a".to_string()),
+        axum::Json(auth_core::SaveAuthPresetRequest {
+            name: "renamed-a".to_string(),
+            details: AuthPresetDetails::default(),
+            config_overrides: Vec::new(),
+            config_key: None,
+            config_value: None,
+            secondary_config_key: None,
+            secondary_config_value: None,
+            auth: edited_auth,
+        }),
+    )
+    .await
+    .unwrap();
+
+    let presets = state.auth_manager.auth_presets_snapshot();
+    let stored_a = presets
+        .iter()
+        .find(|preset| preset.id == "preset-a")
+        .unwrap();
+    assert_eq!(stored_a.name, "renamed-a");
+    assert_eq!(stored_a.switch_count, 42);
+    assert_eq!(stored_a.auth.tokens.refresh_token, "edited-refresh-a");
 }

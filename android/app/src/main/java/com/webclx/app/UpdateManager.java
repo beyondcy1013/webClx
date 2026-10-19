@@ -19,6 +19,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.regex.Pattern;
 
 final class UpdateManager {
@@ -36,6 +37,7 @@ final class UpdateManager {
     private static final Pattern SHA256 = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern VERSION = Pattern.compile("[0-9]+\\.[0-9]+\\.[0-9]+");
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor();
+    private static final Object PREFERENCES_LOCK = new Object();
 
     interface Callback {
         void onSuccess(UpdateManifest manifest);
@@ -44,9 +46,93 @@ final class UpdateManager {
 
     private UpdateManager() {}
 
-    static void check(Context context, int preferredSource, Callback callback) {
-        EXECUTOR.execute(() -> {
-            String lastError = context.getString(R.string.update_check_failed);
+    /**
+     * Serializes the short SharedPreferences mutations that make up one update
+     * transaction so concurrent callers can never interleave half-written
+     * pending/verified download state.
+     */
+    static void mutatePreferences(Context context, java.util.function.Consumer<SharedPreferences.Editor> mutation) {
+        synchronized (PREFERENCES_LOCK) {
+            SharedPreferences.Editor editor = preferences(context).edit();
+            mutation.accept(editor);
+            editor.apply();
+        }
+    }
+
+    static long pendingDownloadId(Context context) {
+        return preferences(context).getLong(PENDING_APK_DOWNLOAD_ID, NO_DOWNLOAD);
+    }
+
+    /** True only while {@code downloadId} still names the live pending update. */
+    static boolean isCurrentPending(Context context, long downloadId) {
+        return downloadId != NO_DOWNLOAD && pendingDownloadId(context) == downloadId;
+    }
+
+    /**
+     * Immutable view of the expected-update fields for one download id,
+     * captured atomically so a verification worker never reads mutable
+     * preferences that may already belong to a newer download.
+     */
+    static final class PendingUpdateSnapshot {
+        final long downloadId;
+        final String sha256;
+        final long size;
+        final long versionCode;
+
+        PendingUpdateSnapshot(long downloadId, String sha256, long size, long versionCode) {
+            this.downloadId = downloadId;
+            this.sha256 = sha256;
+            this.size = size;
+            this.versionCode = versionCode;
+        }
+    }
+
+    /**
+     * Returns a snapshot for {@code downloadId} only while preferences still
+     * name it as the live pending download, otherwise null.
+     */
+    static PendingUpdateSnapshot pendingSnapshot(Context context, long downloadId) {
+        synchronized (PREFERENCES_LOCK) {
+            SharedPreferences prefs = preferences(context);
+            if (downloadId == NO_DOWNLOAD
+                || prefs.getLong(PENDING_APK_DOWNLOAD_ID, NO_DOWNLOAD) != downloadId) {
+                return null;
+            }
+            return new PendingUpdateSnapshot(
+                downloadId,
+                prefs.getString(EXPECTED_SHA256, ""),
+                prefs.getLong(EXPECTED_SIZE, -1),
+                prefs.getLong(EXPECTED_VERSION_CODE, -1)
+            );
+        }
+    }
+
+    /**
+     * Commits a verified staged APK only if the pending download id has not
+     * moved on to a newer download since verification started.
+     */
+    static boolean commitVerifiedApk(Context context, long downloadId, String stagedPath) {
+        synchronized (PREFERENCES_LOCK) {
+            if (!isCurrentPending(context, downloadId)) {
+                return false;
+            }
+            preferences(context).edit()
+                .putLong(VERIFIED_DOWNLOAD_ID, downloadId)
+                .putString(VERIFIED_APK_PATH, stagedPath)
+                .apply();
+            return true;
+        }
+    }
+
+    /**
+     * Starts an asynchronous manifest check.  Callers must pass an application
+     * context lifetime (the method takes one internally) and may cancel the
+     * returned Future when the requesting screen is destroyed.
+     */
+    static Future<?> check(Context context, int preferredSource, Callback callback) {
+        final Context appContext = context.getApplicationContext();
+        return EXECUTOR.submit(() -> {
+            String lastError = appContext.getString(R.string.update_check_failed);
             for (int offset = 0; offset < SourceRegistry.URLS.length; offset++) {
                 int index = preferredSource >= 0
                     ? (preferredSource + offset) % SourceRegistry.URLS.length
@@ -106,15 +192,15 @@ final class UpdateManager {
         );
         DownloadManager manager = (DownloadManager) context.getSystemService(Context.DOWNLOAD_SERVICE);
         long downloadId = manager.enqueue(request);
-        preferences(context).edit()
+        mutatePreferences(context, editor -> editor
             .putLong(PENDING_APK_DOWNLOAD_ID, downloadId)
             .putString(EXPECTED_SHA256, manifest.sha256)
             .putLong(EXPECTED_SIZE, manifest.size)
             .putLong(EXPECTED_VERSION_CODE, manifest.versionCode)
             .putLong(VERIFIED_DOWNLOAD_ID, NO_DOWNLOAD)
+            .remove(VERIFIED_APK_PATH)
             .putLong(INSTALLER_LAUNCHED_DOWNLOAD_ID, NO_DOWNLOAD)
-            .putBoolean(WAITING_FOR_INSTALL_PERMISSION, false)
-            .apply();
+            .putBoolean(WAITING_FOR_INSTALL_PERMISSION, false));
         return downloadId;
     }
 
@@ -122,30 +208,47 @@ final class UpdateManager {
         return context.getSharedPreferences(DOWNLOAD_PREFERENCES, Context.MODE_PRIVATE);
     }
 
-    static void clearPending(Context context) {
-        SharedPreferences preferences = preferences(context);
-        String verifiedPath = preferences.getString(VERIFIED_APK_PATH, "");
-        if (!verifiedPath.isEmpty()) {
-            File updatesDir = new File(context.getFilesDir(), "updates");
-            File verified = new File(verifiedPath);
-            try {
-                if (verified.getCanonicalFile().getParentFile().equals(updatesDir.getCanonicalFile())) {
-                    verified.delete();
-                }
-            } catch (Exception ignored) {
-                // Never delete a path that cannot be proven to belong to the update directory.
+    /**
+     * Clears the pending update only when {@code downloadId} still matches the
+     * stored pending id, so a stale completion can never wipe a newer
+     * download's transaction state.
+     */
+    static boolean clearPending(Context context, long downloadId) {
+        synchronized (PREFERENCES_LOCK) {
+            // NO_DOWNLOAD is not a wildcard: an id-scoped clear must name the
+            // live pending download or it touches nothing.
+            if (downloadId == NO_DOWNLOAD || !isCurrentPending(context, downloadId)) {
+                return false;
             }
+            SharedPreferences preferences = preferences(context);
+            String verifiedPath = preferences.getString(VERIFIED_APK_PATH, "");
+            if (!verifiedPath.isEmpty()) {
+                File updatesDir = new File(context.getFilesDir(), "updates");
+                File verified = new File(verifiedPath);
+                try {
+                    if (verified.getCanonicalFile().getParentFile().equals(updatesDir.getCanonicalFile())) {
+                        verified.delete();
+                    }
+                } catch (Exception ignored) {
+                    // Never delete a path that cannot be proven to belong to the update directory.
+                }
+            }
+            preferences.edit()
+                .remove(PENDING_APK_DOWNLOAD_ID)
+                .remove(EXPECTED_SHA256)
+                .remove(EXPECTED_SIZE)
+                .remove(EXPECTED_VERSION_CODE)
+                .remove(VERIFIED_DOWNLOAD_ID)
+                .remove(VERIFIED_APK_PATH)
+                .remove(INSTALLER_LAUNCHED_DOWNLOAD_ID)
+                .remove(WAITING_FOR_INSTALL_PERMISSION)
+                .apply();
+            return true;
         }
-        preferences.edit()
-            .remove(PENDING_APK_DOWNLOAD_ID)
-            .remove(EXPECTED_SHA256)
-            .remove(EXPECTED_SIZE)
-            .remove(EXPECTED_VERSION_CODE)
-            .remove(VERIFIED_DOWNLOAD_ID)
-            .remove(VERIFIED_APK_PATH)
-            .remove(INSTALLER_LAUNCHED_DOWNLOAD_ID)
-            .remove(WAITING_FOR_INSTALL_PERMISSION)
-            .apply();
+    }
+
+    static void clearPending(Context context) {
+        clearPending(context, pendingDownloadId(context));
     }
 
     private static UpdateManifest fetchManifest(int source) throws Exception {

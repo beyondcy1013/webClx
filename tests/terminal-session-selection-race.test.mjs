@@ -24,6 +24,9 @@ const state = {
 const sandbox = {
   console,
   state,
+  document: {
+    getElementById: () => null,
+  },
   window: {
     requestAnimationFrame(callback) {
       callback();

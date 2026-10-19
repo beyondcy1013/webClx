@@ -70,7 +70,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /async function copyCurrentSessionIdAndAsk\(\)[\s\S]*?const sourceSessionId = state\.activeSessionId;[\s\S]*?detectAgentResumeIdComplete\(sourceSessionId, sourceContext\)[\s\S]*?const prompt = `调用codex对话数据库skill读取session id为 \$\{detected\.resumeId\}并回答我的问题 `;[\s\S]*?copyTextToClipboard\(prompt\)/,
+  /async function copyCurrentSessionIdAndAsk\(\)[\s\S]*?const sourceSessionId = state\.activeSessionId;[\s\S]*?detectAgentResumeIdComplete\(sourceSessionId, sourceContext\)[\s\S]*?const prompt = buildSessionQuestionPrompt\(detected\.resumeId\);[\s\S]*?copyTextToClipboard\(prompt\)/,
   "copy-ID-and-ask should freeze the source terminal and copy the complete prompt like copy-terminal-name",
 );
 
@@ -92,6 +92,30 @@ assert.match(
   terminalFunctionDefaults,
   /Object\.freeze\(\{\s*key:\s*"toggle_soft_keyboard"[\s\S]*?action:\s*"toggle_soft_keyboard"[\s\S]*?shortcut:\s*"Ctrl\+K"/,
   "soft-keyboard toggle should use Ctrl+K",
+);
+
+assert.match(
+  terminalFunctionDefaults,
+  /Object\.freeze\(\{\s*key:\s*"quota"[\s\S]*?label:\s*"套餐"[\s\S]*?action:\s*"open_quota_dialog"[\s\S]*?shortcut:\s*"Ctrl\+Alt\+Q"/,
+  "套餐 should use Ctrl+Alt+Q in the 全能 function menu",
+);
+
+assert.match(
+  terminalSettingsJs,
+  /BUILTIN_TERMINAL_SHORTCUT_KEYS[\s\S]*?"quota"[\s\S]*?command\.shortcut = builtin\.shortcut/,
+  "saved 套餐 entries should migrate to the built-in Ctrl+Alt+Q shortcut",
+);
+
+assert.match(
+  terminalJs,
+  /function terminalCommandMenuLabel\(command\)[\s\S]*?`\$\{command\.label\}（\$\{compactTerminalShortcut\(command\.shortcut\)\}）`[\s\S]*?button\.textContent = terminalCommandMenuLabel\(command\)/,
+  "menu items should display configured shortcuts after their labels",
+);
+
+assert.match(
+  terminalJs,
+  /function compactTerminalShortcut\(shortcut\) \{[\s\S]*?normalizeTerminalShortcutText\(shortcut\)[\s\S]*?replace\([^,]+, "\^"\)/,
+  "menu shortcut labels should compact Ctrl as caret",
 );
 
 assert.match(
@@ -120,8 +144,8 @@ assert.doesNotMatch(
 
 assert.match(
   terminalHtml,
-  /<option value="deploy_project" data-shortcut="Ctrl\+B">本项目部署脚本<\/option>/,
-  "project commands should own deploy and its Ctrl+B shortcut",
+  /<option value="deploy_project" data-shortcut="\^B">本项目部署脚本<\/option>/,
+  "project commands should own deploy and its compact Ctrl+B shortcut",
 );
 
 assert.match(
@@ -306,8 +330,26 @@ assert.doesNotMatch(
 
 assert.match(
   terminalHtml,
-  /<button[^>]+id="terminal-escape-command-button"[\s\S]*?aria-haspopup="menu"[\s\S]*?>\s*Esc\/\^C\s*<\/button>[\s\S]*?id="terminal-escape-command-menu"/,
-  "Esc/^C should open an ordinary compact menu",
+  /<button[^>]+id="terminal-escape-command-button"[\s\S]*?data-action="escape_ctrl_c"[\s\S]*?aria-label="短按发送 \^C，长按发送 Esc"[\s\S]*?>\s*Esc\/\^C\s*<\/button>/,
+  "Esc/^C should be a direct soft key with short/long press semantics",
+);
+
+assert.doesNotMatch(
+  terminalHtml,
+  /id="terminal-escape-command-menu"/,
+  "Esc/^C should no longer open a compact menu",
+);
+
+assert.match(
+  terminalJs,
+  /function sendTerminalEscapeCtrlCInput\(sequenceKey\) \{[\s\S]*sendTerminalInput\(sequence\);[\s\S]*focusTerminalAfterSoftKeyboardInput\(\);[\s\S]*\}/,
+  "Esc/^C direct input should preserve soft-keyboard focus behavior",
+);
+
+assert.match(
+  terminalJs,
+  /function startMobileKeyLongPress\(press\) \{[\s\S]*dataset\.action !== "escape_ctrl_c"[\s\S]*sendTerminalEscapeCtrlCInput\("escape"\);/,
+  "Esc/^C long press should send Esc",
 );
 
 assert.match(
@@ -410,6 +452,12 @@ assert.match(
   terminalJs,
   /function sendSlashCommand\(command, \{ enterDelayMs = 0, sessionId = "" \} = \{\}\)[\s\S]*?const effectiveEnterDelayMs =[\s\S]*?commandLine\.startsWith\("\/"\)[\s\S]*?MOBILE_SLASH_COMMAND_ENTER_DELAY_MS[\s\S]*?sendInput\(commandLine\)[\s\S]*?await waitForMobileKeyDelay\(effectiveEnterDelayMs\);[\s\S]*?sendInput\(MOBILE_KEY_SEQUENCES\.enter\)/,
   "slash-command sending should target the requested session and wait before the first Enter",
+);
+
+assert.match(
+  terminalJs,
+  /const MOBILE_ESCAPE_COMMAND_SEPARATION_MS = 12;/,
+  "compact's leading Esc must be separated from slash text before PTY delivery",
 );
 
 assert.match(

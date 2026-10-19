@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>终端智能体配置 - webClx</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      (() => {
+        try {
+          const mode = localStorage.getItem("webclx:theme-mode");
+          const theme = mode === "dark" || mode === "light"
+            ? mode
+            : matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          document.documentElement.dataset.theme = theme;
+          document.documentElement.style.colorScheme = theme;
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260817a" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260816b" />
+    <script defer src="/assets/abort-signal-compat.js?v=20260817b"></script>
+    <script defer src="/assets/dialog-backdrop-guard.js?v=20260916c"></script>
+    <style>
+      .agent-profile-page { min-height: 100dvh; }
+      .agent-profile-layout { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); min-height: calc(100dvh - 46px); border-top: 1px solid var(--line); }
+      .agent-profile-sidebar { min-width: 0; border-right: 1px solid var(--line); background: var(--panel); }
+      .agent-profile-heading { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 10px; border-bottom: 1px solid var(--line); }
+      .agent-profile-heading h1 { margin: 0; font-size: var(--font-size-tier-3); letter-spacing: 0; }
+      .agent-profile-list { display: grid; gap: 1px; background: var(--line); }
+      .agent-profile-item { display: grid; gap: 6px; padding: 9px 10px; background: var(--panel); }
+      .agent-profile-title-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .agent-profile-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+      .agent-profile-type { color: var(--muted); font-size: var(--font-size-tier-1); }
+      .agent-profile-description { color: var(--muted); font-size: var(--font-size-tier-2); line-height: 1.35; }
+      .agent-profile-controls { display: flex; flex-wrap: wrap; gap: 6px; }
+      .agent-profile-controls button, .agent-profile-controls a { min-height: 30px; }
+      .agent-profile-item.legacy-native { border-left: 3px solid var(--warning); }
+      .agent-profile-migration { color: var(--warning); font-size: var(--font-size-tier-1); }
+      .agent-profile-workspace { min-width: 0; display: flex; background: var(--bg); }
+      .agent-profile-empty { margin: auto; color: var(--muted); font-size: var(--font-size-tier-2); }
+      .agent-terminal-shell { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+      .agent-terminal-toolbar { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--panel); }
+      .agent-terminal-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .agent-terminal-stage { position: relative; min-height: 0; flex: 1; }
+      .agent-terminal-frame { width: 100%; height: 100%; border: 0; opacity: 0; pointer-events: none; }
+      .agent-terminal-pending { position: absolute; inset: 0; display: grid; place-content: center; gap: 5px; text-align: center; color: var(--muted); }
+      .agent-terminal-shell.ready .agent-terminal-frame { opacity: 1; pointer-events: auto; }
+      .agent-terminal-shell.ready .agent-terminal-pending { display: none; }
+      .agent-terminal-shell.failed .agent-terminal-pending strong { color: var(--danger); }
+      .agent-profile-status { min-height: 22px; padding: 5px 10px; color: var(--muted); font-size: var(--font-size-tier-1); }
+      .agent-profile-status[data-tone="error"] { color: var(--danger); }
+      .agent-profile-status[data-tone="ok"] { color: var(--success); }
+      .agent-profile-dialog { width: min(680px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; background: var(--panel); color: var(--text); }
+      .agent-profile-dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+      .agent-profile-form { display: grid; gap: 12px; padding: 14px; }
+      .agent-profile-form-head, .agent-profile-form-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .agent-profile-form-head h2 { margin: 0; font-size: var(--font-size-tier-4); letter-spacing: 0; }
+      .agent-profile-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+      .agent-profile-field { display: grid; gap: 5px; min-width: 0; font-size: var(--font-size-tier-2); }
+      .agent-profile-field.full { grid-column: 1 / -1; }
+      .agent-profile-field input, .agent-profile-field select, .agent-profile-field textarea { width: 100%; }
+      @media (max-width: 760px) {
+        .agent-profile-layout { grid-template-columns: 1fr; }
+        .agent-profile-sidebar { border-right: 0; }
+        .agent-profile-workspace { min-height: 58dvh; border-top: 1px solid var(--line); }
+        .agent-profile-grid { grid-template-columns: 1fr; }
+        .agent-profile-field.full { grid-column: auto; }
+      }
+    </style>
+    <script defer src="/assets/i18n.js?v=20260816m"></script>
+    <script defer src="/assets/agent-terminal-profiles.js?v=20260817a"></script>
+  </head>
+  <body class="app-shell">
+    <div class="page agent-profile-page">
+      <header class="topbar slim browser-topbar terminal-page-nav">
+        <nav class="tabs page-tabs" aria-label="webClx 顶级导航">
+          <a class="tab-button topbar-link-button" href="/terminal">终端管理</a>
+          <a class="tab-button topbar-link-button" href="/workspace">工作区</a>
+          <a class="tab-button topbar-link-button" href="/workspace_history">历史工作区</a>
+          <a class="tab-button topbar-link-button" href="/codex_api">LLM_API</a>
+          <a class="tab-button topbar-link-button" href="/settings">设置</a>
+          <a class="tab-button topbar-link-button active" href="/agent" aria-current="page">DeepSeek Agent</a>
+          <a class="tab-button topbar-link-button" href="/collaboration">智能体协作</a>
+          <a class="tab-button topbar-link-button" href="/archives">归档列表</a>
+          <a class="tab-button topbar-link-button" href="/downloads">编译产物</a>
+        </nav>
+      </header>
+      <main class="agent-profile-layout">
+        <aside class="agent-profile-sidebar">
+          <div class="agent-profile-heading">
+            <h1>终端智能体配置</h1>
+            <div class="toolbar">
+              <a class="button primary" href="/agent">DeepSeek Harness</a>
+              <button id="agent-terminal-profile-add" class="button secondary" type="button">新建</button>
+            </div>
+          </div>
+          <div id="agent-terminal-profile-status" class="agent-profile-status" role="status"></div>
+          <div id="agent-terminal-profiles" class="agent-profile-list"></div>
+        </aside>
+        <section id="agent-profile-workspace" class="agent-profile-workspace" aria-live="polite">
+          <div class="agent-profile-empty">暂无活动会话</div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="agent-terminal-profile-dialog" class="agent-profile-dialog">
+      <form id="agent-terminal-profile-form" class="agent-profile-form">
+        <div class="agent-profile-form-head">
+          <h2 id="agent-terminal-profile-title">新建终端智能体</h2>
+          <button id="agent-terminal-profile-close" class="button secondary" type="button" title="关闭" aria-label="关闭">关闭</button>
+        </div>
+        <input id="agent-terminal-profile-id" type="hidden" />
+        <div class="agent-profile-grid">
+          <label class="agent-profile-field"><span>名称</span><input id="agent-terminal-profile-name" class="text-input" maxlength="64" required /></label>
+          <label class="agent-profile-field"><span>智能体类型</span><select id="agent-terminal-profile-agent-type" class="text-input" required><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+          <label class="agent-profile-field full"><span>说明</span><textarea id="agent-terminal-profile-description" class="text-input" rows="2" maxlength="240"></textarea></label>
+          <label class="agent-profile-field"><span>API 预设</span><select id="agent-terminal-profile-preset" class="text-input" required></select></label>
+          <label class="agent-profile-field"><span>Skill</span><select id="agent-terminal-profile-skill" class="text-input" required></select></label>
+          <label class="agent-profile-field"><span>工作目录</span><input id="agent-terminal-profile-cwd" class="text-input" value="/home/system" required /></label>
+          <label class="agent-profile-field"><span>项目路径</span><input id="agent-terminal-profile-project" class="text-input" value="/home/system" required /></label>
+          <label class="agent-profile-field"><span>会话名称</span><input id="agent-terminal-profile-terminal-name" class="text-input" maxlength="64" required /></label>
+          <label class="agent-profile-field full"><span>待命上下文</span><textarea id="agent-terminal-profile-task" class="text-input" rows="3" maxlength="4096"></textarea></label>
+        </div>
+        <div id="agent-terminal-profile-form-status" class="agent-profile-status" role="status"></div>
+        <div class="agent-profile-form-actions">
+          <button id="agent-terminal-profile-cancel" class="button secondary" type="button">取消</button>
+          <button class="button primary" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

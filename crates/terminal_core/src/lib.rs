@@ -176,13 +176,43 @@ pub fn resume_command_info_from_text(raw: &str) -> Option<ResumeCommandInfo> {
 }
 
 fn extract_resume_info_from_text(raw: &str) -> Option<(&'static str, String)> {
-    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut token_lines = Vec::new();
+    for (line_index, line) in raw.split('\n').enumerate() {
+        for token in line.split_whitespace() {
+            match token.split_once('=') {
+                Some((prefix, suffix)) if prefix == "--resume-id" => {
+                    tokens.push(prefix);
+                    token_lines.push(line_index);
+                    if !suffix.is_empty() {
+                        tokens.push(suffix);
+                        token_lines.push(line_index);
+                    }
+                }
+                _ => {
+                    tokens.push(token);
+                    token_lines.push(line_index);
+                }
+            }
+        }
+    }
     for index in 0..tokens.len().saturating_sub(1) {
         let Some(program) = resume_program_at(&tokens, index) else {
             continue;
         };
 
         let argument_index = index + 2;
+        if program == "devin" {
+            if token_lines.get(argument_index) == token_lines.get(index)
+                && let Some(argument) = tokens.get(argument_index)
+            {
+                let token = cleanup_resume_token(argument);
+                if is_valid_devin_resume_slug(&token) {
+                    return Some((program, token));
+                }
+            }
+            continue;
+        }
         let bounded_scan_end = tokens
             .len()
             .min(argument_index + RESUME_UUID_SCAN_TOKEN_LIMIT);
@@ -212,6 +242,16 @@ fn resume_program_at(tokens: &[&str], index: usize) -> Option<&'static str> {
         Some("codex")
     } else if program.eq_ignore_ascii_case("claude") && keyword.eq_ignore_ascii_case("--resume") {
         Some("claude")
+    } else if program.eq_ignore_ascii_case("kiro-cli")
+        && keyword.eq_ignore_ascii_case("--resume-id")
+    {
+        Some("kiro")
+    } else if program.eq_ignore_ascii_case("grok") && keyword.eq_ignore_ascii_case("--resume") {
+        Some("grok")
+    } else if program.eq_ignore_ascii_case("devin")
+        && (keyword.eq_ignore_ascii_case("-r") || keyword.eq_ignore_ascii_case("--resume"))
+    {
+        Some("devin")
     } else {
         None
     }
@@ -239,6 +279,14 @@ fn is_valid_resume_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn is_valid_devin_resume_slug(token: &str) -> bool {
+    token.len() <= MAX_RESUME_ID_LEN
+        && token.split('-').count() > 1
+        && token.split('-').all(|segment| {
+            !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
 }
 
 pub fn normalize_resume_archive_note(note: Option<&str>, resume_id: &str) -> String {
@@ -319,6 +367,12 @@ pub fn codex_resume_command(resume_id: &str) -> String {
 pub fn resume_command_for_program(program: &str, resume_id: &str) -> String {
     if program.eq_ignore_ascii_case("claude") {
         format!("claude --resume {resume_id}")
+    } else if program.eq_ignore_ascii_case("kiro") {
+        format!("kiro-cli --resume-id {resume_id}")
+    } else if program.eq_ignore_ascii_case("grok") {
+        format!("grok --resume {resume_id}")
+    } else if program.eq_ignore_ascii_case("devin") {
+        format!("devin -r {resume_id}")
     } else {
         codex_resume_command(resume_id)
     }
@@ -472,6 +526,24 @@ pub fn claude_session_id_from_path(path: &Path) -> Option<String> {
     Some(stem.to_ascii_lowercase())
 }
 
+/// 从 CodeBuddy 会话文件路径中提取 resume id。
+///
+/// CodeBuddy 把当前会话写成
+/// `<home>/.codebuddy/projects/<cwd-key>/<uuid>.jsonl`。
+/// 文件名本身是 UUID，避免把同目录下的其他 json 当成会话。
+pub fn codebuddy_session_id_from_path(path: &Path) -> Option<String> {
+    let path_text = path.to_string_lossy();
+    if !path_text.contains("/.codebuddy/projects/") {
+        return None;
+    }
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".jsonl")?;
+    if !is_uuid_like(stem) {
+        return None;
+    }
+    Some(stem.to_ascii_lowercase())
+}
+
 fn find_uuid_like_text(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     if bytes.len() < CODEX_SESSION_ID_LEN {
@@ -543,6 +615,9 @@ pub fn auto_session_name_for_path(path: &Path, index: usize) -> String {
     format!("{}_{}", session_directory_label(path), index.max(1))
 }
 
+const AUTO_SESSION_NAME_WRAP_INDEX: usize = 10;
+const AUTO_SESSION_NAME_MAX_INDEX: usize = 100;
+
 pub fn normalize_session_name(raw: &str) -> Result<String> {
     // 先去掉首尾空白，再去掉结尾的下划线 —— 用户在输入框最后习惯按 Shift+- 顺手补一个下划线，
     // 保存时直接剥掉，避免后端会话名出现 `demo_` 这种尾部下划线。
@@ -594,15 +669,31 @@ pub fn next_available_auto_session_name(
     path: &Path,
     start_index: usize,
     claims: &AutoSessionNameClaims,
-) -> (String, usize) {
-    let mut index = start_index.max(1);
-    loop {
+) -> Option<(String, usize)> {
+    let mut index = if start_index > AUTO_SESSION_NAME_MAX_INDEX {
+        AUTO_SESSION_NAME_WRAP_INDEX
+    } else {
+        start_index.max(1)
+    };
+    let candidate_count = if index < AUTO_SESSION_NAME_WRAP_INDEX {
+        AUTO_SESSION_NAME_MAX_INDEX - index + 1
+    } else {
+        AUTO_SESSION_NAME_MAX_INDEX - AUTO_SESSION_NAME_WRAP_INDEX + 1
+    };
+
+    for _ in 0..candidate_count {
         let candidate = auto_session_name_for_path(path, index);
         if !claims.used_names.contains(&candidate) && !claims.used_path_indices.contains(&index) {
-            return (candidate, index);
+            return Some((candidate, index));
         }
-        index = index.saturating_add(1);
+        index = if index == AUTO_SESSION_NAME_MAX_INDEX {
+            AUTO_SESSION_NAME_WRAP_INDEX
+        } else {
+            index + 1
+        };
     }
+
+    None
 }
 
 fn session_directory_label(path: &Path) -> String {
@@ -790,11 +881,15 @@ pub fn should_disable_tmux_scope_isolation(error_message: &str) -> bool {
         || normalized.contains("failed to connect to bus")
         || normalized.contains("failed to create bus connection")
         || normalized.contains("transport endpoint is not connected")
+        || normalized.contains("server exited unexpectedly")
 }
 
 pub fn tmux_missing_session_error(stderr: &str) -> bool {
     let normalized = stderr.to_ascii_lowercase();
-    normalized.contains("can't find session") || normalized.contains("no server running")
+    normalized.contains("can't find session")
+        || normalized.contains("no server running")
+        || (normalized.trim().starts_with("error connecting to ")
+            && normalized.trim().ends_with("(no such file or directory)"))
 }
 
 pub fn normalize_tmux_snapshot(bytes: &[u8]) -> Vec<u8> {
@@ -878,7 +973,8 @@ mod tests {
     use super::{
         AutoSessionNameClaims, CodexResumeArchive, SessionNameState, TitleTracker,
         auto_session_name_for_path, build_tmux_child_env, claude_session_id_from_path,
-        codex_session_id_from_path, next_available_auto_session_name, normalize_resume_archive_cwd,
+        codebuddy_session_id_from_path, codex_session_id_from_path,
+        next_available_auto_session_name, normalize_resume_archive_cwd,
         normalize_resume_archive_terminal_name, normalize_resume_archives,
         normalize_resume_command, normalize_resume_id, normalize_session_name,
         normalize_tmux_snapshot, resume_command_info_from_text, session_name_auto_indices,
@@ -916,6 +1012,9 @@ mod tests {
             "Failed to start transient scope unit: Interactive authentication required."
         ));
         assert!(should_disable_tmux_scope_isolation("Failed to connect to bus: No medium found"));
+        assert!(should_disable_tmux_scope_isolation(
+            "无法通过 systemd scope 创建 tmux 终端会话: server exited unexpectedly"
+        ));
         assert!(!should_disable_tmux_scope_isolation("无法创建 tmux 终端会话: can't find pane"));
     }
 
@@ -923,6 +1022,15 @@ mod tests {
     fn tmux_missing_session_error_is_specific() {
         assert!(tmux_missing_session_error("can't find session: webclx_s123"));
         assert!(tmux_missing_session_error("no server running on /tmp/tmux-0/default"));
+        assert!(tmux_missing_session_error(
+            "error connecting to /tmp/tmux-0/webclx_s123 (No such file or directory)"
+        ));
+        assert!(!tmux_missing_session_error(
+            "error connecting to /tmp/tmux-0/webclx_s123 (Permission denied)"
+        ));
+        assert!(!tmux_missing_session_error(
+            "error connecting to /tmp/tmux-0/webclx_s123 (Connection refused)"
+        ));
     }
 
     #[test]
@@ -949,7 +1057,7 @@ mod tests {
 
         assert_eq!(
             next_available_auto_session_name(path, 2, &claims),
-            ("workspace_4".to_string(), 4)
+            Some(("workspace_4".to_string(), 4))
         );
     }
 
@@ -962,7 +1070,7 @@ mod tests {
 
         assert_eq!(
             next_available_auto_session_name(path, 2, &claims),
-            ("workspace_4".to_string(), 4)
+            Some(("workspace_4".to_string(), 4))
         );
     }
 
@@ -974,8 +1082,43 @@ mod tests {
 
         assert_eq!(
             next_available_auto_session_name(path, 1, &claims),
-            ("workspace_2".to_string(), 2)
+            Some(("workspace_2".to_string(), 2))
         );
+    }
+
+    #[test]
+    fn next_available_auto_name_wraps_to_ten_after_one_hundred() {
+        let path = std::path::Path::new("/tmp/workspace");
+        let claims = AutoSessionNameClaims::default();
+
+        assert_eq!(
+            next_available_auto_session_name(path, 101, &claims),
+            Some(("workspace_10".to_string(), 10))
+        );
+    }
+
+    #[test]
+    fn next_available_auto_name_wraps_and_skips_claimed_indices() {
+        let path = std::path::Path::new("/tmp/workspace");
+        let mut claims = AutoSessionNameClaims::default();
+        claims.claim_path_name("workspace_100".to_string());
+        claims.claim_path_name("workspace_10".to_string());
+
+        assert_eq!(
+            next_available_auto_session_name(path, 100, &claims),
+            Some(("workspace_11".to_string(), 11))
+        );
+    }
+
+    #[test]
+    fn next_available_auto_name_stops_when_wrapped_range_is_exhausted() {
+        let path = std::path::Path::new("/tmp/workspace");
+        let mut claims = AutoSessionNameClaims::default();
+        for index in 10..=100 {
+            claims.claim_path_name(format!("workspace_{index}"));
+        }
+
+        assert_eq!(next_available_auto_session_name(path, 101, &claims), None);
     }
 
     #[test]
@@ -1126,6 +1269,29 @@ mod tests {
     }
 
     #[test]
+    fn codebuddy_session_id_is_parsed_from_projects_path() {
+        let path = std::path::Path::new(
+            "/home/user/.codebuddy/projects/home-codes-lyyStock/01a0c4d5-fa86-7677-bab4-3742957560fd.jsonl",
+        );
+        assert_eq!(
+            codebuddy_session_id_from_path(path).as_deref(),
+            Some("01a0c4d5-fa86-7677-bab4-3742957560fd")
+        );
+        assert!(
+            codebuddy_session_id_from_path(std::path::Path::new(
+                "/home/user/.codebuddy/projects/home-codes-lyyStock/notes.jsonl"
+            ))
+            .is_none()
+        );
+        assert!(
+            codebuddy_session_id_from_path(std::path::Path::new(
+                "/home/user/.claude/projects/-home-codes/ad08e570-051b-4b66-8c7a-7b20e434b168.jsonl"
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
     fn resume_archive_cwd_keeps_relative_workspace_path() {
         assert_eq!(
             normalize_resume_archive_cwd(Some(" webClx/../stockScreener/ ")),
@@ -1250,6 +1416,91 @@ bash: /home/root/.local/bin/codex: No such file or directory";
         assert_eq!(info.program, "claude");
         assert_eq!(info.resume_id, resume_id);
         assert_eq!(info.command, format!("claude --resume {resume_id}"));
+    }
+
+    #[test]
+    fn resume_command_info_preserves_kiro_and_grok_commands() {
+        let kiro_id = "da5ccebe-2b7f-48ae-a1f1-cac017923d4d";
+        let grok_id = "01a0c6e3-8c2c-7e92-b493-707061b15e48";
+
+        for (text, program, expected) in [
+            (
+                format!("kiro-cli --resume-id {kiro_id}"),
+                "kiro",
+                format!("kiro-cli --resume-id {kiro_id}"),
+            ),
+            (
+                format!("kiro-cli --resume-id={kiro_id}"),
+                "kiro",
+                format!("kiro-cli --resume-id {kiro_id}"),
+            ),
+            (format!("grok --resume {grok_id}"), "grok", format!("grok --resume {grok_id}")),
+        ] {
+            let info = resume_command_info_from_text(&text).expect("resume command");
+            assert_eq!(info.program, program);
+            assert_eq!(info.resume_id, if program == "kiro" { kiro_id } else { grok_id });
+            assert_eq!(info.command, expected);
+        }
+    }
+
+    #[test]
+    fn resume_command_info_recognizes_devin_resume_commands() {
+        for (text, slug) in [
+            ("devin -r forest-fennel", "forest-fennel"),
+            ("devin --resume worried-plain", "worried-plain"),
+            ("Resume with: devin -r \"forest-fennel\"", "forest-fennel"),
+        ] {
+            let info = resume_command_info_from_text(text).expect("devin resume command");
+            assert_eq!(info.program, "devin");
+            assert_eq!(info.resume_id, slug);
+            assert_eq!(info.command, format!("devin -r {slug}"));
+        }
+    }
+
+    #[test]
+    fn resume_command_info_reads_devin_compact_hint() {
+        let output = "❭ /compact\n\n ✱ Context compacted\n\n devin -r forest-fennel\n resumes this session · devin -r lists recent sessions";
+
+        let info = resume_command_info_from_text(output).expect("devin compact resume hint");
+
+        assert_eq!(info.program, "devin");
+        assert_eq!(info.resume_id, "forest-fennel");
+        assert_eq!(info.command, "devin -r forest-fennel");
+    }
+
+    #[test]
+    fn normalize_resume_command_preserves_devin_command() {
+        assert_eq!(
+            normalize_resume_command(Some("devin --resume forest-fennel"), "forest-fennel"),
+            "devin -r forest-fennel"
+        );
+        assert_eq!(
+            normalize_resume_id("devin -r worried-plain").expect("devin resume id"),
+            "worried-plain"
+        );
+    }
+
+    #[test]
+    fn resume_devin_picker_without_slug_is_ignored() {
+        assert!(resume_command_info_from_text("devin -r").is_none());
+        assert!(resume_command_info_from_text("devin --resume").is_none());
+        assert!(resume_command_info_from_text("devin -r plainword").is_none());
+        assert!(resume_command_info_from_text("devin -r forest-").is_none());
+        assert!(resume_command_info_from_text("devin -r --verbose").is_none());
+        assert!(resume_command_info_from_text("devin -r\nresumes this session").is_none());
+    }
+
+    #[test]
+    fn resume_devin_picker_never_borrows_a_later_uuid() {
+        let uuid = "019d1ba6-f772-7452-a391-6553ccbc0a50";
+
+        assert!(resume_command_info_from_text(&format!("devin -r\nsession {uuid}")).is_none());
+        assert!(resume_command_info_from_text(&format!("devin -r note {uuid}")).is_none());
+
+        let info = resume_command_info_from_text(&format!("devin -r list\ncodex resume {uuid}"))
+            .expect("codex resume command after devin picker");
+        assert_eq!(info.program, "codex");
+        assert_eq!(info.resume_id, uuid);
     }
 
     #[test]

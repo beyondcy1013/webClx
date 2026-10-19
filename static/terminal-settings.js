@@ -22,16 +22,17 @@
     Object.freeze({ key: "toggle_soft_keyboard", label: "开启/关闭软键盘", action: "toggle_soft_keyboard", command: "", shortcut: "Ctrl+K" }),
     Object.freeze({ key: "copy_window", label: "新窗口复制", action: "copy_terminal_view_in_new_window", command: "", shortcut: "" }),
     Object.freeze({ key: "reload_claude", label: "重读 Claude", action: "reload_claude", command: "claude", shortcut: "" }),
-    Object.freeze({ key: "open_schedule_paste", label: "定时消息", action: "open_schedule_paste", command: "", shortcut: "" }),
+    Object.freeze({ key: "open_schedule_paste", label: "定时任务", action: "open_schedule_paste", command: "", shortcut: "" }),
     Object.freeze({ key: "toggle_width", label: "宽屏", action: "toggle_terminal_width", command: "", shortcut: "" }),
     Object.freeze({ key: "qoderclicn", label: "qoderclicn", action: "send_text", command: "qodercli --permission-mode bypass_permissions", shortcut: "" }),
-    Object.freeze({ key: "agy", label: "agy", action: "send_text", command: "agy", shortcut: "" }),
+    Object.freeze({ key: "quota", label: "套餐", action: "open_quota_dialog", command: "", shortcut: "Ctrl+Alt+Q" }),
     Object.freeze({ key: "current_resume_id", label: "session ID", action: "copy_current_resume_id", command: "", shortcut: "" }),
-    Object.freeze({ key: "quota", label: "套餐", action: "open_quota_dialog", command: "", shortcut: "Ctrl+Q" }),
+    Object.freeze({ key: "agy", label: "agy", action: "send_text", command: "agy", shortcut: "" }),
     Object.freeze({ key: "enter", label: "Enter", action: "send_sequence", command: "enter", shortcut: "" }),
   ]);
   const DEFAULT_TERMINAL_PAGE_FUNCTION_COMMANDS = Object.freeze([
     ...DEFAULT_TERMINAL_FUNCTION_COMMANDS,
+    Object.freeze({ key: "set_group_token", label: "设置编组跟随", action: "set_terminal_group_token", command: "", shortcut: "" }),
     Object.freeze({ key: "sort_by_path", label: "切换终端排序", action: "sort_directory_sessions_by_path", command: "", shortcut: "Ctrl+Alt+O" }),
     Object.freeze({ key: "sort_by_status", label: "按状态", action: "sort_directory_sessions_by_status", command: "", shortcut: "" }),
     Object.freeze({ key: "save_and_poweroff", label: "保存会话并关机", action: "save_and_poweroff", command: "", shortcut: "" }),
@@ -63,6 +64,7 @@
               ]);
   const BUILTIN_TERMINAL_SHORTCUT_KEYS = new Set([
     "toggle_soft_keyboard",
+    "quota",
     "extract_current_session",
     "copy_terminal_name",
     "sort_by_path",
@@ -119,16 +121,68 @@
     }),
   ]);
   const DEFAULT_TERMINAL_RENAME_PRESETS = Object.freeze(["完结", "复用对话"]);
+  const DEFAULT_TERMINAL_AGENT_COMMANDS = Object.freeze([
+    Object.freeze({
+      key: "codex",
+      label: "Codex",
+      new_command: "codex",
+      resume_command: "codex --resume {session_id}",
+    }),
+    Object.freeze({
+      key: "cdx",
+      label: "cdx",
+      new_command: "cdx",
+      resume_command: "cdx resume {session_id}",
+    }),
+    Object.freeze({
+      key: "claude",
+      label: "Claude",
+      new_command: "claude",
+      resume_command: "claude --resume {session_id}",
+    }),
+    Object.freeze({
+      key: "codebuddy",
+      label: "CodeBuddy",
+      new_command: "codebuddy",
+      resume_command: "codebuddy --resume {session_id}",
+    }),
+    Object.freeze({
+      key: "devin",
+      label: "Devin",
+      new_command: "devin",
+      resume_command: "devin --resume {session_id}",
+    }),
+    Object.freeze({
+      key: "agy",
+      label: "agy",
+      new_command: "agy",
+      resume_command: "agy --conversation {session_id}",
+    }),
+    Object.freeze({
+      key: "cline",
+      label: "Cline",
+      new_command: "cline",
+      resume_command: "cline --id {session_id}",
+    }),
+    Object.freeze({
+      key: "opencode",
+      label: "OpenCode",
+      new_command: "opencode",
+      resume_command: "opencode --session {session_id}",
+    }),
+    Object.freeze({ key: "other", label: "其它", new_command: "", resume_command: "" }),
+  ]);
+  const MAX_TERMINAL_AGENT_COMMANDS = 20;
   const DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY = "1";
   const MAX_TERMINAL_QUICK_COMMANDS = 20;
   const MAX_TERMINAL_FUNCTION_COMMANDS = 20;
   const MAX_TERMINAL_COMMAND_COLLECTIONS = 12;
   const MAX_TERMINAL_COMMAND_COLLECTION_ITEMS = 40;
   const DEFAULT_COMMAND_COLLECTION_ITEM_ACTION = "send_text";
-  const DEFAULT_FONT_SIZE_TIER_1 = 0.64;
-  const DEFAULT_FONT_SIZE_TIER_2 = 0.68;
-  const DEFAULT_FONT_SIZE_TIER_3 = 0.72;
-  const DEFAULT_FONT_SIZE_TIER_4 = 0.74;
+  const DEFAULT_FONT_SIZE_TIER_1 = 0.90;
+  const DEFAULT_FONT_SIZE_TIER_2 = 0.95;
+  const DEFAULT_FONT_SIZE_TIER_3 = 1.00;
+  const DEFAULT_FONT_SIZE_TIER_4 = 1.06;
   const DEFAULT_FONT_SIZE_TIERS = Object.freeze([
     DEFAULT_FONT_SIZE_TIER_1,
     DEFAULT_FONT_SIZE_TIER_2,
@@ -145,6 +199,7 @@
   const DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_FACTOR = 1.5;
   const DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES = 20;
   const DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT = true;
+  const DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY = true;
   const DEFAULT_TERMINAL_ACTIVITY_AGENT_DISPLAY = "hidden";
   const DEFAULT_TERMINAL_USER = "root";
   const DEFAULT_THEME_MODE = "system";
@@ -204,6 +259,56 @@
       return normalized;
     }
     return normalizeTerminalRenamePresets(fallback, null);
+  }
+
+  function normalizeTerminalAgentKey(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return /^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(normalized) ? normalized : "";
+  }
+
+  function normalizeTerminalAgentCommand(value) {
+    const command = String(value || "")
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, 1000);
+    if (command.includes("{session_id}")) {
+      const withoutPlaceholder = command.split("{session_id}").join("");
+      if (withoutPlaceholder.includes("{") || withoutPlaceholder.includes("}")) {
+        return "";
+      }
+    }
+    return command;
+  }
+
+  function normalizeTerminalAgentCommands(commands, fallback = DEFAULT_TERMINAL_AGENT_COMMANDS) {
+    const seen = new Set();
+    const normalized = [];
+    (Array.isArray(commands) ? commands : []).forEach((command) => {
+      if (normalized.length >= MAX_TERMINAL_AGENT_COMMANDS) return;
+      const key = normalizeTerminalAgentKey(command?.key);
+      if (!key || seen.has(key)) return;
+      const newCommand = normalizeTerminalAgentCommand(command?.new_command);
+      const isPresetAgent = key === "codex" || key === "claude";
+      const isOther = key === "other";
+      if (!isPresetAgent && !isOther && !newCommand) return;
+      seen.add(key);
+      const label = String(command?.label || "")
+        .replace(/[\u0000-\u001f\u007f]/g, "")
+        .trim()
+        .slice(0, 24);
+      normalized.push({
+        key,
+        label: label || key,
+        new_command: newCommand,
+        resume_command: normalizeTerminalAgentCommand(command?.resume_command),
+      });
+    });
+    if (normalized.length || fallback === null) return normalized;
+    return normalizeTerminalAgentCommands(fallback, null);
+  }
+
+  function cloneDefaultTerminalAgentCommands() {
+    return DEFAULT_TERMINAL_AGENT_COMMANDS.map((command) => ({ ...command }));
   }
 
   function normalizeTerminalAutoContinueIntervalSeconds(value) {
@@ -607,6 +712,66 @@
     return normalized;
   }
 
+  // Templates only compose existing persisted actions; no second execution engine.
+  function createTerminalWorkflowTemplate(template, cwd = "") {
+    const action = (kind, value = "") => ({ kind, value, seconds: 0 });
+    switch (template) {
+      case "environment":
+        return [{
+          ...action("codex_launch", "阅读项目说明，加载所需技能，等待我的下一步任务。"),
+          preset_selector: "", preset_match: "exact_name",
+          cwd, project_path: cwd, terminal_name: "", session_action: "new",
+        }];
+      case "task":
+        return [action("switch_api_preset"), action("codex_exec")];
+      case "reference":
+        return [{ ...action("run_workflow"), target_entry_id: "" }];
+      case "custom":
+        return [action("create_terminal")];
+      default:
+        throw new Error("未知工作流模板。");
+    }
+  }
+
+  // Preflight the complete reference graph before any terminal side effects.
+  function inspectTerminalWorkflow(entry, entries) {
+    const steps = [];
+    const visit = (current, stack) => {
+      if (!current || current.kind !== "action") {
+        throw new Error("引用的工作流不存在或不是可执行条目。");
+      }
+      if (stack.includes(current.id)) {
+        throw new Error(`工作流循环引用：${[...stack, current.id].join(" → ")}`);
+      }
+      if (stack.length >= 20) throw new Error("工作流嵌套超过 20 层。");
+      if (!current.actions?.length) throw new Error(`工作流“${current.label}”没有动作。`);
+      for (const raw of current.actions) {
+        const action = normalizeTerminalToolAction(raw);
+        if (!action) throw new Error(`工作流“${current.label}”存在无效动作参数。`);
+        if (action.kind === "run_workflow") {
+          const target = entries.find((item) => item.id === action.target_entry_id);
+          if (!target) throw new Error(`找不到引用的工作流 ${action.target_entry_id}。`);
+          visit(target, [...stack, current.id]);
+        } else {
+          steps.push({ ...action, workflow_entry_id: current.id });
+          if (steps.length > 200) throw new Error("工作流展开后超过 200 个动作。");
+        }
+      }
+    };
+    visit(entry, []);
+    const kinds = steps.map((step) => step.kind);
+    const environment = kinds.length === 1 && kinds[0] === "codex_launch";
+    const task = kinds.some((kind) => kind === "codex_exec" || kind === "codex_terminal");
+    const unconfirmed = kinds.some((kind) => ["send_command", "function_command", "fork_session"].includes(kind));
+    return {
+      steps,
+      label: environment ? "工作环境" : task ? "任务流程" : "组合流程",
+      completion: unconfirmed ? "步骤已提交；任务完成请以终端输出为准。"
+        : environment ? "工作环境已打开；Agent 就绪请以终端输出为准。"
+        : task ? "任务执行完成。" : "流程步骤执行完成。",
+    };
+  }
+
   function ensureBuiltInTerminalToolEntries(entries) {
     const normalized = normalizeTerminalToolEntries(entries);
     const defaults = normalizeTerminalToolEntries(DEFAULT_TERMINAL_TOOL_ENTRIES);
@@ -840,6 +1005,7 @@
     DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_FACTOR,
     DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
     DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
+    DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
     DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
     DEFAULT_TERMINAL_FAB_ACTION_COLOR,
     DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
@@ -849,6 +1015,7 @@
     DEFAULT_TERMINAL_QUICK_COMMANDS,
     DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
     DEFAULT_TERMINAL_RENAME_PRESETS,
+    DEFAULT_TERMINAL_AGENT_COMMANDS,
     DEFAULT_TERMINAL_SLASH_COMMANDS,
     DEFAULT_TERMINAL_COMMAND_COLLECTIONS,
     DEFAULT_TERMINAL_TOOL_ENTRIES,
@@ -861,6 +1028,7 @@
     DEFAULT_THEME_MODE,
     MAX_TERMINAL_FUNCTION_COMMANDS,
     MAX_TERMINAL_QUICK_COMMANDS,
+    MAX_TERMINAL_AGENT_COMMANDS,
     MAX_TERMINAL_COMMAND_COLLECTIONS,
     MAX_TERMINAL_COMMAND_COLLECTION_ITEMS,
     TERMINAL_COMPLETION_BELL_URL,
@@ -868,6 +1036,8 @@
     cloneDefaultTerminalFunctionCommands,
     cloneDefaultTerminalQuickCommands,
     cloneDefaultTerminalCommandCollections,
+    cloneDefaultTerminalAgentCommands,
+    normalizeTerminalAgentCommands,
     normalizeCommandCollection,
     normalizeCommandCollectionItem,
     ensureBuiltInTerminalToolEntries,
@@ -892,6 +1062,8 @@
     normalizeTerminalFunctionCommandLine,
     normalizeTerminalFunctionCommands,
     normalizeTerminalCommandCollections,
+    createTerminalWorkflowTemplate,
+    inspectTerminalWorkflow,
     normalizeTerminalToolAction,
     normalizeTerminalToolEntries,
     normalizeTerminalQuickCommand,

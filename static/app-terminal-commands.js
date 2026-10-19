@@ -22,14 +22,62 @@ function formatTerminalRenamePresets(presets) {
   return normalizeTerminalRenamePresets(presets, null).join("\n");
 }
 
+function parseTerminalAgentCommandsInput(value) {
+  return normalizeTerminalAgentCommands(
+    String(value || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const [key = "", label = "", newCommand = "", resumeCommand = ""] = line.split("|");
+        return {
+          key: key.trim(),
+          label: label.trim(),
+          new_command: newCommand.trim(),
+          resume_command: resumeCommand.trim(),
+        };
+      }),
+    null,
+  );
+}
+
+function formatTerminalAgentCommands(commands) {
+  return normalizeTerminalAgentCommands(commands, null)
+    .map((command) =>
+      [
+        command.key,
+        command.label,
+        command.new_command,
+        command.resume_command,
+      ].join(" | "),
+    )
+    .join("\n");
+}
+
 function parseTerminalFunctionCommandsInput(value) {
   const commands = String(value || "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"))
     .map((line) => {
-      const [key = "", label = "", action = "", rawCommand = "", shortcut = ""] =
-        line.split("|");
+      const fields = line.split("|");
+      const [key = "", label = "", action = ""] = fields.splice(0, 3);
+      const remainder = fields.join("|").trim();
+      // New exports quote the command as JSON so shell pipes never become columns.
+      const quoted = remainder.match(/^("(?:\\.|[^"\\])*")\s*\|([\s\S]*)$/);
+      let rawCommand;
+      let shortcut = "";
+      if (quoted) {
+        rawCommand = JSON.parse(quoted[1]);
+        shortcut = quoted[2].trim();
+      } else {
+        // Legacy text: only a valid shortcut (or an empty final column) is a column.
+        const last = fields.at(-1)?.trim() || "";
+        if (fields.length > 1 && (!last || /^(?:(?:Ctrl|Alt|Shift|Meta|Cmd|Control)\+)+[^|]+$/i.test(last))) {
+          shortcut = fields.pop().trim();
+        }
+        rawCommand = fields.join("|");
+      }
       const command = String(rawCommand)
         .trimStart()
         .replace(/[ \t]$/, "");
@@ -47,7 +95,7 @@ function parseTerminalFunctionCommandsInput(value) {
 function formatTerminalFunctionCommands(commands) {
   return normalizeTerminalFunctionCommands(commands, null)
     .map((command) =>
-      [command.key, command.label, command.action, command.command, command.shortcut].join(" | ")
+      [command.key, command.label, command.action, JSON.stringify(command.command), command.shortcut].join(" | ")
     )
     .join("\n");
 }

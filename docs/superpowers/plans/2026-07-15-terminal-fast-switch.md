@@ -83,7 +83,7 @@ Expected: all matching tests pass.
 
 - [ ] **Step 1: Add a failing static contract test**
 
-Assert that `INITIAL_TMUX_SNAPSHOT_LINE_LIMIT` equals `800`, while `capture_tmux_text_pane_snapshot` still uses `-S -` for complete history.
+Assert that `INITIAL_TMUX_SNAPSHOT_LINE_LIMIT` equals `100`, while `capture_tmux_text_pane_snapshot` still uses `-S -` for complete history.
 
 - [ ] **Step 2: Run the contract and confirm it fails**
 

@@ -1,19 +1,25 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod agent;
+mod agy;
 mod api_catalog;
 mod artifacts;
+mod atomic_file;
 mod auth;
 mod auth_guard;
 mod builtin_skills;
 mod cli;
+mod codebuddy;
 mod codex_conversation_model;
 mod codex_launch;
 mod codex_proxy;
 mod codex_task;
+mod collaboration;
 mod compile_service;
 mod config_files;
+mod cymusic_diagnostics;
 mod deploy_service;
+mod devin;
 mod filesystem;
 mod frpc;
 mod host;
@@ -22,6 +28,7 @@ mod llm;
 mod login;
 mod preset_sync;
 mod private_file;
+mod process_exec;
 mod proxy;
 mod proxy_bridge;
 mod quota;
@@ -34,6 +41,7 @@ mod startup_tools;
 mod system;
 mod terminal;
 mod upstream_proxy;
+mod windows_desktop;
 
 use std::{
     env, fmt,
@@ -78,6 +86,9 @@ struct AppState {
     local_api_token: Arc<str>,
     workspace_settings: settings::SettingsManager,
     auth_manager: auth::AuthPresetManager,
+    codebuddy_manager: codebuddy::CodeBuddyManager,
+    agy_manager: agy::Manager,
+    devin_manager: devin::DevinManager,
     codex_oauth_manager: auth::CodexOAuthManager,
     codex_proxy_history: codex_proxy::CodexProxyHistory,
     proxy_manager: proxy::ProxyManager,
@@ -88,9 +99,9 @@ struct AppState {
     frp_role_manager: frpc::FrpRoleManager,
     terminal_manager: terminal::TerminalManager,
     preset_test_scheduler: auth::PresetTestScheduler,
-    preset_run_lease_manager: auth::PresetRunLeaseManager,
     agent_manager: agent::AgentManager,
     agent_config: agent::AgentConfigManager,
+    collaboration_manager: collaboration::CollaborationManager,
 }
 
 #[derive(Debug)]
@@ -124,13 +135,6 @@ impl AppError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
-            message: message.into(),
-        }
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
@@ -169,12 +173,32 @@ impl AppState {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn lock_process_memory() {
+    unsafe {
+        let rlim = libc::rlimit {
+            rlim_cur: libc::RLIM_INFINITY,
+            rlim_max: libc::RLIM_INFINITY,
+        };
+        let _ = libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim);
+        if libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) == 0 {
+            tracing::info!("webClx 内存锁定成功：服务主进程已锁定常驻物理内存（防换出到 Swap）");
+        } else {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!("webClx 内存锁定未生效({}): 进程在极端内存压力下可能被换出", err);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli_action = cli::parse_process_args().map_err(anyhow::Error::msg)?;
     if !matches!(cli_action, cli::CliAction::Serve) {
         return cli::execute(cli_action).await;
     }
+
+    let _single_instance = windows_desktop::SingleInstance::acquire()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -183,19 +207,32 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    #[cfg(target_os = "linux")]
+    lock_process_memory();
+
     let app_dir = env::current_dir()?.canonicalize()?;
     login::initialize_session_secret(&app_dir)
         .map_err(|error| anyhow::anyhow!("初始化会话密钥失败: {error}"))?;
     login::initialize_credentials(&app_dir)
         .map_err(|error| anyhow::anyhow!("初始化登录凭据失败: {error}"))?;
+    login::initialize_cross_instance_trust_secret(&app_dir)
+        .map_err(|error| anyhow::anyhow!("初始化跨实例信任密钥失败: {error}"))?;
     let local_api_token = auth_guard::load_or_create_local_api_token(&app_dir)
         .map_err(|error| anyhow::anyhow!("初始化本地 API 令牌失败: {error}"))?;
+    let local_api_token: Arc<str> = Arc::from(local_api_token);
+    auth_guard::set_server_local_api_token(local_api_token.clone());
     startup_tools::spawn_startup_tool_bootstrap(app_dir.clone());
     let requested_addr = configured_listen_addr()?;
     let workspace_settings = settings::SettingsManager::load(&app_dir)?;
+    // 终端首屏回放的 tmux 抓取深度跟随回滚行数设置；必须在终端管理器创建
+    // （含会话恢复 attach）之前设置，恢复路径才会用该深度写入回放种子。
+    terminal::set_terminal_initial_snapshot_line_limit(
+        workspace_settings.terminal_scrollback_lines(),
+    );
     let terminal_user_profile = workspace_settings
         .terminal_user_profile()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let codebuddy_user_home = terminal_user_profile.home.clone();
     builtin_skills::install_for_user(&app_dir, &terminal_user_profile)
         .map_err(|error| anyhow::anyhow!("安装内置 Skills 失败: {error}"))?;
     let (listener, listen_addr) =
@@ -203,6 +240,10 @@ async fn main() -> anyhow::Result<()> {
             .await?;
     auth_core::set_local_webclx_origin(format!("http://127.0.0.1:{}", listen_addr.port()));
     let auth_manager = auth::AuthPresetManager::load(&app_dir)?;
+    let codebuddy_manager =
+        codebuddy::CodeBuddyManager::load(app_dir.clone(), codebuddy_user_home.clone())?;
+    let agy_manager = agy::Manager::load(app_dir.clone(), codebuddy_user_home.clone());
+    let devin_manager = devin::DevinManager::load(app_dir.clone(), codebuddy_user_home);
     let proxy_manager = proxy::ProxyManager::load(&app_dir)?;
     let https_proxy_bridge_addr =
         proxy_bridge::spawn_https_proxy_bridge(proxy_manager.clone(), listen_addr).await?;
@@ -218,7 +259,6 @@ async fn main() -> anyhow::Result<()> {
         workspace_root: workspace_root.clone(),
         display_root: workspace_display_root.clone(),
         user_profile: terminal_user_profile,
-        terminal_default_env: workspace_settings.terminal_default_env_entries(),
         proxy_env: proxy_manager.get_terminal_proxy_env(),
     };
 
@@ -228,9 +268,12 @@ async fn main() -> anyhow::Result<()> {
         listen_addr,
         version: env!("CARGO_PKG_VERSION").to_string(),
         app_dir: app_dir.clone(),
-        local_api_token: Arc::from(local_api_token),
+        local_api_token,
         workspace_settings,
         auth_manager,
+        codebuddy_manager,
+        agy_manager,
+        devin_manager,
         codex_oauth_manager: auth::CodexOAuthManager::new(),
         codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
         proxy_manager,
@@ -247,16 +290,11 @@ async fn main() -> anyhow::Result<()> {
         preset_test_scheduler: auth::PresetTestScheduler::new(
             &app_dir.join(".webclx-terminal-sessions.json"),
         ),
-        preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-            app_dir.join(".webclx-preset-run-lease.json"),
-        ),
         agent_manager: agent::AgentManager::new(&app_dir),
         agent_config: agent::AgentConfigManager::new(&app_dir),
+        collaboration_manager: collaboration::CollaborationManager::new(&app_dir),
     };
     artifacts::enforce_artifact_retention(&state.app_dir)
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    auth::recover_stale_preset_run_lease(&state)
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     codex_task::recover_interrupted_tasks(&state).await;
@@ -269,6 +307,7 @@ async fn main() -> anyhow::Result<()> {
         state.proxy_manager.clone(),
         state.workspace_settings.clone(),
     );
+    state.codebuddy_manager.spawn_auto_runner();
 
     let app = routes::app(state.clone());
 
@@ -291,6 +330,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     info!("server listening on http://{}", listen_addr);
+    windows_desktop::spawn_tray(listen_addr, _single_instance.notification_event());
 
     let shutdown_manager = Arc::new(state.terminal_manager.clone());
     if let Err(error) =
@@ -323,6 +363,21 @@ async fn shutdown_signal(terminal_manager: Arc<terminal::TerminalManager>) {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+
+    // 收到关机/重启信号时自动保存会话恢复记录（与「保存会话并关机/重启服务」菜单
+    // 写同一份注册表），不再依赖用户先点菜单。必须在 finalize 断开 tmux client、
+    // systemd 停掉 tmux scope 之前完成探测与写盘；自动保存不打断工作中的 agent。
+    let signal_save_manager = terminal_manager.clone();
+    let signal_save = tokio::task::spawn_blocking(move || {
+        signal_save_manager.save_shutdown_restore_registry_for_signal()
+    });
+    match signal_save.await {
+        Ok(Ok(saved)) => {
+            info!("signal shutdown save persisted {saved} terminal session restore records");
+        }
+        Ok(Err(error)) => warn!("signal shutdown save failed: {error}"),
+        Err(error) => warn!("signal shutdown save task failed: {error}"),
     }
 
     terminal_manager.finalize_output_observations_for_shutdown();
@@ -434,7 +489,7 @@ async fn index_page(State(state): State<AppState>) -> Response {
 async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
     let path = uri.path();
     // Real backend/asset namespaces must keep 404-ing; only UI paths get the shell.
-    if path.starts_with("/api/") || path.starts_with("/assets/") {
+    if path.starts_with("/api/") || path.starts_with("/assets/") || path == "/desktop" {
         return StatusCode::NOT_FOUND.into_response();
     }
     index_page(State(state)).await
@@ -443,6 +498,14 @@ async fn spa_fallback(State(state): State<AppState>, uri: axum::http::Uri) -> Re
 async fn login_page(State(state): State<AppState>) -> Response {
     html_page_response(state.static_dir.join("login.html"), include_str!("../static/login.html"))
         .await
+}
+
+async fn collaboration_page(State(state): State<AppState>) -> Response {
+    html_page_response(
+        state.static_dir.join("collaboration.html"),
+        include_str!("../static/collaboration.html"),
+    )
+    .await
 }
 
 async fn terminal_page(State(state): State<AppState>, Query(query): Query<PathQuery>) -> Response {

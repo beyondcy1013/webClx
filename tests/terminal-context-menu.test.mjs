@@ -37,6 +37,18 @@ assert.match(
 );
 
 assert.match(
+  terminalHtml,
+  /id="terminal-context-select-all"[^>]*role="menuitem"[^>]*hidden[\s\S]*?>\s*全选\s*</,
+  "terminal page should expose a hidden select-all item in its context menu",
+);
+
+assert.match(
+  terminalHtml,
+  /id="terminal-context-agent-prompt"[^>]*role="menuitem"[^>]*hidden[\s\S]*?>\s*临时\/新终端\/新对话\s*</,
+  "terminal page should expose a hidden selected-text agent prompt item",
+);
+
+assert.match(
   terminalToolsMenu,
   /id="terminal-codex-full-access-toggle"[\s\S]*?id="terminal-quick-command-buttons"[\s\S]*?id="terminal-copy-all"[\s\S]*?data-action="copy_all_text"[\s\S]*?>\s*复制全部\s*<\/button>[\s\S]*?id="session-detail-toggle"/,
   "terminal tools should place full access first, followed by quick commands and copy-all",
@@ -107,8 +119,42 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /terminalContextCopyAllButton\.addEventListener\("click", copyTerminalAllText\);/,
-  "the context menu item should call the shared copy-all function",
+  /async function copyTerminalContextText\(\)[\s\S]*?term\.getSelection\(\)[\s\S]*?copyTextToClipboard\(selection\)[\s\S]*?copyTerminalAllText\(\)[\s\S]*?terminalContextCopyAllButton\.addEventListener\("click", async \(\) => \{[\s\S]*?await copyTerminalContextMenuSelection\(\)[\s\S]*?await copyTerminalContextText\(\);[\s\S]*?\}\);/,
+  "the context menu item should delegate dialog selections, then copy terminal selection with full-buffer fallback",
+);
+
+assert.match(
+  terminalJs,
+  /terminalContextSelectAllButton\.addEventListener\("click", \(\) => \{[\s\S]*?term\.selectAll\(\)[\s\S]*?syncTerminalSelectionControls\(\)/,
+  "the context menu select-all item should select the entire terminal buffer",
+);
+
+assert.match(
+  terminalFocusSelectionJs,
+  /terminalContextSelectAllButton\.hidden = Boolean\(hasSelection \|\| contextAction\)/,
+  "select-all should only be shown when the context menu has no active selection action",
+);
+
+assert.match(
+  terminalFocusSelectionJs,
+  /terminalContextAgentPromptButton\.hidden = !hasSelection \|\| Boolean\(contextAction\)/,
+  "agent prompt action should only be shown for terminal selections",
+);
+
+assert.match(
+  terminalJs,
+  /terminalContextAgentPromptButton\.addEventListener\("click", async \(\) => \{[\s\S]*?term\.getSelection\(\)[\s\S]*?openTerminalSpecifiedTaskDialog[\s\S]*?temporary: true[\s\S]*?sessionAction: "new"[\s\S]*?initialTask: selection/,
+  "selected text should open a temporary new-terminal preset dialog as the initial prompt",
+);
+
+const specifiedTaskJs = readFileSync(
+  new URL("../static/terminal-specified-task.js", import.meta.url),
+  "utf8",
+);
+assert.match(
+  specifiedTaskJs,
+  /options\.initialTask !== undefined[\s\S]*?dom\.task\.value = String\(options\.initialTask \|\| ""\)/,
+  "specified task dialog should accept an initial prompt from context actions",
 );
 
 assert.match(
@@ -143,8 +189,8 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /terminal-session-render\.js\?v=20260731a/,
-  "terminal html should refresh the terminal-session-render asset after adding sort cycling",
+  /terminal-session-render\.js\?v=[0-9a-z]+/,
+  "terminal html should keep a version param on the terminal-session-render asset",
 );
 
 assert.match(

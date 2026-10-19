@@ -116,3 +116,33 @@ APK 会在 UA 末尾附加 `webClxAndroid/<version>`。`createTerminalInstance()
 - 若该高频逻辑误判命中（退出 TUI 回到 shell 后，底部三行满足 `detectBottomStatusCursorCorrection` 误判），`setTerminalCursorHiddenForCorrection` 就会每帧翻转 theme → 整屏闪烁/内容消失。
 - 通用对策：**任何依赖 `onRender` 且会改 theme/触发重绘的逻辑，都要在活动选区期间冻结**；选区清除后用 `term.onSelectionChange` 补一次恢复。判断"活动选区"用 `term.hasSelection()` 或选区手柄拖拽状态。
 - 排障任何"整屏闪烁"时，先确认是否有 `term.options.theme =` 的赋值，并查 `onRender`/`onScroll` 里挂了什么每帧逻辑。
+
+## 2026-10-14 Windows 文档关闭后无法输入中文
+
+现象：Windows 浏览器打开项目管理中的“文档”，关闭后返回终端仍无法输入中文。旧浏览器用例在关闭后再次点击终端，仅检查 helper textarea 有焦点，没有验证中文组合输入和 WebSocket 发送。
+
+根因：关闭按钮先激活普通动作的焦点拦截；旧恢复函数先执行输入法重置和聚焦，再清除拦截，导致恢复步骤被拒绝。重置与恢复还依据 `terminalSoftKeyboardVisible()` 分流，而桌面默认显示 webClx 软键盘，因而跳过 Windows 所需的中转 textarea 和终端直接输入恢复。
+
+修复入口：`static/terminal-dialogs.js` 的文档打开和 `static/terminal.js` 的文档 close 事件显式请求 `desktopInput` 恢复。`static/terminal-focus-selection.js` 在非触摸设备上先清除动作拦截，再实际聚焦中转 textarea，随后恢复 xterm helper 的 `inputmode=text` 和焦点；后续重试发现 helper 已聚焦、活动会话已切换、用户已操作其他控件或其他弹窗已打开时立即停止。触摸设备和普通软键盘动作仍走现有键盘状态保持路径。
+
+回归：`python3 tests/terminal-document-ime.browser.py` 使用 Chromium CDP `Input.imeSetComposition` / `Input.insertText` 验证组合输入开始和结束、中文完整且仅发送一次、文档中文字不泄漏到终端，以及关闭后立即开始的组合输入在延迟恢复窗口中持续有效。覆盖桌面软键盘显示/隐藏、关闭按钮/Esc、多次重开，以及触摸端收起键盘的保持行为。`terminal-document-draft.browser.py` 和 `terminal-ime-policy.browser.py` 检查原有草稿和键盘策略。
+
+验证边界：Linux 上的 Chromium 使用 Windows UA 和真实浏览器组合输入事件；这不等于 Windows 原生输入法候选窗实测。在线静态资源经运行目录符号链接即时生效，三个改动模块的 HTML 缓存键均为 `20261014-win-doc-ime2`。客户端应刷新后按“文档 → 关闭 → 终端中文输入”复核原生输入法。
+
+## 2026-10-15 Windows 新开 AGY / 恢复后无法输入中文
+
+新开终端的 `terminal-specified-task-dialog` 共用于 AGY 新对话和恢复（含 `agy -c`）。原关闭逻辑只回焦触发菜单按钮，没有调用桌面 IME 恢复；创建终端时的聚焦发生在模态弹窗仍打开期间，不能代替关闭后的恢复。
+
+`terminal-specified-task.js` 统一在原生 `close` 事件调用 `restoreTerminalFocusAfterDialogClose({ desktopInput: true })`，覆盖关闭按钮、Esc 和成功启动；终端页不再抢回菜单按钮焦点，工作区页继续原行为。复用既有桌面恢复与触摸策略，不更改 AGY 命令或账号。缓存键 `20261015-launch-ime`。
+
+`tests/terminal-document-ime.browser.py` 扩展 AGY 预设、创建/改名与自动输入 API fixture，实际提交新建 `agy` / 恢复 `agy -c`，验证关闭后 CDP 中文组合输入与 WebSocket 传输；覆盖桌面软键盘显示/隐藏、关闭/Esc，以及触摸取消保持收起。Windows 原生候选窗仍需客户端验收。
+
+验证：IME 策略、会话详情/活动、AGY 恢复与预设菜单矩阵 Node 测试通过；文档/启动 IME 浏览器 6 组以及 `terminal-ime-policy.browser.py` 通过。额外执行的 `specified-preset-actions.test.mjs` 为 20/21：既有用例的 `/home/codes/webClx` 与 `/home/codes/tools/webClx` 路径期望不一致（本次未改该测试及其实现）。运行服务返回的 `terminal-specified-task.js` 与源码 SHA-256 一致；未认证 `/terminal` 返回登录页面，页面缓存引用由源码及浏览器 fixture 核验。
+
+## 2026-10-15 其他终端弹窗同类缺口审计
+
+发现粘贴、输入历史、定时任务关闭仍按桌面软键盘可见性跳过 IME 上下文恢复；配额、群组、消息、预设切换等缺少统一关闭恢复。改名还会用 `setTimeout` 回焦按钮，在恢复后再次抢焦点。
+
+`installTerminalDialogCloseRecovery()` 在终端页捕获所有原生 dialog close，微任务中等待本次关闭处理完成；若弹窗自己的恢复函数已执行（revision 变更），不重复重置，否则补桌面恢复。父弹窗/替代弹窗仍打开时不恢复终端；触摸设备不进入新监听器。已有恢复函数统一按主触摸设备判断桌面，保留调用参数兼容性。改名延迟回焦仅保留触摸路径。普通菜单/软键盘动作不新增回焦。缓存键 `20261015-dialog-ime`。
+
+`terminal-document-ime.browser.py` 枚举 21 个弹窗，桌面软键盘显示/隐藏各验证原生 close、Esc 及 13 个真实关闭按钮：每次成功中转聚焦仅一次，中文 CDP 组合输入持续跨越延迟恢复窗口、经 WebSocket 只发送一次；另验证嵌套路径选择框关闭保留父弹窗。加载修复前 HEAD 静态 JS 时相同审计用例可复现焦点门禁阻止输入；修复后全通过。原文档、新开 AGY、新建/恢复及触摸用例同时通过。Windows 原生候选窗验证仍由用户客户端完成。

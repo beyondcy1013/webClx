@@ -83,12 +83,12 @@ assert.doesNotMatch(
 );
 assert.match(
   terminalJs,
-  /for \(let index = 0; index < entry\.actions\.length; index \+= 1\)[\s\S]*await executeTerminalToolAction\(action, executionContext\)/,
+  /for \(let index = startIndex; index < actions\.length; index \+= 1\)[\s\S]*await executeTerminalToolAction\(action, executionContext\)/,
   "workflow actions should execute serially",
 );
 assert.match(
   terminalJs,
-  /async function executeTerminalToolEntry\(entry\)[\s\S]*closeTerminalToolMenu\(\);\s*terminalToolExecutionRunning = true;[\s\S]*await executeTerminalToolAction\(action, executionContext\)/,
+  /async function executeTerminalToolEntry\(entry, resumeState = null\)[\s\S]*closeTerminalToolMenu\(\);\s*terminalToolExecutionRunning = true;[\s\S]*await executeTerminalToolAction\(action, executionContext\)/,
   "selecting a workflow should close the menu before its first asynchronous action",
 );
 assert.doesNotMatch(

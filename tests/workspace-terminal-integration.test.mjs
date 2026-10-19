@@ -4,7 +4,7 @@ import vm from "node:vm";
 
 const indexHtml = readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
-const agentHtml = readFileSync(new URL("../static/agent.html", import.meta.url), "utf8");
+const agentHtml = readFileSync(new URL("../static/agent-profiles.html", import.meta.url), "utf8");
 const appJs = readFileSync(new URL("../static/app.js", import.meta.url), "utf8");
 const navigationJs = readFileSync(
   new URL("../static/app-navigation-tabs.js", import.meta.url),
@@ -90,7 +90,7 @@ const responsiveStyles = readFileSync(
 );
 assert.match(
   responsiveStyles,
-  /\.workspace-sessions-panel \.toolbar\s*\{[\s\S]*grid-template-areas:[\s\S]*"search search search search"[\s\S]*"refresh create picker open"/,
+  /\.workspace-sessions-panel \.toolbar\s*\{[\s\S]*grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\);[\s\S]*grid-template-areas:[\s\S]*"search search"[\s\S]*"refresh create"[\s\S]*"picker open"/,
 );
 assert.match(
   responsiveStyles,

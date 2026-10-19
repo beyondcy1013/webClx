@@ -17,6 +17,14 @@ const tableHeaderSource = readFileSync(
   new URL("../static/app-config-override.js", import.meta.url),
   "utf8",
 );
+const apiManagerSource = readFileSync(
+  new URL("../static/app-api-manager.js", import.meta.url),
+  "utf8",
+);
+const claudeManagerSource = readFileSync(
+  new URL("../static/app-claude-manager.js", import.meta.url),
+  "utf8",
+);
 
 for (const prefix of ["auth", "api", "claude"]) {
   assert.match(
@@ -41,6 +49,16 @@ assert.match(backendSource, /pub async fn export_account_presets_to_clipboard/);
 assert.match(backendSource, /pub async fn import_account_presets_from_clipboard/);
 assert.match(tableSource, /function createPresetSelectionCell/);
 assert.match(tableHeaderSource, /function createPresetSelectAllHeader/);
+assert.match(
+  apiManagerSource,
+  /const selection = \{\s*label: "Codex_API 账号",/,
+  "Codex_API desktop tables should always render the selection column",
+);
+assert.match(
+  claudeManagerSource,
+  /const selection = \{\s*label: "Claude_API 账号",/,
+  "Claude_API desktop tables should always render the selection column",
+);
 assert.match(managerSource, /document\.execCommand\?\.\("copy"\)/);
 assert.match(managerSource, /function openManualImportDialog/);
 

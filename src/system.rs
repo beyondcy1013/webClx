@@ -153,9 +153,10 @@ pub async fn get_system_logs(
 ) -> ApiResult<Json<SystemLogsResponse>> {
     #[cfg(target_os = "linux")]
     let logs = {
-        let output = Command::new("journalctl")
-            .args(["-u", "webclx", "-n", "30", "--no-pager"])
-            .output();
+        let mut command = Command::new("journalctl");
+        command.args(["-u", "webclx", "-n", "30", "--no-pager"]);
+        let output =
+            crate::process_exec::bounded_output(command, Duration::from_secs(10), 256 * 1024);
         match output {
             Ok(out) if out.status.success() => {
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
@@ -335,9 +336,10 @@ pub async fn restart_service(State(_state): State<AppState>) -> ApiResult<Json<s
 
 #[cfg(target_os = "linux")]
 fn schedule_service_restart() -> std::io::Result<std::process::Output> {
-    Command::new(RESTART_SCHEDULER_PROGRAM)
-        .args(RESTART_SCHEDULER_ARGS)
-        .output()
+    let mut command = Command::new(RESTART_SCHEDULER_PROGRAM);
+    command.args(RESTART_SCHEDULER_ARGS);
+    crate::process_exec::bounded_output(command, Duration::from_secs(10), 64 * 1024)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -393,9 +395,10 @@ pub async fn save_and_poweroff(
 
 #[cfg(target_os = "linux")]
 fn schedule_system_poweroff() -> std::io::Result<std::process::Output> {
-    Command::new(POWEROFF_SCHEDULER_PROGRAM)
-        .args(POWEROFF_SCHEDULER_ARGS)
-        .output()
+    let mut command = Command::new(POWEROFF_SCHEDULER_PROGRAM);
+    command.args(POWEROFF_SCHEDULER_ARGS);
+    crate::process_exec::bounded_output(command, Duration::from_secs(10), 64 * 1024)
+        .map_err(|error| std::io::Error::other(error.to_string()))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -424,10 +427,9 @@ pub async fn save_and_restart_service(
             AppError::internal(format!("保存会话失败：{error}"))
         })?;
 
-    // 先落盘 resume 记录（依赖 tmux 与 codex/claude 子进程仍存活），再杀掉 webClx 的
-    // tmux scope，使服务重启后走「从恢复记录重建终端」的完整路径——否则 systemd scope
-    // 隔离会让 tmux 续命，重启只是重连、不会触发恢复链路。
-    state.terminal_manager.stop_tmux_servers();
+    // 保留现有 tmux server/client；服务重启后的初始恢复会重新连接这些会话。
+    // 终止 tmux scope 会让可恢复终端变成 EOF，并产生“terminal client exited”。
+    state.terminal_manager.prepare_service_restart();
 
     let output = schedule_service_restart();
     match output {

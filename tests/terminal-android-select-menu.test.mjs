@@ -20,7 +20,7 @@ assert.match(
 
 assert.match(
   indexHtml,
-  /styles-terminal\.css\?v=20260804b[\s\S]*terminal-android-select-menu\.js\?v=20260804b[\s\S]*id="favorite-path-select"[\s\S]*id="workspace-history-path-select"[\s\S]*id="terminal-android-select-menu"[\s\S]*role="menu"/,
+  /styles-terminal\.css\?v=20260819c[\s\S]*terminal-android-select-menu\.js\?v=20260804b[\s\S]*id="favorite-path-select"[\s\S]*id="workspace-history-path-select"[\s\S]*id="terminal-android-select-menu"[\s\S]*role="menu"/,
   "workspace and workspace history selects should use the shared Android command menu",
 );
 

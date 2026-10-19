@@ -17,6 +17,9 @@ use crate::{ApiResult, AppError, AppState, runtime_paths};
 const CODEX_FULL_ACCESS_APPROVAL_POLICY: &str = "never";
 const CODEX_FULL_ACCESS_SANDBOX_MODE: &str = "danger-full-access";
 const CODEX_FULL_ACCESS_BACKUP_RELATIVE_PATH: &str = ".codex/.webclx-full-access-backup.json";
+/// `tui.alternate_screen` 的禁用取值。Codex 只接受字符串枚举；布尔值会被
+/// TUI 拒绝（`invalid type: unit variant, expected string only`）。
+const CODEX_ALT_SCREEN_DISABLED_VALUE: &str = "never";
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigFileQuery {
@@ -66,12 +69,23 @@ pub struct CodexFullAccessResponse {
 pub struct CodexCommonConfigSelection {
     approval_never: bool,
     sandbox_full_access: bool,
+    #[serde(default)]
+    animations_disabled: bool,
+    /// None 表示旧客户端未携带该字段，保存其他开关时保持现状。
+    #[serde(default)]
+    alt_screen_disabled: Option<bool>,
+    /// None 表示旧客户端未携带该字段，保存其他开关时保持现状。
+    #[serde(default)]
+    daemon_disabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CodexCommonConfigState {
     approval_never: bool,
     sandbox_full_access: bool,
+    animations_disabled: bool,
+    alt_screen_disabled: bool,
+    daemon_disabled: bool,
     approval_policy: Option<String>,
     sandbox_mode: Option<String>,
 }
@@ -84,6 +98,12 @@ pub struct CodexCommonConfigResponse {
     exists: bool,
     approval_never: bool,
     sandbox_full_access: bool,
+    #[serde(default)]
+    animations_disabled: bool,
+    #[serde(default)]
+    alt_screen_disabled: bool,
+    #[serde(default)]
+    daemon_disabled: bool,
     approval_policy: Option<String>,
     sandbox_mode: Option<String>,
 }
@@ -439,9 +459,26 @@ fn codex_common_config_state_from_document(
 ) -> Result<CodexCommonConfigState> {
     let approval_policy = optional_codex_string(document, "approval_policy")?;
     let sandbox_mode = optional_codex_string(document, "sandbox_mode")?;
+    let tui_table = document.get("tui").and_then(|item| item.as_table_like());
+    let animations_disabled = tui_table
+        .and_then(|table| table.get("animations"))
+        .and_then(|item| item.as_bool());
+    let alt_screen_disabled = tui_table
+        .and_then(|table| table.get("alternate_screen"))
+        .and_then(|item| item.as_str())
+        == Some(CODEX_ALT_SCREEN_DISABLED_VALUE);
+    let daemon_auto_start = document
+        .get("features")
+        .and_then(|item| item.as_table_like())
+        .and_then(|table| table.get("daemon_auto_start"))
+        .and_then(|item| item.as_bool())
+        .unwrap_or(true);
     Ok(CodexCommonConfigState {
         approval_never: approval_policy.as_deref() == Some(CODEX_FULL_ACCESS_APPROVAL_POLICY),
         sandbox_full_access: sandbox_mode.as_deref() == Some(CODEX_FULL_ACCESS_SANDBOX_MODE),
+        animations_disabled: animations_disabled == Some(false),
+        alt_screen_disabled,
+        daemon_disabled: !daemon_auto_start,
         approval_policy,
         sandbox_mode,
     })
@@ -453,8 +490,15 @@ fn update_codex_common_config_in_content(
 ) -> Result<(String, bool)> {
     let mut document = parse_codex_config(content)?;
     let current = codex_common_config_state_from_document(&document)?;
+    let alt_screen_disabled = selection
+        .alt_screen_disabled
+        .unwrap_or(current.alt_screen_disabled);
+    let daemon_disabled = selection.daemon_disabled.unwrap_or(current.daemon_disabled);
     let changed = current.approval_never != selection.approval_never
-        || current.sandbox_full_access != selection.sandbox_full_access;
+        || current.sandbox_full_access != selection.sandbox_full_access
+        || current.animations_disabled != selection.animations_disabled
+        || current.alt_screen_disabled != alt_screen_disabled
+        || current.daemon_disabled != daemon_disabled;
     if !changed {
         return Ok((content.to_string(), false));
     }
@@ -471,6 +515,15 @@ fn update_codex_common_config_in_content(
         CODEX_FULL_ACCESS_SANDBOX_MODE,
         selection.sandbox_full_access,
     );
+    update_codex_bool(&mut document, "tui", "animations", !selection.animations_disabled);
+    update_codex_special_nested_string(
+        &mut document,
+        "tui",
+        "alternate_screen",
+        CODEX_ALT_SCREEN_DISABLED_VALUE,
+        alt_screen_disabled,
+    );
+    update_codex_bool(&mut document, "features", "daemon_auto_start", !daemon_disabled);
     Ok((serialize_codex_config(document), true))
 }
 
@@ -484,6 +537,34 @@ fn update_codex_special_string(
         document[key] = value(enabled_value);
     } else if document.get(key).and_then(|item| item.as_str()) == Some(enabled_value) {
         document.remove(key);
+    }
+}
+
+fn update_codex_bool(document: &mut DocumentMut, parent_key: &str, child_key: &str, enabled: bool) {
+    document[parent_key][child_key] = value(enabled);
+}
+
+/// 嵌套的“特殊取值”开关：勾选时写入固定字符串，取消时仅当当前值正是该
+/// 特殊值才移除键，保留用户手写的其他取值。
+fn update_codex_special_nested_string(
+    document: &mut DocumentMut,
+    parent_key: &str,
+    child_key: &str,
+    enabled_value: &str,
+    enabled: bool,
+) {
+    if enabled {
+        document[parent_key][child_key] = value(enabled_value);
+        return;
+    }
+    let Some(table) = document
+        .get_mut(parent_key)
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return;
+    };
+    if table.get(child_key).and_then(|item| item.as_str()) == Some(enabled_value) {
+        table.remove(child_key);
     }
 }
 
@@ -605,6 +686,9 @@ fn codex_common_config_response(
         exists,
         approval_never: state.approval_never,
         sandbox_full_access: state.sandbox_full_access,
+        animations_disabled: state.animations_disabled,
+        alt_screen_disabled: state.alt_screen_disabled,
+        daemon_disabled: state.daemon_disabled,
         approval_policy: state.approval_policy,
         sandbox_mode: state.sandbox_mode,
     }
@@ -879,6 +963,9 @@ wire_api = "responses"
             CodexCommonConfigSelection {
                 approval_never: true,
                 sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
             },
         )
         .expect("supported common settings should update");
@@ -913,6 +1000,9 @@ sandbox_mode = "danger-full-access"
             CodexCommonConfigSelection {
                 approval_never: false,
                 sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
             },
         )
         .expect("special values should be removable");
@@ -928,5 +1018,277 @@ sandbox_mode = "danger-full-access"
         assert!(!state.approval_never);
         assert!(!state.sandbox_full_access);
         assert_eq!(document.get("model").and_then(|item| item.as_str()), Some("gpt-5.6"));
+    }
+
+    #[test]
+    fn codex_common_config_updates_tui_animations() {
+        let existing = r#"model = "gpt-5.6"
+
+[tui]
+animations = true
+"#;
+        let (enabled, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: true,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
+            },
+        )
+        .expect("animation setting should update");
+        let enabled_state = codex_common_config_state_from_content(&enabled)
+            .expect("enabled animation state should be readable");
+
+        assert!(changed);
+        assert!(enabled_state.animations_disabled);
+        assert_eq!(
+            enabled
+                .parse::<DocumentMut>()
+                .expect("updated config should remain valid TOML")
+                .get("tui")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("animations"))
+                .and_then(|item| item.as_bool()),
+            Some(false)
+        );
+
+        let (disabled, changed) = update_codex_common_config_in_content(
+            &enabled,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
+            },
+        )
+        .expect("animation setting should restore");
+        let disabled_state = codex_common_config_state_from_content(&disabled)
+            .expect("disabled animation state should be readable");
+
+        assert!(changed);
+        assert!(!disabled_state.animations_disabled);
+        assert_eq!(
+            disabled
+                .parse::<DocumentMut>()
+                .expect("restored config should remain valid TOML")
+                .get("tui")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("animations"))
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn codex_common_config_creates_tui_table_and_preserves_other_settings() {
+        let existing = "model = \"gpt-5.6\"\n";
+        let (updated, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: true,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
+            },
+        )
+        .expect("missing TUI table should be created");
+        let state = codex_common_config_state_from_content(&updated)
+            .expect("created TUI setting should be readable");
+
+        assert!(changed);
+        assert!(state.animations_disabled);
+        assert_eq!(document_root_model(&updated), Some("gpt-5.6".to_string()));
+    }
+
+    #[test]
+    fn codex_common_config_toggles_tui_alternate_screen() {
+        // Codex TUI 默认使用备用屏幕，tmux scrollback 不积累历史；
+        // alternate_screen = "never" 让 transcript 写入普通屏幕。
+        let existing = r#"model = "gpt-5.6"
+
+[tui]
+animations = false
+"#;
+        let (enabled, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: true,
+                alt_screen_disabled: Some(true),
+                daemon_disabled: None,
+            },
+        )
+        .expect("alternate screen setting should update");
+        let enabled_state = codex_common_config_state_from_content(&enabled)
+            .expect("enabled state should be readable");
+
+        assert!(changed);
+        assert!(enabled_state.alt_screen_disabled);
+        assert_eq!(
+            enabled
+                .parse::<DocumentMut>()
+                .expect("updated config should remain valid TOML")
+                .get("tui")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("alternate_screen"))
+                .and_then(|item| item.as_str()),
+            Some("never")
+        );
+        // 同表内其他键（animations）保留。
+        assert!(enabled_state.animations_disabled);
+
+        let (disabled, changed) = update_codex_common_config_in_content(
+            &enabled,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: true,
+                alt_screen_disabled: Some(false),
+                daemon_disabled: None,
+            },
+        )
+        .expect("alternate screen setting should restore");
+        let disabled_state = codex_common_config_state_from_content(&disabled)
+            .expect("disabled state should be readable");
+
+        assert!(changed);
+        assert!(!disabled_state.alt_screen_disabled);
+        let disabled_doc = disabled
+            .parse::<DocumentMut>()
+            .expect("restored config should remain valid TOML");
+        let tui = disabled_doc
+            .get("tui")
+            .and_then(|item| item.as_table_like())
+            .expect("tui table should remain for animations");
+        assert!(tui.get("alternate_screen").is_none());
+        assert_eq!(tui.get("animations").and_then(|item| item.as_bool()), Some(false));
+    }
+
+    #[test]
+    fn codex_common_config_absent_alt_screen_field_preserves_current_value() {
+        // 旧版前端不携带该字段：保存其他开关时不得移除已配置的 "never"。
+        let existing = r#"model = "gpt-5.6"
+
+[tui]
+alternate_screen = "never"
+"#;
+        let (updated, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: None,
+            },
+        )
+        .expect("legacy save should preserve alternate_screen");
+
+        assert!(!changed);
+        assert_eq!(
+            updated
+                .parse::<DocumentMut>()
+                .expect("updated config should remain valid TOML")
+                .get("tui")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("alternate_screen"))
+                .and_then(|item| item.as_str()),
+            Some("never")
+        );
+    }
+
+    #[test]
+    fn codex_common_config_unchecked_alt_screen_preserves_other_values() {
+        // 用户手写了非 "never" 的取值时，取消勾选不得改写它。
+        let existing = r#"model = "gpt-5.6"
+
+[tui]
+alternate_screen = "auto"
+"#;
+        let (updated, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: Some(false),
+                daemon_disabled: None,
+            },
+        )
+        .expect("non-special value should be preserved");
+
+        assert!(!changed);
+        assert_eq!(
+            updated
+                .parse::<DocumentMut>()
+                .expect("updated config should remain valid TOML")
+                .get("tui")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("alternate_screen"))
+                .and_then(|item| item.as_str()),
+            Some("auto")
+        );
+    }
+
+    #[test]
+    fn codex_common_config_toggles_daemon_auto_start() {
+        let existing = "model = \"gpt-5.6\"\n";
+        let (disabled, changed) = update_codex_common_config_in_content(
+            existing,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: Some(true),
+            },
+        )
+        .expect("daemon setting should update");
+        assert!(changed);
+        let disabled_state = codex_common_config_state_from_content(&disabled)
+            .expect("disabled daemon state should be readable");
+        assert!(disabled_state.daemon_disabled);
+        assert_eq!(
+            disabled
+                .parse::<DocumentMut>()
+                .expect("updated config should remain valid TOML")
+                .get("features")
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("daemon_auto_start"))
+                .and_then(|item| item.as_bool()),
+            Some(false)
+        );
+
+        let (enabled, changed) = update_codex_common_config_in_content(
+            &disabled,
+            CodexCommonConfigSelection {
+                approval_never: false,
+                sandbox_full_access: false,
+                animations_disabled: false,
+                alt_screen_disabled: None,
+                daemon_disabled: Some(false),
+            },
+        )
+        .expect("daemon setting should restore");
+        assert!(changed);
+        assert!(
+            !codex_common_config_state_from_content(&enabled)
+                .expect("enabled daemon state should be readable")
+                .daemon_disabled
+        );
+    }
+
+    fn document_root_model(content: &str) -> Option<String> {
+        content
+            .parse::<DocumentMut>()
+            .expect("config should remain valid TOML")
+            .get("model")
+            .and_then(|item| item.as_str())
+            .map(str::to_string)
     }
 }

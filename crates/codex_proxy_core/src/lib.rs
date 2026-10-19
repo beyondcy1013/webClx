@@ -1153,10 +1153,8 @@ pub fn chat_request_to_anthropic_messages(chat: &Value) -> Result<Value, CodexPr
         let tools = anthropic_tools_from_chat_tools(tools_value);
         if !tools.is_empty() {
             out.insert("tools".to_string(), Value::Array(tools));
-            // Anthropic only accepts "auto" / "any" / "tool" / specific tool name.
-            // Map OpenAI's "auto"/"none"/null-ish to "auto" so the relay
-            // still exercises the tool-calling path; this matches the existing
-            // passthrough behavior on the Chat side.
+            // Anthropic requires tool_choice to be an object, while OpenAI
+            // commonly sends a string or a nested function selector.
             if let Some(choice) = root.get("tool_choice") {
                 out.insert("tool_choice".to_string(), anthropic_tool_choice(choice));
             }
@@ -1372,9 +1370,9 @@ fn anthropic_tools_from_chat_tools(tools_value: &Value) -> Vec<Value> {
 fn anthropic_tool_choice(choice: &Value) -> Value {
     match choice {
         Value::String(text) => match text.as_str() {
-            "any" | "required" | "tool" => Value::String("any".to_string()),
-            "none" => Value::String("none".to_string()),
-            _ => Value::String("auto".to_string()),
+            "any" | "required" | "tool" => json!({"type": "any"}),
+            "none" => json!({"type": "none"}),
+            _ => json!({"type": "auto"}),
         },
         Value::Object(map) => {
             if let Some(name) = map
@@ -1382,12 +1380,23 @@ fn anthropic_tool_choice(choice: &Value) -> Value {
                 .and_then(|f| f.get("name"))
                 .and_then(Value::as_str)
             {
-                Value::String(name.to_string())
+                json!({"type": "tool", "name": name})
+            } else if let Some(choice_type) = map.get("type").and_then(Value::as_str) {
+                match choice_type {
+                    "any" | "required" => json!({"type": "any"}),
+                    "none" => json!({"type": "none"}),
+                    "tool" => map
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(|name| json!({"type": "tool", "name": name}))
+                        .unwrap_or_else(|| json!({"type": "auto"})),
+                    _ => json!({"type": "auto"}),
+                }
             } else {
-                Value::String("auto".to_string())
+                json!({"type": "auto"})
             }
         }
-        _ => Value::String("auto".to_string()),
+        _ => json!({"type": "auto"}),
     }
 }
 

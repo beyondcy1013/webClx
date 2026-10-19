@@ -3,7 +3,7 @@
 # Usage: bash rebuild-and-deploy.sh [--skip-sync] [--skip-restart]
 set -euo pipefail
 
-REPO_DIR="/home/codes/webClx"
+REPO_DIR="/home/codes/tools/webClx"
 DEPLOY_BIN="/home/bin/webclx/webClx"
 DEPLOY_STATIC="/home/bin/webclx/static"
 SERVICE_NAME="webclx.service"

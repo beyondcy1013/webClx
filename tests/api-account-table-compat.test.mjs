@@ -13,8 +13,8 @@ const configOverrideSource = readFileSync(
 
 assert.match(
   indexHtml,
-  /<th>凭据<\/th>/,
-  "the shared Codex_API table should use a neutral credential heading",
+  /class="entry-table auth-table codex-account-table"[\s\S]*?<th>账号 \/ 凭据<\/th>/,
+  "the unified LLM_API account table should keep the neutral credential heading",
 );
 assert.match(
   configOverrideSource,
@@ -23,7 +23,7 @@ assert.match(
 );
 assert.match(
   apiManagerSource,
-  /const isChatgptOauth = preset\.access_mode === "chatgpt_oauth"/,
+  /preset\.access_mode === "chatgpt_oauth"/,
   "OAuth proxy presets should be identified by their persisted access mode",
 );
 assert.match(
@@ -38,7 +38,7 @@ assert.match(
 );
 assert.match(
   apiManagerSource,
-  /isChatgptOauth[\s\S]*\? "OAuth 代理"/,
+  /preset\.access_mode === "chatgpt_oauth"\s*\?\s*"OAuth 代理"/,
   "OAuth proxy presets should identify their local entry mode in the existing column",
 );
 assert.match(

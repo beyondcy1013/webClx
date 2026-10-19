@@ -36,7 +36,9 @@ pub fn validate_optional_existing(path: &Path) -> io::Result<bool> {
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
     validate_optional_existing(path)?;
     let temporary = private_temporary_path(path);
-    let result = write_new(&temporary, contents).and_then(|()| replace(&temporary, path));
+    let result = write_new(&temporary, contents)
+        .and_then(|()| replace(&temporary, path))
+        .and_then(|()| crate::atomic_file::sync_parent_directory(path));
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -87,12 +89,12 @@ fn write_new(_path: &Path, _contents: &[u8]) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn replace(temporary: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace(temporary: &Path, destination: &Path) -> io::Result<()> {
     fs::rename(temporary, destination)
 }
 
 #[cfg(windows)]
-fn replace(temporary: &Path, destination: &Path) -> io::Result<()> {
+pub(crate) fn replace(temporary: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{REPLACEFILE_WRITE_THROUGH, ReplaceFileW};
 
@@ -128,7 +130,7 @@ fn replace(temporary: &Path, destination: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn replace(_temporary: &Path, _destination: &Path) -> io::Result<()> {
+pub(crate) fn replace(_temporary: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "private files are unsupported on this platform",

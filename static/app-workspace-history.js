@@ -2,6 +2,164 @@
 // 依赖 app.js 运行时已初始化的全局：state、workspaceHistory*El、requestJson、updateStatus。
 // 必须在 app.js 之前用 <script defer> 加载，函数声明为全局，app.js 内调用方无需改动。
 
+const WORKSPACE_HISTORY_COLUMN_WIDTHS_KEY = "webclx:workspace-history-column-widths";
+const WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS = [96, 48, 96, 180, 64, 180, 96];
+
+function readWorkspaceHistoryColumnWidths() {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_HISTORY_COLUMN_WIDTHS_KEY);
+    const widths = JSON.parse(raw || "null");
+    if (!Array.isArray(widths) || widths.length !== WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS.length) {
+      return null;
+    }
+    const normalized = widths.map((width, index) => {
+      const value = Number(width);
+      return Number.isFinite(value)
+        ? Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index], Math.round(value))
+        : null;
+    });
+    return normalized.every((width) => width !== null) ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function storeWorkspaceHistoryColumnWidths(widths) {
+  try {
+    window.localStorage.setItem(WORKSPACE_HISTORY_COLUMN_WIDTHS_KEY, JSON.stringify(widths));
+  } catch {
+    // Keep the current layout usable when localStorage is unavailable.
+  }
+}
+
+function workspaceHistoryColumnElements() {
+  if (typeof document === "undefined" || typeof document.querySelector !== "function") {
+    return null;
+  }
+  const table = document.querySelector(".workspace-history-table");
+  if (!table) {
+    return null;
+  }
+  const columns = Array.from(table.querySelectorAll("col[data-workspace-history-column]"));
+  const headers = Array.from(table.querySelectorAll("thead th"));
+  return columns.length === WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS.length
+    && headers.length === columns.length
+    ? { table, columns, headers }
+    : null;
+}
+
+function workspaceHistoryColumnWidths(elements) {
+  const saved = readWorkspaceHistoryColumnWidths();
+  if (saved) {
+    return saved;
+  }
+  return elements.headers.map((header, index) => Math.max(
+    WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index],
+    Math.round(header.getBoundingClientRect().width),
+  ));
+}
+
+function setupWorkspaceHistoryColumnResizing() {
+  const elements = workspaceHistoryColumnElements();
+  if (!elements || elements.table.dataset.columnResizeReady === "true") {
+    return;
+  }
+
+  const widths = workspaceHistoryColumnWidths(elements);
+  const applyWidths = (nextWidths) => {
+    nextWidths.forEach((width, index) => {
+      elements.columns[index].style.width = `${Math.round(width)}px`;
+    });
+  };
+  applyWidths(widths);
+
+  elements.headers.forEach((header, index) => {
+    const handle = document.createElement("span");
+    handle.className = "table-column-resize-handle";
+    handle.dataset.columnIndex = String(index);
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.setAttribute("aria-label", `调整${header.textContent.trim()}列宽`);
+    handle.tabIndex = 0;
+    header.appendChild(handle);
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const startX = event.clientX;
+      const startWidths = elements.columns.map((column) => column.getBoundingClientRect().width);
+      const nextIndex = index + 1;
+      const hasNextColumn = nextIndex < elements.columns.length;
+      const startHandle = handle;
+      const finish = () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", finish);
+        document.removeEventListener("pointercancel", finish);
+        document.body.classList.remove("is-resizing-table-column");
+        startHandle.classList.remove("is-dragging");
+        storeWorkspaceHistoryColumnWidths(elements.columns.map((column) => Math.round(column.getBoundingClientRect().width)));
+      };
+      const move = (moveEvent) => {
+        const delta = moveEvent.clientX - startX;
+        if (!hasNextColumn) {
+          applyWidths([
+            ...startWidths.slice(0, index),
+            Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index], startWidths[index] + delta),
+          ]);
+          return;
+        }
+        const currentWidth = Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index], startWidths[index] + delta);
+        const nextWidth = Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[nextIndex], startWidths[nextIndex] - (currentWidth - startWidths[index]));
+        const adjustedDelta = currentWidth - startWidths[index];
+        const nextWidths = [...startWidths];
+        nextWidths[index] = startWidths[index] + adjustedDelta;
+        nextWidths[nextIndex] = startWidths[nextIndex] - adjustedDelta;
+        if (nextWidth !== nextWidths[nextIndex]) {
+          nextWidths[index] = startWidths[index] + (startWidths[nextIndex] - nextWidth);
+          nextWidths[nextIndex] = nextWidth;
+        }
+        applyWidths(nextWidths);
+      };
+      document.body.classList.add("is-resizing-table-column");
+      startHandle.classList.add("is-dragging");
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", finish);
+      document.addEventListener("pointercancel", finish);
+    });
+
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+      event.preventDefault();
+      const direction = event.key === "ArrowRight" ? 16 : -16;
+      const currentWidths = elements.columns.map((column) => column.getBoundingClientRect().width);
+      const nextIndex = index + 1;
+      if (nextIndex >= elements.columns.length) {
+        const nextWidth = Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index], currentWidths[index] + direction);
+        currentWidths[index] = nextWidth;
+        applyWidths(currentWidths);
+        storeWorkspaceHistoryColumnWidths(currentWidths.map((width) => Math.round(width)));
+        return;
+      }
+      const nextWidth = currentWidths[nextIndex] - direction;
+      if (nextWidth < WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[nextIndex]) {
+        return;
+      }
+      currentWidths[index] = Math.max(WORKSPACE_HISTORY_COLUMN_MIN_WIDTHS[index], currentWidths[index] + direction);
+      currentWidths[nextIndex] = nextWidth;
+      applyWidths(currentWidths);
+      storeWorkspaceHistoryColumnWidths(currentWidths.map((width) => Math.round(width)));
+    });
+  });
+  elements.table.dataset.columnResizeReady = "true";
+}
+
+setupWorkspaceHistoryColumnResizing();
+
 function normalizeWorkspaceHistoryItems(items) {
   if (!Array.isArray(items)) {
     return [];
@@ -391,6 +549,52 @@ function setWorkspaceHistorySearchControlsBusy(isBusy) {
   }
 }
 
+const MAX_WORKSPACE_HISTORY_SEARCH_HISTORY = 12;
+
+function readWorkspaceHistorySearchHistory() {
+  try {
+    const raw = window.localStorage.getItem(WORKSPACE_HISTORY_SEARCH_HISTORY_STORAGE_KEY);
+    const values = JSON.parse(raw || "[]");
+    if (!Array.isArray(values)) {
+      return [];
+    }
+    return values
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .filter((value, index, list) => list.indexOf(value) === index)
+      .slice(0, MAX_WORKSPACE_HISTORY_SEARCH_HISTORY);
+  } catch {
+    return [];
+  }
+}
+
+function renderWorkspaceHistorySearchHistory() {
+  if (!workspaceHistorySearchHistoryEl) {
+    return;
+  }
+  workspaceHistorySearchHistoryEl.textContent = "";
+  readWorkspaceHistorySearchHistory().forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    workspaceHistorySearchHistoryEl.appendChild(option);
+  });
+}
+
+function rememberWorkspaceHistorySearch(query) {
+  const value = String(query || "").trim();
+  if (!value) {
+    return;
+  }
+  const next = [value, ...readWorkspaceHistorySearchHistory().filter((item) => item !== value)]
+    .slice(0, MAX_WORKSPACE_HISTORY_SEARCH_HISTORY);
+  try {
+    window.localStorage.setItem(WORKSPACE_HISTORY_SEARCH_HISTORY_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Search remains usable when localStorage is unavailable.
+  }
+  renderWorkspaceHistorySearchHistory();
+}
+
 function scheduleWorkspaceHistorySearch(query, immediate = false) {
   state.workspaceHistorySearchQuery = String(query || "");
   if (state.workspaceHistorySearchDebounceId) {
@@ -428,8 +632,18 @@ function currentWorkspaceDirectoryPath() {
   return path ? normalizeAbsolutePath(path) : "";
 }
 
-async function refreshCurrentWorkspaceDirectoryFromTerminal() {
-  const sessionId = String(state.returnTerminalSessionId || "").trim();
+async function refreshCurrentWorkspaceDirectoryFromTerminal(options = null) {
+  const restoreWorkspacePath = Boolean(options?.restoreWorkspacePath);
+  const explicitSessionId = String(
+    restoreWorkspacePath
+      ? state.initialReturnTerminalSessionId || ""
+      : state.returnTerminalSessionId || "",
+  ).trim();
+  const storedSessionId =
+    restoreWorkspacePath && !state.initialWorkspacePathProvided
+      ? String(getStoredGlobalSessionId() || "").trim()
+      : "";
+  const sessionId = explicitSessionId || storedSessionId;
   if (!sessionId) {
     return false;
   }
@@ -445,6 +659,10 @@ async function refreshCurrentWorkspaceDirectoryFromTerminal() {
     }
     const currentPath = normalizeAbsolutePath(rawCurrentPath);
     state.currentWorkspaceDirectoryPath = currentPath;
+    if (restoreWorkspacePath) {
+      state.returnTerminalSessionId = sessionId;
+      state.currentPath = String(directory?.path || "");
+    }
 
     if (
       state.activeTab === "workspace-history" &&
@@ -532,7 +750,7 @@ function syncWorkspaceHistoryPathSelect(groups) {
 }
 
 function setWorkspaceHistoryActionDisabled(disabled) {
-  [workspaceHistoryTerminalButton, workspaceHistoryDeleteButton].forEach((button) => {
+  [workspaceHistoryPathCopyButton, workspaceHistoryTerminalButton, workspaceHistoryDeleteButton].forEach((button) => {
     if (button) {
       button.disabled = disabled;
     }
@@ -542,11 +760,13 @@ function setWorkspaceHistoryActionDisabled(disabled) {
 function workspaceHistoryLoadMessage() {
   const completed = Number(state.workspaceHistoryLoadCompleted) || 0;
   const total = Number(state.workspaceHistoryLoadTotal) || 0;
+  const itemCount = Number(state.workspaceHistoryLoadItemCount) || 0;
+  const current = String(state.workspaceHistoryLoadCurrent || "历史数据");
   if (state.workspaceHistoryLoadState === "loading") {
-    return `正在读取历史记录（${completed}/${total} 个数据源）…`;
+    return `正在读取：${current}（数据源 ${completed}/${total}，已获取 ${itemCount} 条）…`;
   }
   if (state.workspaceHistoryLoadState === "enriching") {
-    return `已读取 ${state.codexConversations.length} 条对话，正在补充活动终端详情（${completed}/${total}）…`;
+    return `正在补充活动终端详情：${current}（${completed}/${total}，已获取 ${itemCount} 条）…`;
   }
   if (state.workspaceHistoryLoadState === "error") {
     return `历史记录加载失败：${state.workspaceHistoryLoadError || "未知错误"}`;
@@ -554,12 +774,54 @@ function workspaceHistoryLoadMessage() {
   return "";
 }
 
-function setWorkspaceHistoryLoadState(loadState, { completed = 0, total = 0, error = "" } = {}) {
+function setWorkspaceHistoryLoadState(
+  loadState,
+  {
+    completed = 0,
+    total = 0,
+    itemCount = state.workspaceHistoryLoadItemCount || 0,
+    current = "",
+    pending = [],
+    error = "",
+  } = {},
+) {
   state.workspaceHistoryLoadState = loadState;
   state.workspaceHistoryLoadCompleted = completed;
   state.workspaceHistoryLoadTotal = total;
+  state.workspaceHistoryLoadItemCount = itemCount;
+  state.workspaceHistoryLoadCurrent = current;
+  state.workspaceHistoryLoadPending = Array.isArray(pending) ? pending : [];
   state.workspaceHistoryLoadError = error;
   const message = workspaceHistoryLoadMessage();
+  const isBusy = loadState === "loading" || loadState === "enriching";
+  const progressPanel = typeof workspaceHistoryProgressPanelEl !== "undefined"
+    ? workspaceHistoryProgressPanelEl
+    : null;
+  const currentWorkEl = typeof workspaceHistoryCurrentWorkEl !== "undefined"
+    ? workspaceHistoryCurrentWorkEl
+    : null;
+  const progressLabelEl = typeof workspaceHistoryProgressLabelEl !== "undefined"
+    ? workspaceHistoryProgressLabelEl
+    : null;
+  const progressEl = typeof workspaceHistoryProgressEl !== "undefined"
+    ? workspaceHistoryProgressEl
+    : null;
+  if (progressPanel) {
+    progressPanel.hidden = !isBusy;
+  }
+  if (currentWorkEl) {
+    currentWorkEl.textContent = isBusy
+      ? `当前工作：${current || "整理历史记录"}`
+      : "";
+  }
+  if (progressLabelEl) {
+    progressLabelEl.textContent = `${completed}/${total} · ${itemCount} 条`;
+  }
+  if (progressEl) {
+    const percent = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+    progressEl.value = percent;
+    progressEl.setAttribute("aria-valuetext", `${completed}/${total} 个数据源，${itemCount} 条数据`);
+  }
   if (message) {
     updateTableCardStatus(workspaceHistoryStatusEl, message, loadState === "error" ? "warn" : "info");
   }
@@ -579,11 +841,12 @@ function isWorkspaceHistoryMissingDirectoryError(error) {
 }
 
 function workspaceHistoryCoreRequestUrls() {
+  const recentQuery = state.workspaceHistoryRecentOnly ? "?recent_days=7" : "";
   if (state.workspaceHistorySearchAllWorkspaces) {
     return {
       path: "",
-      sessions: "/api/terminal/sessions?all=true",
-      conversations: "/api/terminal/codex-conversations",
+      sessions: "/api/terminal/sessions?all=true&history=true",
+      conversations: `/api/terminal/codex-conversations${recentQuery}`,
     };
   }
 
@@ -591,25 +854,53 @@ function workspaceHistoryCoreRequestUrls() {
   const relativePath = relativePathBetweenAbsolute(state.workspaceDir || "/", path);
   return {
     path,
-    sessions: `/api/terminal/sessions?path=${encodeURIComponent(relativePath)}`,
-    conversations: `/api/terminal/codex-conversations?cwd=${encodeURIComponent(path)}`,
+    sessions: `/api/terminal/sessions?path=${encodeURIComponent(relativePath)}&history=true`,
+    conversations: `/api/terminal/codex-conversations?cwd=${encodeURIComponent(path)}${recentQuery ? "&recent_days=7" : ""}`,
   };
 }
 
 async function refreshWorkspaceHistoryConversations() {
   const requestToken = ++state.codexConversationRequestToken;
+  state.workspaceHistoryDetailAbortController?.abort();
+  const detailAbortController = typeof AbortController === "function"
+    ? new AbortController()
+    : { signal: undefined, abort() {} };
+  state.workspaceHistoryDetailAbortController = detailAbortController;
+  const loadTimeoutId = typeof window !== "undefined" && window.setTimeout
+    ? window.setTimeout(() => {
+      detailAbortController.abort();
+    }, WORKSPACE_HISTORY_LOAD_TIMEOUT_MS)
+    : null;
   const requestUrls = workspaceHistoryCoreRequestUrls();
   if (workspaceHistoryRefreshButton) {
     workspaceHistoryRefreshButton.disabled = true;
   }
   const coreRequestTotal = 3;
   let completedCoreRequests = 0;
-  setWorkspaceHistoryLoadState("loading", { total: coreRequestTotal });
+  let loadedCoreItems = 0;
+  const coreRequestLabels = ["活动终端", "终端归档", "Codex 对话"];
+  let pendingCoreRequests = [...coreRequestLabels];
+  setWorkspaceHistoryLoadState("loading", {
+    total: coreRequestTotal,
+    itemCount: 0,
+    current: coreRequestLabels.join("、"),
+    pending: pendingCoreRequests,
+  });
   renderWorkspaceHistory();
 
-  const loadCoreData = async (url, missingDirectoryFallback = null) => {
+  const loadCoreData = async (url, label, missingDirectoryFallback = null) => {
+    let loadedItemCount = 0;
     try {
-      return await requestJson(url);
+      const response = await requestJson(url, { signal: detailAbortController.signal });
+      loadedItemCount = Array.isArray(response?.sessions)
+        ? response.sessions.length
+        : Array.isArray(response?.archives)
+          ? response.archives.length
+          : Array.isArray(response?.conversations)
+            ? response.conversations.length
+            : 0;
+      loadedCoreItems += loadedItemCount;
+      return response;
     } catch (error) {
       if (missingDirectoryFallback && isWorkspaceHistoryMissingDirectoryError(error)) {
         return missingDirectoryFallback;
@@ -621,9 +912,15 @@ async function refreshWorkspaceHistoryConversations() {
         state.workspaceHistoryLoadState === "loading"
       ) {
         completedCoreRequests += 1;
+        pendingCoreRequests = pendingCoreRequests.filter((pendingLabel) => pendingLabel !== label);
         setWorkspaceHistoryLoadState("loading", {
           completed: completedCoreRequests,
           total: coreRequestTotal,
+          itemCount: loadedCoreItems,
+          current: loadedItemCount > 0
+            ? `${label}（${loadedItemCount} 条）${pendingCoreRequests.length ? `，等待 ${pendingCoreRequests.join("、")}` : ""}`
+            : pendingCoreRequests.join("、") || "整理读取结果",
+          pending: pendingCoreRequests,
         });
       }
     }
@@ -631,9 +928,9 @@ async function refreshWorkspaceHistoryConversations() {
 
   try {
     const [sessionsResponse, archivesResponse, conversationsResponse] = await Promise.all([
-      loadCoreData(requestUrls.sessions, requestUrls.path ? { sessions: [] } : null),
-      loadCoreData("/api/terminal/resume-archives"),
-      loadCoreData(requestUrls.conversations),
+      loadCoreData(requestUrls.sessions, "活动终端", requestUrls.path ? { sessions: [] } : null),
+      loadCoreData("/api/terminal/resume-archives", "终端归档"),
+      loadCoreData(requestUrls.conversations, "Codex 对话"),
     ]);
     if (requestToken !== state.codexConversationRequestToken) {
       return;
@@ -669,11 +966,23 @@ async function refreshWorkspaceHistoryConversations() {
           total: terminalDetailCount,
         });
       };
-      setWorkspaceHistoryLoadState("enriching", { total: terminalDetailCount });
+      setWorkspaceHistoryLoadState("enriching", {
+        total: terminalDetailCount,
+        current: "终端 Session ID、输入历史",
+        pending: ["终端 Session ID", "输入历史"],
+      });
       renderWorkspaceHistory();
       await Promise.all([
-        hydrateWorkspaceHistoryTerminalSessionIds(requestToken, reportTerminalDetailLoaded),
-        hydrateWorkspaceHistoryTerminalInputHistory(requestToken, reportTerminalDetailLoaded),
+        hydrateWorkspaceHistoryTerminalSessionIds(
+          requestToken,
+          reportTerminalDetailLoaded,
+          detailAbortController.signal,
+        ),
+        hydrateWorkspaceHistoryTerminalInputHistory(
+          requestToken,
+          reportTerminalDetailLoaded,
+          detailAbortController.signal,
+        ),
       ]);
     }
     if (requestToken !== state.codexConversationRequestToken) {
@@ -683,17 +992,25 @@ async function refreshWorkspaceHistoryConversations() {
     renderWorkspaceHistory();
   } catch (error) {
     if (requestToken === state.codexConversationRequestToken) {
+      const loadError = detailAbortController.signal?.aborted
+        ? `读取历史记录超时（${Math.round(WORKSPACE_HISTORY_LOAD_TIMEOUT_MS / 1000)} 秒），请点击“刷新对话”重试。`
+        : error.message || "读取对话列表失败。";
       setWorkspaceHistoryLoadState("error", {
-        error: error.message || "读取对话列表失败。",
+        error: loadError,
       });
       renderWorkspaceHistory();
     }
   } finally {
+    if (loadTimeoutId !== null && typeof window !== "undefined" && window.clearTimeout) {
+      window.clearTimeout(loadTimeoutId);
+    }
     if (requestToken === state.codexConversationRequestToken && workspaceHistoryRefreshButton) {
       workspaceHistoryRefreshButton.disabled = false;
     }
   }
 }
+
+const WORKSPACE_HISTORY_LOAD_TIMEOUT_MS = 30000;
 
 function workspaceHistoryInputHistoryText(entries) {
   return (Array.isArray(entries) ? entries : [])
@@ -789,11 +1106,35 @@ async function persistWorkspaceHistoryTerminalArchiveNow(session, detected) {
   ]);
 }
 
-async function hydrateWorkspaceHistoryTerminalSessionIds(requestToken, onSettled = null) {
+const WORKSPACE_HISTORY_DETAIL_CONCURRENCY = 4;
+
+async function runWorkspaceHistoryWithConcurrency(items, worker) {
+  let cursor = 0;
+  const runners = Array.from(
+    { length: Math.min(WORKSPACE_HISTORY_DETAIL_CONCURRENCY, items.length) },
+    async () => {
+      while (cursor < items.length) {
+        const item = items[cursor];
+        cursor += 1;
+        await worker(item);
+      }
+    },
+  );
+  await Promise.all(runners);
+}
+
+async function hydrateWorkspaceHistoryTerminalSessionIds(
+  requestToken,
+  onSettled = null,
+  signal = null,
+) {
   const terminalSessions = activeTerminalSessions(state.sessions).slice(0, 24);
-  await Promise.all(terminalSessions.map(async (session) => {
+  await runWorkspaceHistoryWithConcurrency(terminalSessions, async (session) => {
     try {
-      const response = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}/agent-session`);
+      const response = await requestJson(
+        `/api/terminal/sessions/${encodeURIComponent(session.id)}/agent-session`,
+        { signal },
+      );
       if (requestToken !== state.codexConversationRequestToken) {
         return;
       }
@@ -817,14 +1158,21 @@ async function hydrateWorkspaceHistoryTerminalSessionIds(requestToken, onSettled
     } finally {
       onSettled?.();
     }
-  }));
+  });
 }
 
-async function hydrateWorkspaceHistoryTerminalInputHistory(requestToken, onSettled = null) {
+async function hydrateWorkspaceHistoryTerminalInputHistory(
+  requestToken,
+  onSettled = null,
+  signal = null,
+) {
   const terminalSessions = activeTerminalSessions(state.sessions).slice(0, 24);
-  await Promise.all(terminalSessions.map(async (session) => {
+  await runWorkspaceHistoryWithConcurrency(terminalSessions, async (session) => {
     try {
-      const payload = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}/input-history`);
+      const payload = await requestJson(
+        `/api/terminal/sessions/${encodeURIComponent(session.id)}/input-history`,
+        { signal },
+      );
       if (requestToken !== state.codexConversationRequestToken) {
         return;
       }
@@ -834,7 +1182,7 @@ async function hydrateWorkspaceHistoryTerminalInputHistory(requestToken, onSettl
     } finally {
       onSettled?.();
     }
-  }));
+  });
 }
 
 function openWorkspaceHistoryTerminal(path) {
@@ -846,7 +1194,7 @@ function openWorkspaceHistoryTerminal(path) {
   }
 
   recordWorkspaceHistory(absolutePath);
-  openFreshTerminalSession(absolutePath);
+  openNewTerminal(absolutePath, workspaceHistoryTerminalButton);
 }
 
 function workspaceHistoryForkCommand(sessionId) {
@@ -864,6 +1212,167 @@ function workspaceHistoryForkTerminalName(item) {
 
 function workspaceHistoryForkSupported(item) {
   return item?.agentProgram === "codex";
+}
+
+function openWorkspaceHistorySessionDialog(item, fallbackPath, sessionAction, trigger) {
+  const sessionId = String(item?.sessionId || "").trim();
+  if (!sessionId) {
+    updateTableCardStatus(workspaceHistoryStatusEl, "这个会话没有可用的 Session ID。", "warn");
+    return;
+  }
+  const workingPath = resolveWorkspaceHistoryPath(
+    item?.cwd || item?.terminal?.path || fallbackPath,
+  );
+  openTerminalNewSessionDialog(trigger, workingPath, {
+    agent: item?.agentProgram || "codex",
+    launchTerminal: openFreshTerminalSession,
+    sessionAction,
+    sessionId,
+    sourceTerminalName: item?.activeTerminalName || "",
+    updatePageStatus: showToast,
+  });
+}
+
+function createWorkspaceHistoryPrimaryAction(item, fallbackPath) {
+  if (item?.type === "terminal") {
+    if (!item.terminal?.id) {
+      return null;
+    }
+    return createActionButton("进入", () => openSession(item.terminal), "mini-button accent");
+  }
+  if (item?.type === "archive" && item.archive) {
+    const archive = item.archive;
+    const command = archiveCommand(archive);
+    const archiveId = archiveIdentity(archive);
+    const workingPath = resolveWorkspaceHistoryPath(archiveWorkingPath(item.archive));
+    const runLink = createActionLink(
+      "运行",
+      buildTerminalUrl(workingPath, "", { fresh: true, runCommand: command }),
+      "mini-button accent",
+    );
+    runLink.addEventListener("click", (event) => {
+      openFreshTerminalRunLink(event, workingPath, command, {
+        beforeNavigate: () => touchTerminalArchive(archiveIdentity(item.archive)),
+        terminalName: item.activeTerminalName
+          ? `${item.activeTerminalName}_resume`
+          : "",
+      });
+    });
+    return runLink;
+  }
+  if (!item?.sessionId) {
+    return null;
+  }
+  let button;
+  if (item?.type === "archive" || !workspaceHistoryArchiveForItem(item)) {
+    button = createActionButton("恢复", () => {
+      openWorkspaceHistorySessionDialog(item, fallbackPath, "resume", button);
+    }, "mini-button accent");
+    return button;
+  }
+  const selectedPath = fallbackPath;
+  const workingPath = resolveWorkspaceHistoryPath(selectedPath);
+  const command = resumeCommandFromId(item.sessionId);
+  const runLink = createActionLink(
+    "运行",
+    buildTerminalUrl(workingPath, "", { fresh: true, runCommand: command }),
+    "mini-button accent",
+  );
+  runLink.addEventListener("click", (event) => {
+    openFreshTerminalRunLink(event, workingPath, command, {
+      terminalName: item.activeTerminalName,
+    });
+  });
+  return runLink;
+}
+
+function workspaceHistoryTerminalBaseName(name) {
+  const currentName = String(name || "").trim();
+  const numberedName = currentName.match(/^(.*?_\d+)(?:_.*)?$/);
+  return numberedName?.[1] || currentName;
+}
+
+function workspaceHistoryTerminalNameFromItem(item) {
+  const title = String(item?.title || "").trim();
+  if (!title || title === "无对话摘要" || title === "活动终端") {
+    return "";
+  }
+
+  return sessionRenameSavedName(title.replace(/\s+/g, "_")).slice(0, 120);
+}
+
+function buildWorkspaceHistoryReplacementTerminalName(item) {
+  const currentName = String(item?.activeTerminalName || item?.terminal?.name || "").trim();
+  if (!currentName) {
+    return { currentName, nextName: "" };
+  }
+  const conversationName = workspaceHistoryTerminalNameFromItem(item);
+  if (!conversationName) {
+    return { currentName, nextName: "" };
+  }
+
+  const baseName = workspaceHistoryTerminalBaseName(currentName);
+  return {
+    currentName,
+    nextName: `${baseName}_${conversationName}`.slice(0, 160),
+  };
+}
+
+async function replaceWorkspaceHistoryTerminalName(item, button) {
+  const { currentName, nextName } = buildWorkspaceHistoryReplacementTerminalName(item);
+  if (!currentName) {
+    updateTableCardStatus(workspaceHistoryStatusEl, "没有可替换名称的终端。", "warn");
+    return;
+  }
+  if (!nextName) {
+    updateTableCardStatus(workspaceHistoryStatusEl, "没有可用于替换终端名的对话内容。", "warn");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `确定将当前终端名称由：\n${currentName}\n改为：\n${nextName} 吗？`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  button.disabled = true;
+  updateTableCardStatus(workspaceHistoryStatusEl, `正在替换终端名 ${currentName}…`, "info");
+  try {
+    if (item.terminal?.id) {
+      const renamed = await requestJson(
+        `/api/terminal/sessions/${encodeURIComponent(item.terminal.id)}`,
+        {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ name: nextName }),
+        },
+      );
+      announceSessionMutation("renamed", renamed);
+      state.sessions = state.sessions.map((session) => (
+        session.id === renamed.id ? { ...session, ...renamed } : session
+      ));
+    } else {
+      await persistWorkspaceHistoryArchiveName(item, nextName);
+    }
+
+    try {
+      await refreshWorkspaceHistoryConversations();
+    } catch {
+      renderWorkspaceHistory();
+    }
+    updateTableCardStatus(workspaceHistoryStatusEl, `终端已改名为 ${nextName}。`, "ok");
+  } catch (error) {
+    updateTableCardStatus(
+      workspaceHistoryStatusEl,
+      `替换终端名称失败：${error.message}`,
+      "warn",
+    );
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function workspaceHistoryPresetForkCommand(sessionId, presetId) {
@@ -910,7 +1419,9 @@ function renderWorkspaceHistoryPresetOptions(presets, { loading = false, error =
     return;
   }
 
-  const availablePresets = Array.isArray(presets) ? presets.filter((preset) => preset?.id) : [];
+  const availablePresets = (Array.isArray(presets) ? presets.filter((preset) => preset?.id) : [])
+    .slice()
+    .sort((left, right) => Number(right.favorite === true) - Number(left.favorite === true));
   const selectedPresetId = list.querySelector('input[name="workspace-history-preset"]:checked')?.value || "";
   list.replaceChildren();
   submit.disabled = loading || availablePresets.length === 0;
@@ -953,6 +1464,13 @@ function renderWorkspaceHistoryPresetOptions(presets, { loading = false, error =
     const name = document.createElement("strong");
     name.textContent = preset.name || preset.id;
     title.appendChild(name);
+    if (preset.favorite) {
+      const favorite = document.createElement("span");
+      favorite.className = "workspace-history-preset-favorite";
+      favorite.textContent = "★";
+      favorite.title = "已收藏";
+      title.appendChild(favorite);
+    }
     if (preset.active) {
       const current = document.createElement("span");
       current.className = "workspace-history-preset-current";
@@ -1070,11 +1588,6 @@ function bindWorkspaceHistoryPresetForkDialog() {
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeWorkspaceHistoryPresetForkDialog();
-  });
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) {
-      closeWorkspaceHistoryPresetForkDialog();
-    }
   });
   cancel.addEventListener("click", () => closeWorkspaceHistoryPresetForkDialog());
   form.addEventListener("submit", async (event) => {
@@ -1278,9 +1791,21 @@ async function deleteWorkspaceHistoryConversation(item, button) {
   }
 }
 
-function createWorkspaceHistoryMoreButton(item) {
+function createWorkspaceHistoryMoreButton(item, fallbackPath) {
   let button;
   const actions = [];
+  if (workspaceHistoryForkSupported(item) && workspaceHistoryForkCommand(item?.sessionId)) {
+    actions.push({
+      label: "fork",
+      handler: () => openWorkspaceHistorySessionDialog(item, fallbackPath, "fork", button),
+    });
+  }
+  if (item?.sessionId) {
+    actions.push({
+      label: "复制 ID",
+      handler: () => copyWorkspaceHistorySessionId(item.sessionId),
+    });
+  }
   if (item?.terminal?.id || item?.sessionId) {
     actions.push({
       label: "改名",
@@ -1300,7 +1825,7 @@ function createWorkspaceHistoryMoreButton(item) {
     label: `${item?.activeTerminalName || item?.title || "当前会话"} 的更多操作`,
   });
   button.classList.add("workspace-history-more-action");
-  button.textContent = "更多";
+  button.textContent = "…";
   button.dataset.terminalRenameKey = item?.terminal?.id
     ? `session:${item.terminal.id}`
     : `history:${item?.sessionId || ""}`;
@@ -1402,8 +1927,8 @@ function renderWorkspaceHistory() {
     .sort((left, right) => Number(right.updatedAt || 0) - Number(left.updatedAt || 0) || String(left.title).localeCompare(String(right.title)));
   const { rows, filtered } = filterWorkspaceHistoryRows(allRows, state.workspaceHistorySearchQuery);
   const query = state.workspaceHistorySearchQuery.trim();
-  // Hide conversations older than 30 days unless the user is searching (search ignores the date cap).
-  const cutoffMs = state.workspaceHistoryRecentOnly && !query ? Date.now() - 30 * 86400000 : 0;
+  // Hide conversations older than 7 days unless the user is searching (search ignores the date cap).
+  const cutoffMs = state.workspaceHistoryRecentOnly && !query ? Date.now() - 7 * 86400000 : 0;
   const visibleRows = cutoffMs ? rows.filter((row) => Number(row.updatedAt || 0) >= cutoffMs) : rows;
 
   if (allRows.length === 0) {
@@ -1427,7 +1952,7 @@ function renderWorkspaceHistory() {
     const cell = document.createElement("td");
     cell.colSpan = 7;
     cell.className = "session-empty";
-    cell.textContent = `最近30天没有对话，取消勾选"仅30天"可查看全部。`;
+    cell.textContent = `最近7天没有对话，取消勾选"仅7天"可查看全部。`;
     row.appendChild(cell);
     workspaceHistoryListEl.appendChild(row);
   }
@@ -1449,8 +1974,29 @@ function renderWorkspaceHistory() {
 
     const sessionCell = document.createElement("td");
     sessionCell.className = "mono-text workspace-history-session-cell";
-    sessionCell.textContent = item.sessionId ? shortResumeId(item.sessionId) : "—";
-    sessionCell.title = item.sessionId || "没有检测到 Codex session ID";
+    const sessionId = String(item.sessionId || "").trim();
+    if (sessionId) {
+      const sessionValue = document.createElement("span");
+      sessionValue.className = "workspace-history-session-value";
+      sessionValue.textContent = sessionId;
+      const copySessionIdButton = createActionButton("复制", () => {
+        copyWorkspaceHistorySessionId(sessionId, copySessionIdButton);
+      }, "mini-button workspace-history-session-copy");
+      copySessionIdButton.title = "复制完整 Session ID";
+      copySessionIdButton.setAttribute("aria-label", `复制 Session ID ${sessionId}`);
+      const replaceTerminalNameButton = createActionButton("替换终端名", () => {
+        replaceWorkspaceHistoryTerminalName(item, replaceTerminalNameButton);
+      }, "mini-button workspace-history-session-copy");
+      replaceTerminalNameButton.title = "用这条对话内容替换终端名";
+      replaceTerminalNameButton.setAttribute(
+        "aria-label",
+        `用对话内容替换终端名：${item.title || ""}`,
+      );
+      sessionCell.append(sessionValue, copySessionIdButton, replaceTerminalNameButton);
+    } else {
+      sessionCell.textContent = "—";
+    }
+    sessionCell.title = sessionId || "没有检测到 Codex session ID";
 
     const sizeCell = document.createElement("td");
     sizeCell.className = "workspace-history-size-cell";
@@ -1483,51 +2029,14 @@ function renderWorkspaceHistory() {
 
     const actionCell = document.createElement("td");
     actionCell.className = "session-action-cell";
-    if (item.type === "terminal" && item.terminal) {
-      const openLink = createActionLink("进入", buildTerminalUrl(item.terminal.path, item.terminal.id), "mini-button accent");
-      openLink.addEventListener("click", () => rememberPreferredSession(item.terminal.path, item.terminal.id));
-      actionCell.appendChild(openLink);
-    } else if (item.type === "archive" && item.archive) {
-      const command = archiveCommand(item.archive);
-      const workingPath = resolveWorkspaceHistoryPath(archiveWorkingPath(item.archive));
-      const runLink = createActionLink("恢复", buildTerminalUrl(workingPath, "", { fresh: true, runCommand: command }), "mini-button accent");
-      runLink.addEventListener("click", (event) => {
-        openFreshTerminalRunLink(event, workingPath, command, {
-          beforeNavigate: () => touchTerminalArchive(archiveIdentity(item.archive)),
-          terminalName: item.activeTerminalName,
-        });
-      });
-      actionCell.appendChild(runLink);
-    } else if (item.sessionId) {
-      const workingPath = resolveWorkspaceHistoryPath(selectedPath);
-      const command = resumeCommandFromId(item.sessionId);
-      const runLink = createActionLink("恢复", buildTerminalUrl(workingPath, "", { fresh: true, runCommand: command }), "mini-button accent");
-      runLink.addEventListener("click", (event) => {
-        openFreshTerminalRunLink(event, workingPath, command, {
-          terminalName: item.activeTerminalName,
-        });
-      });
-      actionCell.appendChild(runLink);
+    const primaryAction = createWorkspaceHistoryPrimaryAction(item, selectedPath);
+    if (primaryAction) {
+      actionCell.appendChild(primaryAction);
     } else {
       actionCell.textContent = "—";
     }
-    if (item.sessionId) {
-      const copySessionIdButton = createActionButton("复制 ID", () => {
-        copyWorkspaceHistorySessionId(item.sessionId, copySessionIdButton);
-      }, "mini-button");
-      copySessionIdButton.setAttribute("aria-label", `复制 Session ID ${item.sessionId}`);
-      actionCell.appendChild(copySessionIdButton);
-    }
-    const forkLink = createWorkspaceHistoryForkLink(item, selectedPath);
-    if (forkLink) {
-      actionCell.appendChild(forkLink);
-    }
-    const presetForkButton = createWorkspaceHistoryPresetForkButton(item, selectedPath);
-    if (presetForkButton) {
-      actionCell.appendChild(presetForkButton);
-    }
     if (item.terminal?.id || item.sessionId) {
-      actionCell.appendChild(createWorkspaceHistoryMoreButton(item));
+      actionCell.appendChild(createWorkspaceHistoryMoreButton(item, selectedPath));
     }
 
     row.append(actionCell, terminalCell, activeTerminalNameCell, sessionCell, sizeCell, titleCell, timeCell);
@@ -1537,7 +2046,7 @@ function renderWorkspaceHistory() {
   let statusText;
   let statusTone = "ok";
   const scopeLabel = searchAllWorkspaces ? "（全部工作区）" : "";
-  const dateLabel = state.workspaceHistoryRecentOnly ? "（最近30天）" : "";
+  const dateLabel = state.workspaceHistoryRecentOnly ? "（最近7天）" : "";
   if (query) {
     if (rows.length === 0) {
       statusText = `没有匹配"${query}"的对话（共 ${allRows.length} 条）${scopeLabel}`;

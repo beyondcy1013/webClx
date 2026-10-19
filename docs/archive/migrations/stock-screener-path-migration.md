@@ -19,9 +19,9 @@
 
 ## 2026-05-26 修复
 
-- 将旧源码路径统一迁到 `/home/codes/stockScreener`。
-- 将历史 `/home/codes/...` 路径统一迁到 `/home/codes/stockScreener`。
-- 将旧 deploy 历史项迁到 `/home/codes/stockScreener/deploy`，该目录已确认存在。
+- 将旧源码路径统一迁到 `/home/codes/stock/stockScreener`。
+- 将历史 `/home/codes/...` 路径统一迁到 `/home/codes/stock/stockScreener`。
+- 将旧 deploy 历史项迁到 `/home/codes/stock/stockScreener/deploy`，该目录已确认存在。
 - 将 Codex 恢复归档中的旧 `cwd` 和 note 前缀同步为 `stockScreener`。
 - 对 `favorite_paths` 和 `workspace_history` 按路径去重，保留最新 `last_opened_at`。
 

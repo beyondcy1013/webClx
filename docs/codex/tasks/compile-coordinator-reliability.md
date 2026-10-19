@@ -1,5 +1,13 @@
 # 编译编排器可靠性
 
+## HTTP 执行与部署进程边界
+
+- `request_compile` / `request_deploy` 的项目检查、Git 子进程、请求文件写入和 worker 启动通过 `spawn_blocking` 执行，避免占用 Tokio 工作线程。入队成功仍表示 worker 已成功启动，生命周期与回调格式不变。
+- `/api/service/deploy` 在私有随机目录内创建脚本，目录/脚本权限在 Unix 下分别为 `0700` / `0600`；RAII guard 负责成功、失败及取消后的清理，并发请求不共用脚本路径。
+- Bash 使用 Tokio 异步子进程，300 秒超时，stdout 丢弃，stderr 持续读取且最多保留前 64 KiB。超限输出不会堵住管道或持续扩大内存。超时和请求任务取消会终止子进程；Unix 下终止专用进程组，清理持有管道的后代进程。
+- 提交 systemd 重启使用同一进程管理机制，超时 10 秒。响应 `restarted=true` 表示成功安排了延迟重启，仍需部署方检查服务健康；完成提示明确写为“已安排重启”。
+- 回归运行 `deploy_service::` 和 `compile_service::` 相关 Rust 测试；进程测试命令必须带外层 `timeout --signal=KILL`。未取得 worktree 授权时跳过 `linked_worktree_requires_explicit_authorization`。
+
 ## 目标
 
 `POST /api/build/compile` 与 `POST /api/build/deploy` 返回 `queued: true` 后，请求身份必须保持唯一且不可被其它项目覆盖；若 worker 未能启动，API 必须直接失败，不能留下待处理请求或等待一个不会到达的回调。
@@ -46,6 +54,18 @@
   target，再分三批提交同规格请求；验证三批进入同一 run、只执行一次，并读取第三批
   到达后的工作树内容。
 
+## 2026-08-16 运行状态文件误计为合并请求
+
+- 现象：单个编译请求的完成回调固定显示“本轮合并 2 个请求”；一个请求已开始编译后，
+  再提交同规格请求时，后一个独立 run 也显示合并 2 个，造成运行中请求被合并的假象。
+- 根因：worker 在等待资源时先写入 `progress.json`，取得资源后又用 run 目录下全部
+  `*.json` 文件数作为 `request_count`，把进度文件误算成请求。
+- 修复：run 请求数只统计 JSON 中带有效 `request_id` 的原始请求文件。运行中的命令仍与
+  后续请求隔离；只有尚未开始执行、仍在等待资源的同规格请求可以合并并读取最新工作树。
+- 回归：`tests/compile-worker-running-request-isolation.test.mjs` 验证运行中与后来请求形成
+  两个 run、各执行一次且单请求通知不显示合并；既有 pending coalescing 测试继续验证
+  等待请求合并和最新工作树语义。
+
 ## 2026-07-15 同秒请求覆盖事故
 
 - 现象：stockOne 请求 `061032` 已返回入队，但一直没有回调；运行记录中只有同秒提交的 stockScreener 请求。
@@ -73,6 +93,17 @@
 - 根因：worker 先发 toast，再调用 `wait_terminal_ready()`，要求来源终端同时满足 connected 且非 busy，最多轮询 30 秒；超时后仍会发送回调，因此等待既不能保证空闲投递，又固定制造延误。
 - 修复：删除回调前的 busy 等待，toast 后立即调用终端消息 API。终端消息本来就是让活动中的智能体接收编译结果并继续任务的 join point，不应以智能体正在工作为阻塞条件。
 - 回归验证：`tests/compile-callback-delivery.test.mjs` 明确禁止 toast 与终端消息之间出现 `wait_terminal_ready`，同时保留 delivery id 和提交确认契约。
+
+## 2026-08-28 编译完成回调重复投递
+
+- 现象：一个编译请求只执行一次，但来源终端连续收到多条相同完成消息。
+- 根因：worker 对终端消息 API 使用 10 秒单次 HTTP 超时，而服务端的 rollout 确认、
+  退避和 Enter 重试预算可超过 10 秒。客户端超时后立即重发完整正文，前一个服务端请求
+  仍在处理，最终多个请求都写入同一终端。
+- 修复：终端回调单次 HTTP 超时默认提高到 45 秒，并拒绝低于 30 秒的配置，让一次调用
+  覆盖服务端完整确认周期；外层 300 秒重试仍负责服务不可用和重启窗口。
+- 回归：`tests/compile-callback-delivery.test.mjs` 锁定独立终端回调超时及其在
+  `notify_terminal` 中的使用，防止再次退回固定 10 秒。
 
 ## 2026-07-19 Cargo target 目录统一
 
@@ -226,6 +257,17 @@ node tests/compile-deploy-target-path.test.mjs
   提供显式路径时，才从安装命令、Cargo 二进制和 webClx 运行目标推断候选。
 - 回归验证：`tests/compile-worker-audit-paths.test.mjs` 实际执行候选收集函数，确认包含大量路径
   引用的部署脚本也不能扩张显式审计集合。
+
+## 2026-08-15 Android 产物通配符误报
+
+- 现象：webClx Android 请求 `021204-18cbbd4c41dd2a5d` 的 Gradle 构建、签名和
+  `apksigner verify` 均成功，日志已输出 `webClx-1.8.11.apk`；但
+  `required_artifacts=["android/app/build/outputs/apk/published/webClx-*.apk"]` 被判定
+  missing，最终状态误报为失败。
+- 边界：产物实际存在，大小与 SHA-256 均与构建日志一致；这是产物门禁的通配符/路径解析
+  缺陷，不是构建失败。
+- 临时约束：Android 队列提交精确版本化产物路径，不使用 `*` 通配符；后续应给
+  required-artifact 校验补通配符回归测试后再恢复通配符用法。
 
 ## 排障证据
 

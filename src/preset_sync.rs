@@ -107,6 +107,8 @@ enum AccountPresetSection {
     Auth,
     Api,
     Claude,
+    Devin,
+    CodeBuddy,
 }
 
 impl AccountPresetSection {
@@ -115,6 +117,8 @@ impl AccountPresetSection {
             "auth_presets" => Ok(Self::Auth),
             "api_presets" => Ok(Self::Api),
             "claude_presets" => Ok(Self::Claude),
+            "devin_presets" | "devin_accounts" => Ok(Self::Devin),
+            "codebuddy_presets" | "codebuddy_accounts" => Ok(Self::CodeBuddy),
             _ => Err(AppError::bad_request("未知的账号列表类别")),
         }
     }
@@ -124,6 +128,8 @@ impl AccountPresetSection {
             Self::Auth => "auth_presets",
             Self::Api => "api_presets",
             Self::Claude => "claude_presets",
+            Self::Devin => "devin_presets",
+            Self::CodeBuddy => "codebuddy_presets",
         }
     }
 }
@@ -172,6 +178,28 @@ pub async fn export_account_presets_to_clipboard(
                 .claude_presets_snapshot()
                 .into_iter()
                 .filter(|preset| selected_ids.contains(preset.id.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+        AccountPresetSection::Devin => serde_json::to_value(
+            state
+                .devin_manager
+                .list_accounts()
+                .into_iter()
+                .filter(|account| selected_ids.contains(account.id.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+        AccountPresetSection::CodeBuddy => serde_json::to_value(
+            state
+                .codebuddy_manager
+                .list_accounts()
+                .into_iter()
+                .filter(|account| {
+                    account
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(|id| selected_ids.contains(id))
+                        .unwrap_or(false)
+                })
                 .collect::<Vec<_>>(),
         ),
     }
@@ -242,6 +270,36 @@ pub async fn import_account_presets_from_clipboard(
                 .await
                 .map_err(|error| AppError::internal(format!("保存 Claude 预设失败: {error}")))?;
             count
+        }
+        AccountPresetSection::Devin => {
+            let res = state
+                .devin_manager
+                .import_accounts(&payload.accounts)
+                .map_err(|error| AppError::internal(format!("导入 Devin 账号失败: {error}")))?;
+            let imported = res
+                .get("imported")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let updated = res
+                .get("updated")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            imported + updated
+        }
+        AccountPresetSection::CodeBuddy => {
+            let res = state
+                .codebuddy_manager
+                .import_accounts(&payload.accounts)
+                .map_err(|error| AppError::internal(format!("导入 CodeBuddy 账号失败: {error}")))?;
+            let imported = res
+                .get("imported")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            let updated = res
+                .get("updated")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0) as usize;
+            imported + updated
         }
     };
 

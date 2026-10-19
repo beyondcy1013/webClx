@@ -206,9 +206,60 @@ function syncCurrentPathDisplay(displayPath = "") {
   syncTopNavigation();
 }
 
+function formatTerminalTokenCount(value, { fixedMillions = false } = {}) {
+  if (value == null || value === "") {
+    return "";
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number) || number < 0) {
+    return "";
+  }
+  if (number >= 1_000_000) {
+    const formatted = (number / 1_000_000).toFixed(2);
+    return `${fixedMillions ? formatted : formatted.replace(/\.00$/, "")}M`;
+  }
+  if (number >= 1_000) {
+    return `${(number / 1_000).toFixed(1).replace(/\.0$/, "")}K`;
+  }
+  return String(Math.round(number));
+}
+
+function sessionContextDetailLabel(session) {
+  const cached =
+    session?.context_window ||
+    session?.codex_status?.context_window ||
+    (typeof state?.sessionContextCache?.get === "function"
+      ? state.sessionContextCache.get(session?.id)
+      : state?.sessionContextCache?.[session?.id]);
+
+  if (!cached) {
+    return "未记录";
+  }
+
+  const usedTokens = cached.used_tokens ?? cached.usedTokens;
+  const totalTokens = cached.total_tokens ?? cached.totalTokens;
+
+  if (usedTokens == null && totalTokens == null) {
+    return "未记录";
+  }
+
+  const usedStr = formatTerminalTokenCount(usedTokens);
+  const totalStr = formatTerminalTokenCount(totalTokens);
+
+  if (usedStr && totalStr) {
+    return `${usedStr} / ${totalStr}`;
+  }
+  if (usedStr) {
+    return usedStr;
+  }
+  return "未记录";
+}
+
 function sessionOptionLabel(session) {
-  const label = `${sessionActivityAgentPrefix(session)}${sessionActivityPrefix(session)}${session?.name || session?.id || "未命名终端"}${sessionActivityAgentSuffix(session)}`;
-  if (!state.showSessionDetails && !state.showSessionAgent) {
+  const groupName = String(session?.group_name || session?.groupName || "").trim();
+  const groupBadge = groupName ? `【${groupName}】` : "";
+  const label = `${groupBadge}${sessionActivityAgentPrefix(session)}${sessionActivityPrefix(session)}${session?.name || session?.id || "未命名终端"}${sessionActivityAgentSuffix(session)}`;
+  if (!state.showSessionDetails && !state.showSessionAgent && !state.showSessionContext) {
     return label;
   }
   const detailParts = [];
@@ -224,6 +275,10 @@ function sessionOptionLabel(session) {
   if (state.showSessionAgent) {
     const agentDetail = sessionActivityAgentLabel(session) || "未记录";
     detailParts.push(agentDetail);
+  }
+  if (state.showSessionContext) {
+    const contextDetail = sessionContextDetailLabel(session) || "未记录";
+    detailParts.push(contextDetail);
   }
   return `${label} | ${detailParts.join(" | ")}`;
 }

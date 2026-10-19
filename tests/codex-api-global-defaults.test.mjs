@@ -21,42 +21,59 @@ const workspaceRoutesRs = readFileSync(
 );
 
 const apiViewStart = indexHtml.indexOf('id="api-view"');
-const apiViewEnd = indexHtml.indexOf('id="claude-view"');
+const apiViewEnd = indexHtml.indexOf('id="settings-view"');
 assert.ok(apiViewStart >= 0 && apiViewEnd > apiViewStart, "Codex_API view should exist");
 const apiViewHtml = indexHtml.slice(apiViewStart, apiViewEnd);
+const globalSettingsDialogStart = indexHtml.indexOf('id="codex-global-settings-dialog"');
+const globalSettingsDialogHtml = indexHtml.slice(globalSettingsDialogStart);
 
 assert.match(
   apiViewHtml,
-  /id="codex-api-global-defaults"[\s\S]*id="codex-default-config-list"/,
-  "Codex_API should expose the shared default config editor inside its own tab",
+  /id="codex-global-settings-open"[\s\S]*全局设置/,
+  "Codex_API should expose a button for the shared global settings dialog",
+);
+assert.doesNotMatch(
+  apiViewHtml,
+  /id="codex-api-global-defaults"|id="claude-api-global-defaults"/,
+  "global settings should not be rendered inside the account tab",
 );
 assert.match(
-  apiViewHtml,
+  globalSettingsDialogHtml,
+  /id="codex-api-global-defaults"[\s\S]*id="codex-default-config-list"/,
+  "the global settings dialog should own the shared default config editor",
+);
+assert.match(
+  globalSettingsDialogHtml,
   /id="codex-default-config-reset"[\s\S]*id="codex-default-config-save"/,
   "the default layer should provide explicit reset and save actions",
 );
 assert.match(
-  apiViewHtml,
+  globalSettingsDialogHtml,
   /id="codex-common-approval-never"[\s\S]*type="checkbox"[\s\S]*id="codex-common-sandbox-full-access"[\s\S]*type="checkbox"/,
   "Codex_API should expose independent supported approval and sandbox checkboxes",
 );
 assert.match(
-  apiViewHtml,
+  globalSettingsDialogHtml,
   /id="codex-common-config-refresh"[\s\S]*id="codex-common-config-save"[\s\S]*id="codex-common-config-status"/,
   "the current config controls should provide explicit refresh, save, and status elements",
 );
+assert.match(
+  globalSettingsDialogHtml,
+  /id="codex-common-animations-disabled"[\s\S]*tui\.animations = false/,
+  "Codex common config should expose the official TUI animation toggle",
+);
 assert.doesNotMatch(
-  apiViewHtml,
+  globalSettingsDialogHtml,
   /tools\.shell|confirm_commands/,
   "the UI must not expose the unsupported tools.shell.confirm_commands key",
 );
 assert.match(
-  apiViewHtml,
+  globalSettingsDialogHtml,
   /<th[^>]*>作用域<\/th>[\s\S]*id="codex-default-config-list"/,
   "generic defaults should distinguish their config scope",
 );
 assert.match(
-  apiViewHtml,
+  globalSettingsDialogHtml,
   /id="codex-default-config-status"[\s\S]*role="status"[\s\S]*aria-live="polite"/,
   "save feedback should be announced to assistive technology",
 );
@@ -88,7 +105,7 @@ assert.match(
 );
 assert.match(
   settingsLoadSaveJs,
-  /async function saveCodexCommonConfig\([\s\S]*requestJson\("\/api\/settings\/codex-common-config",[\s\S]*method:\s*"PUT"[\s\S]*approval_never:[\s\S]*sandbox_full_access:/,
+  /async function saveCodexCommonConfig\([\s\S]*requestJson\("\/api\/settings\/codex-common-config",[\s\S]*method:\s*"PUT"[\s\S]*approval_never:[\s\S]*sandbox_full_access:[\s\S]*animations_disabled:/,
   "the fixed controls should update both supported top-level settings",
 );
 assert.match(

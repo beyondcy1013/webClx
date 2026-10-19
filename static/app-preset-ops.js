@@ -101,23 +101,40 @@ function renderUpstreamProxyToggles() {
 }
 
 function loadApiPresets() {
+  if (!apiManager?.loadApiPresets) {
+    return Promise.resolve([]);
+  }
   return apiManager.loadApiPresets();
 }
 
 function ensureApiPresetsLoaded() {
+  if (!apiManager?.ensureApiPresetsLoaded) {
+    return;
+  }
   return apiManager.ensureApiPresetsLoaded();
 }
 
 async function loadClaudePresets() {
+  if (!claudeManager?.loadClaudePresets) {
+    return Promise.resolve([]);
+  }
   return claudeManager.loadClaudePresets();
 }
 
 function ensureClaudePresetsLoaded() {
+  if (!claudeManager?.ensureClaudePresetsLoaded) {
+    return;
+  }
   return claudeManager.ensureClaudePresetsLoaded();
 }
 
 async function refreshAuthPanels() {
-  await Promise.allSettled([loadAuthPresets(), loadApiPresets(), loadClaudePresets()]);
+  await Promise.allSettled([
+    loadAuthPresets(),
+    loadApiPresets(),
+    loadClaudePresets(),
+    typeof loadCodexAccounts === "function" ? loadCodexAccounts() : Promise.resolve(),
+  ]);
 }
 
 function confirmEditedPresetOverwrite({ presetKind = "预设", presetName = "" } = {}) {
@@ -249,8 +266,8 @@ function prunePresetTestResults(map, presets, testingSet = null) {
   }
 }
 
-async function testApiPreset(presetId, presetName) {
-  return apiManager.testApiPreset(presetId, presetName);
+async function testApiPreset(presetId, presetName, statusElement) {
+  return apiManager.testApiPreset(presetId, presetName, statusElement);
 }
 
 async function testAllApiPresets() {
@@ -292,3 +309,16 @@ async function testAllClaudePresets() {
 async function deleteClaudePreset(presetId, presetName) {
   return claudeManager.deleteClaudePreset(presetId, presetName);
 }
+
+async function testAuthPreset(presetId, presetName) {
+  return authManager.testAuthPreset(presetId, presetName);
+}
+
+async function refreshAuthPresetQuota(presetId, presetName, statusElement) {
+  return authManager.refreshAuthPresetQuota(presetId, presetName, statusElement);
+}
+
+async function deleteAuthPreset(presetId, presetName, statusElement) {
+  return authManager.deleteAuthPreset(presetId, presetName, statusElement);
+}
+

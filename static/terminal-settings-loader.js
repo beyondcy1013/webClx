@@ -8,13 +8,33 @@ async function loadTerminalSettings() {
     applyDocumentTitle();
     state.workspaceDir =
       typeof settings.workspace_dir === "string" ? settings.workspace_dir : "";
+    state.workspaceHistory = Array.isArray(settings.workspace_history)
+      ? settings.workspace_history
+        .map((item) => ({
+          path: String(item?.path || "").trim(),
+          last_opened_at: Number(item?.last_opened_at || 0),
+        }))
+        .filter((item) => item.path)
+      : [];
+    state.favoritePaths = Array.isArray(settings.favorite_paths)
+      ? settings.favorite_paths
+        .map((item) => ({
+          path: String(item?.path || "").trim(),
+          kind: String(item?.kind || "dir"),
+        }))
+        .filter((item) => item.path)
+      : [];
     state.showAllWorkspaceSessions = Boolean(settings.show_all_workspace_sessions);
+    state.terminalNewSessionBehavior = WebClxNewTerminal.normalizeBehavior(
+      settings.terminal_new_session_behavior,
+    );
     state.terminalWorkspaceIconPath = normalizeProjectIconPath(
       settings.terminal_workspace_icon_path,
       DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
     );
     sessionSelectEl?.workspaceIconSelectController?.sync();
     agentSessionSelectEl?.workspaceIconSelectController?.sync();
+    idleSessionSelectEl?.workspaceIconSelectController?.sync();
     const rawTerminalQuickCommands = Array.isArray(settings.terminal_quick_commands)
       ? settings.terminal_quick_commands
       : DEFAULT_TERMINAL_QUICK_COMMANDS;
@@ -29,6 +49,17 @@ async function loadTerminalSettings() {
         : DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
       state.terminalQuickCommands,
     );
+    state.terminalAgentCommands = normalizeTerminalAgentCommands(
+      Array.isArray(settings.terminal_agent_commands)
+        ? settings.terminal_agent_commands
+        : cloneDefaultTerminalAgentCommands(),
+      Array.isArray(settings.terminal_agent_commands)
+        ? null
+        : cloneDefaultTerminalAgentCommands(),
+    );
+    if (typeof terminalSpecifiedTaskSetAgentCommands === "function") {
+      terminalSpecifiedTaskSetAgentCommands(state.terminalAgentCommands);
+    }
     state.terminalActivityAgentDisplay = normalizeTerminalActivityAgentDisplay(
       settings.terminal_activity_agent_display,
     );

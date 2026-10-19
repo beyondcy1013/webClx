@@ -86,7 +86,7 @@ fn claude_settings_file_writer_preserves_claude_json_trust_state() {
             serde_json::to_vec_pretty(&json!({
                 "hasCompletedOnboarding": false,
                 "projects": {
-                    "/home/codes/webClx": {
+                    "/home/codes/tools/webClx": {
                         "trust_level": "trusted"
                     }
                 },
@@ -114,7 +114,7 @@ fn claude_settings_file_writer_preserves_claude_json_trust_state() {
         );
         assert_eq!(
             claude_json
-                .pointer("/projects/~1home~1codes~1webClx/trust_level")
+                .pointer("/projects/~1home~1codes~1tools~1webClx/trust_level")
                 .and_then(Value::as_str),
             Some("trusted")
         );

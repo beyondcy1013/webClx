@@ -21,11 +21,11 @@ const permanentSwitchSource = readFileSync(
 test("project commands separate permanent switching from temporary preset actions", () => {
   assert.match(
     terminalHtml,
-    /id="terminal-project-command-select"[\s\S]*?<option value="permanent_switch_preset">永久切换预设<\/option>/,
+    /id="terminal-project-command-select"[\s\S]*?<option value="permanent_switch_preset">永久<\/option>/,
   );
   assert.match(
     terminalHtml,
-    /id="terminal-project-command-select"[\s\S]*?<option value="switch_preset_in_terminal">原地切换预设\+恢复<\/option>[\s\S]*?<option value="switch_preset_in_terminal_new_session">原地切换预设新会话<\/option>/,
+    /id="terminal-project-command-select"[\s\S]*?<option value="switch_preset_in_terminal">临时\/原地\/resume<\/option>[\s\S]*?<option value="switch_preset_in_terminal_new_session">临时\/原地\/新对话<\/option>/,
   );
   assert.match(
     mobileKeysSource,
@@ -38,6 +38,11 @@ test("project commands separate permanent switching from temporary preset action
   assert.match(
     terminalHtml,
     /terminal-in-place-preset-switch\.js\?v=/,
+  );
+  assert.match(
+    terminalHtml,
+    /id="terminal-in-place-preset-ignore-exit-error"[^>]*hidden[^>]*>忽略错误继续<\/button>/,
+    "the in-place switch dialog should expose an explicit timeout bypass",
   );
 });
 
@@ -69,7 +74,7 @@ test("the permanent project command is the explicit shared apply path", async ()
     state: {
       activeSessionId: "terminal-source",
       currentPath: "/fallback",
-      sessions: [{ id: "terminal-source", path: "/home/codes/webClx" }],
+      sessions: [{ id: "terminal-source", path: "/home/codes/tools/webClx" }],
     },
     sessionPath: (session) => session.path,
     specifiedPresetAgent: (agent) => agent,
@@ -91,7 +96,7 @@ test("the permanent project command is the explicit shared apply path", async ()
       action: "apply",
       agent: "codex",
       presetId: "preset-permanent",
-      projectPath: "/home/codes/webClx",
+      projectPath: "/home/codes/tools/webClx",
     },
     { message: "已永久切换到 Permanent。", tone: "ok" },
   ]);
@@ -128,7 +133,7 @@ test("the permanent project command keeps deferred switches visible as pending",
     state: {
       activeSessionId: "terminal-source",
       currentPath: "/fallback",
-      sessions: [{ id: "terminal-source", path: "/home/codes/webClx" }],
+      sessions: [{ id: "terminal-source", path: "/home/codes/tools/webClx" }],
     },
     sessionPath: (session) => session.path,
     specifiedPresetAgent: (agent) => agent,
@@ -153,7 +158,7 @@ test("the permanent project command keeps deferred switches visible as pending",
       action: "apply",
       agent: "codex",
       presetId: "preset-pending",
-      projectPath: "/home/codes/webClx",
+      projectPath: "/home/codes/tools/webClx",
     },
   ]);
 });
@@ -203,8 +208,8 @@ test("in-terminal switching exits before resuming through webclx run in the same
       return `codex resume ${options.sessionId}`;
     },
     specifiedPresetRunCommand(agent, presetId, command) {
-      calls.push(["build-run", agent, presetId, command]);
-      return `webclx run api '${presetId}' -- ${command}`;
+      calls.push(["build-temporary", agent, presetId, command]);
+      return `webclx run api ${presetId} -- ${command}`;
     },
     async sendTerminalAutoTypedInput(command, options) {
       calls.push(["resume", command, options]);
@@ -227,7 +232,7 @@ test("in-terminal switching exits before resuming through webclx run in the same
 
   const target = {
     agent: "codex",
-    cwd: "/home/codes/webClx",
+    cwd: "/home/codes/tools/webClx",
     resumeId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
     sessionId: "terminal-source",
     sourceContext,
@@ -246,7 +251,7 @@ test("in-terminal switching exits before resuming through webclx run in the same
   const command = await switching;
   assert.equal(
     command,
-    "webclx run api 'preset-new' -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
+    "webclx run api preset-new -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
   );
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["exit", "/exit", { sessionId: "terminal-source" }],
@@ -260,14 +265,14 @@ test("in-terminal switching exits before resuming through webclx run in the same
       },
     ],
     [
-      "build-run",
+      "build-temporary",
       "codex",
       "preset-new",
       "codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
     ],
     [
       "resume",
-      "webclx run api 'preset-new' -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
+      "webclx run api preset-new -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
       { sessionId: "terminal-source", throwOnError: true },
     ],
   ]);
@@ -277,6 +282,7 @@ test("in-terminal new-session switching exits before launching without resume", 
   const calls = [];
   const target = {
     agent: "codex",
+    cwd: "webClx",
     sessionAction: "new",
     sessionId: "terminal-source",
     sourceContext: { term: {} },
@@ -284,13 +290,14 @@ test("in-terminal new-session switching exits before launching without resume", 
   };
   const sandbox = {
     document: { getElementById: () => null },
+    mobileKeySendQueue: Promise.resolve(),
     specifiedPresetLaunchCommand(options) {
       calls.push(["build-launch", options]);
       return "codex";
     },
     specifiedPresetRunCommand(agent, presetId, command) {
-      calls.push(["build-run", agent, presetId, command]);
-      return `webclx run api '${presetId}' -- ${command}`;
+      calls.push(["build-temporary", agent, presetId, command]);
+      return `webclx run api ${presetId} -- ${command}`;
     },
     async sendTerminalAutoTypedInput(command, options) {
       calls.push(["launch", command, options]);
@@ -302,24 +309,155 @@ test("in-terminal new-session switching exits before launching without resume", 
 
   const command = await sandbox.executeTerminalInPlacePresetSwitch(target, "preset-new");
 
-  assert.equal(command, "webclx run api 'preset-new' -- codex");
+  assert.equal(command, "webclx run api preset-new -- codex");
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["build-launch", { agent: "codex", sessionAction: "new", sessionId: "" }],
-    ["build-run", "codex", "preset-new", "codex"],
+    ["build-temporary", "codex", "preset-new", "codex"],
     [
       "launch",
-      "webclx run api 'preset-new' -- codex",
+      "webclx run api preset-new -- codex",
       { sessionId: "terminal-source", throwOnError: true },
     ],
   ]);
 });
 
+test("ignoring an exit timeout continues without sending exit again", async () => {
+  const calls = [];
+  const target = {
+    agent: "codex",
+    cwd: "/home/codes/tools/webClx",
+    resumeId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
+    sessionId: "terminal-source",
+    sourceContext: { term: {} },
+    exitWaitTimedOut: true,
+  };
+  const sandbox = {
+    document: { getElementById: () => null },
+    mobileKeySendQueue: Promise.resolve(),
+    sendSlashCommand() {
+      calls.push("unexpected-exit");
+      return true;
+    },
+    specifiedPresetLaunchCommand(options) {
+      calls.push(["build-resume", options]);
+      return `codex resume ${options.sessionId}`;
+    },
+    specifiedPresetRunCommand(agent, presetId, command) {
+      calls.push(["build-temporary", agent, presetId, command]);
+      return `webclx run api ${presetId} -- ${command}`;
+    },
+    async sendTerminalAutoTypedInput(command, options) {
+      calls.push(["resume", command, options]);
+      return true;
+    },
+    window: { setTimeout },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(switchSource, sandbox);
+
+  const command = await sandbox.executeTerminalInPlacePresetSwitch(
+    target,
+    "preset-new",
+    { ignoreExitError: true },
+  );
+
+  assert.equal(
+    command,
+    "webclx run api preset-new -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
+  );
+  assert.equal(target.agentExited, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    [
+      "build-resume",
+      {
+        agent: "codex",
+        sessionAction: "resume",
+        sessionId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
+      },
+    ],
+    [
+      "build-temporary",
+      "codex",
+      "preset-new",
+      "codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
+    ],
+    [
+      "resume",
+      "webclx run api preset-new -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d",
+      { sessionId: "terminal-source", throwOnError: true },
+    ],
+  ]);
+});
+
+test("an unpersisted Codex banner session falls back to a new session", async () => {
+  const calls = [];
+  const sandbox = {
+    document: { getElementById: () => null },
+    specifiedPresetAgent: (agent) => agent,
+    async requestJson(endpoint) {
+      calls.push(endpoint);
+      return {
+        conversations: [
+          { session_id: "019f2350-db5f-7cf0-b476-1cf14855b05e" },
+        ],
+      };
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(switchSource, sandbox);
+
+  const action = await sandbox.resolveTerminalInPlacePresetSessionAction({
+    agent: "codex",
+    requestedAction: "resume",
+    resumeId: "019f2350-db5f-7cf0-b476-1cf14855b05d",
+  });
+
+  assert.equal(action, "new");
+  assert.deepEqual(calls, ["/api/terminal/codex-conversations"]);
+});
+
+test("a persisted Codex session and Claude sessions keep resume behavior", async () => {
+  const persistedId = "019f2350-db5f-7cf0-b476-1cf14855b05d";
+  let requestCount = 0;
+  const sandbox = {
+    document: { getElementById: () => null },
+    specifiedPresetAgent: (agent) => agent,
+    async requestJson() {
+      requestCount += 1;
+      return { conversations: [{ session_id: persistedId }] };
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(switchSource, sandbox);
+
+  assert.equal(
+    await sandbox.resolveTerminalInPlacePresetSessionAction({
+      agent: "codex",
+      requestedAction: "resume",
+      resumeId: persistedId,
+    }),
+    "resume",
+  );
+  assert.equal(
+    await sandbox.resolveTerminalInPlacePresetSessionAction({
+      agent: "claude",
+      requestedAction: "resume",
+      resumeId: "claude-session",
+    }),
+    "resume",
+  );
+  assert.equal(requestCount, 1);
+});
+
 test("in-terminal switching keeps retry state after the agent has exited", async () => {
   assert.match(
     switchSource,
-    /if \(!target\.agentExited\)[\s\S]*?target\.agentExited = true;[\s\S]*?specifiedPresetRunCommand/,
+    /if \(!target\.agentExited && !\(target\.exitWaitTimedOut && options\.ignoreExitError === true\)\)[\s\S]*?target\.agentExited = true;[\s\S]*?specifiedPresetRunCommand/,
   );
-  assert.doesNotMatch(switchSource, /preparedPresetId|runtimeRunner|runtimeId/);
+  assert.doesNotMatch(
+    switchSource,
+    /acquireSpecifiedPresetLease|releaseSpecifiedPresetLease|preparedPresetId|runtimeRunner|runtimeId/,
+  );
 });
 
 test("Session detection failure never exits the current agent", async () => {

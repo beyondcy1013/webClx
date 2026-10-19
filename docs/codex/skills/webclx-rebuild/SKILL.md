@@ -15,7 +15,7 @@ When Codex needs to deploy this project during a webClx terminal conversation, p
 bash /home/root/.codex/skills/webclx-compile-api/scripts/request-webclx-deploy-api.sh \
   --source-terminal-name "<current webClx terminal name>" \
   --project webClx \
-  --project-dir /home/codes/webClx \
+  --project-dir /home/codes/tools/webClx \
   --command 'cargo build --release' \
   --install-command 'bash scripts/rebuild-and-deploy.sh --skip-build' \
   --audit-path /home/bin/webclx/webClx \
@@ -28,7 +28,7 @@ If the terminal environment has `WEBCLX_TERMINAL_NAME`, the source terminal name
 ```bash
 bash /home/root/.codex/skills/webclx-compile-api/scripts/request-webclx-deploy-api.sh \
   --project webClx \
-  --project-dir /home/codes/webClx \
+  --project-dir /home/codes/tools/webClx \
   --command 'cargo build --release' \
   --install-command 'bash scripts/rebuild-and-deploy.sh --skip-build' \
   --audit-path /home/bin/webclx/webClx \
@@ -49,6 +49,16 @@ Status:
 ```bash
 curl -fsS http://127.0.0.1:PORT/api/build/compile/status | jq .
 ```
+
+### 单请求结果查询（无回调智能体）
+
+不支持源终端回调的第三方智能体（在 webClx 终端体系之外提交请求）不能依赖回调消息。提交响应因此始终包含 `callback_supported`（仅当来源终端可解析时为 true）与 `query` 对象（`url` / `suggested_poll_seconds` / `note`）；当 `callback_supported=false` 时，调用方必须轮询 `query.url` 获取结果：
+
+```bash
+curl -fsS http://127.0.0.1:11111/api/build/compile/requests/<request_id> | jq .
+```
+
+响应字段：`state`（`queued|running|stalled|unknown|succeeded|failed|timed_out|not_found`）、`done`（true 后不再变化，可停止轮询）、`exit_codes`（run 内各 spec 的命令退出码）、`progress`（progress.json 最后上报的进度：阶段、命令、包计数，结束后保留最后已知值）、`log_tail`（最新集中日志的末尾行，默认 50，可用 `?tail_lines=N` 调节至 400，失败时通常直接包含报错内容）、`log_path`（日志来源绝对路径）、`request`（原始请求摘要）、`run`（含 `run_id`、目录 `dir_path`）。`not_found` 表示请求不存在或已超出保留期被清理。合并运行（见下）中每个原始 `request_id` 仍通过自己的请求文件解析到吸收它的 run，各自拿到独立结论。服务端对应的实现见 `src/compile_service.rs` 的 `compile_request_query` / `find_compile_request_in_queue` / `read_log_tail`。
 
 Requests with the same complete build specification are continuously coalesced
 while waiting for a shared Cargo target or other build resource. One waiting
@@ -77,7 +87,7 @@ If not using the script, follow these steps in order:
 
 1. Determine Cargo target directory:
    ```bash
-   cd /home/codes/webClx
+   cd /home/codes/tools/webClx
    TARGET_DIR=$(cargo metadata --no-deps --format-version 1 | jq -r '.target_directory')
    ```
 
@@ -93,7 +103,7 @@ If not using the script, follow these steps in order:
 
 4. Sync static files (frontend changes will not take effect without this):
    ```bash
-   cp -a /home/codes/webClx/static/ /home/bin/webclx/static/
+   cp -a /home/codes/tools/webClx/static/ /home/bin/webclx/static/
    ```
 
 5. Restart service and verify:
@@ -106,8 +116,8 @@ If not using the script, follow these steps in order:
 
 | Item | Path |
 |------|------|
-| Source repo | `/home/codes/webClx` |
-| Cargo target | Determined dynamically via `cargo metadata` (currently `/home/codes/webClx/target`) |
+| Source repo | `/home/codes/tools/webClx` |
+| Cargo target | Determined dynamically via `cargo metadata` (currently `/home/codes/tools/webClx/target`) |
 | Deploy binary | `/home/bin/webclx/webClx` |
 | Deploy static | `/home/bin/webclx/static/` |
 | Service | `webclx.service` |

@@ -408,7 +408,7 @@ fn converts_chat_request_to_anthropic_messages_with_tool_calls() {
     let payload = chat_request_to_anthropic_messages(&chat).expect("chat should convert");
     assert_eq!(payload["tools"][0]["name"], "exec_command");
     assert_eq!(payload["tools"][0]["input_schema"]["type"], "object");
-    assert_eq!(payload["tool_choice"], "auto");
+    assert_eq!(payload["tool_choice"], json!({"type": "auto"}));
 
     let messages = payload["messages"].as_array().expect("messages is array");
     // system is hoisted, so the remaining messages are: user, assistant, user(tool_result)

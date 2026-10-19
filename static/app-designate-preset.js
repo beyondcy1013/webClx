@@ -63,7 +63,9 @@ function renderWorkspaceDesignatePresetOptions({ loading = false, error = "" } =
 
   const agent = workspaceDesignatePresetSelectedAgent();
   const presets = workspaceDesignatePresetOptions(agent);
-  const availablePresets = Array.isArray(presets) ? presets.filter((preset) => preset?.id) : [];
+  const availablePresets = (Array.isArray(presets) ? presets.filter((preset) => preset?.id) : [])
+    .slice()
+    .sort((left, right) => Number(right.favorite === true) - Number(left.favorite === true));
   const selectedPresetId =
     list.querySelector('input[name="workspace-designate-preset"]:checked')?.value || "";
 
@@ -110,6 +112,13 @@ function renderWorkspaceDesignatePresetOptions({ loading = false, error = "" } =
     const name = document.createElement("strong");
     name.textContent = preset.name || preset.id;
     title.appendChild(name);
+    if (preset.favorite) {
+      const favorite = document.createElement("span");
+      favorite.className = "workspace-history-preset-favorite";
+      favorite.textContent = "★";
+      favorite.title = "已收藏";
+      title.appendChild(favorite);
+    }
     if (preset.active) {
       const current = document.createElement("span");
       current.className = "workspace-history-preset-current";
@@ -131,8 +140,8 @@ function renderWorkspaceDesignatePresetOptions({ loading = false, error = "" } =
   );
 }
 
-async function openWorkspaceDesignatePresetDialog(path, trigger = null) {
-  const { dialog } = workspaceDesignatePresetDialogElements();
+async function openWorkspaceDesignatePresetDialog(path, trigger = null, options = {}) {
+  const { dialog, list } = workspaceDesignatePresetDialogElements();
   if (!dialog) {
     return;
   }
@@ -142,6 +151,9 @@ async function openWorkspaceDesignatePresetDialog(path, trigger = null) {
   workspaceDesignatePresetTargetName = "";
   workspaceDesignatePresetTrigger = trigger;
   workspaceDesignatePresetRequestToken += 1;
+  if (options.resetPreset === true) {
+    list?.replaceChildren();
+  }
 
   renderWorkspaceDesignatePresetOptions({
     loading: !workspaceDesignatePresetLoaded(workspaceDesignatePresetSelectedAgent()),
@@ -238,11 +250,6 @@ function bindWorkspaceDesignatePresetDialog() {
   dialog.addEventListener("cancel", (event) => {
     event.preventDefault();
     closeWorkspaceDesignatePresetDialog();
-  });
-  dialog.addEventListener("click", (event) => {
-    if (event.target === dialog) {
-      closeWorkspaceDesignatePresetDialog();
-    }
   });
   cancel.addEventListener("click", () => closeWorkspaceDesignatePresetDialog());
   mode?.addEventListener("change", () => {

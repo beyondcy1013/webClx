@@ -17,7 +17,7 @@ pub fn root_dir(app_dir: &Path) -> PathBuf {
 
 pub fn install_for_user(app_dir: &Path, user: &UserProfile) -> io::Result<()> {
     let root = root_dir(app_dir);
-    replace_managed_tree(&root, &BUILTIN_SKILLS)?;
+    replace_managed_tree(&root, &BUILTIN_SKILLS, true)?;
     for relative in USER_SKILL_ROOTS {
         let parent = user.home.join(relative);
         fs::create_dir_all(&parent)?;
@@ -30,7 +30,7 @@ pub fn install_for_user(app_dir: &Path, user: &UserProfile) -> io::Result<()> {
                 tracing::info!(path = %target.display(), "preserving user-managed Skill");
                 continue;
             }
-            replace_managed_tree(&target, skill)?;
+            replace_managed_tree(&target, skill, false)?;
         }
     }
     set_user_ownership(&root, user)?;
@@ -47,8 +47,8 @@ pub fn install_for_user(app_dir: &Path, user: &UserProfile) -> io::Result<()> {
     Ok(())
 }
 
-fn replace_managed_tree(target: &Path, source: &Dir<'_>) -> io::Result<()> {
-    if target.exists() && !target.join(MANAGED_MARKER).is_file() && target.file_name().is_some() {
+fn replace_managed_tree(target: &Path, source: &Dir<'_>, app_owned: bool) -> io::Result<()> {
+    if !app_owned && target.exists() && !target.join(MANAGED_MARKER).is_file() {
         return Ok(());
     }
     let parent = target
@@ -153,4 +153,45 @@ fn visit_tree(root: &Path, visit: &mut impl FnMut(&Path) -> io::Result<()>) -> i
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_owned_skills_refresh_but_unmarked_user_skills_survive() {
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("webclx-skills-{}-{unique}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let temp = Cleanup(root);
+        let app = temp.0.join("app-skills");
+        fs::create_dir(&app).unwrap();
+        fs::write(app.join("old"), "stale").unwrap();
+        replace_managed_tree(&app, &BUILTIN_SKILLS, true).unwrap();
+        assert!(!app.join("old").exists());
+        for skill in BUILTIN_SKILLS.dirs() {
+            let name = skill.path().file_name().unwrap();
+            assert!(app.join(name).is_dir());
+        }
+        let user = temp.0.join("user-skills");
+        fs::create_dir(&user).unwrap();
+        fs::write(user.join("custom"), "preserve").unwrap();
+        replace_managed_tree(&user, &BUILTIN_SKILLS, false).unwrap();
+        assert_eq!(fs::read_to_string(user.join("custom")).unwrap(), "preserve");
+        for skill in BUILTIN_SKILLS.dirs() {
+            let name = skill.path().file_name().unwrap();
+            assert!(!user.join(name).exists());
+        }
+    }
 }

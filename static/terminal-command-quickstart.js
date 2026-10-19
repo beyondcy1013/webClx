@@ -52,6 +52,8 @@ async function sendTerminalQuickCommand(command) {
   if (!input) {
     return false;
   }
+  if (typeof terminalCompactCommandAllowed === "function"
+    && !terminalCompactCommandAllowed(input, state.activeSessionId)) return false;
   sendTerminalInput(input, { flush: true });
   return true;
 }
@@ -77,6 +79,8 @@ async function sendTerminalAutoTypedInput(command, options = {}) {
     Math.max(0, Number(options?.submitEnters) || 0),
   );
   const targetSessionId = options?.sessionId || state.activeSessionId || "";
+  if (typeof terminalCompactCommandAllowed === "function"
+    && !terminalCompactCommandAllowed(commandLine, targetSessionId)) return false;
   try {
     const response = await requestJson("/api/terminal/auto-typed-input", {
       method: "POST",
@@ -132,6 +136,10 @@ function renderTerminalQuickCommandButtons() {
   });
 }
 
+function terminalCommandMenuLabel(command) {
+  return command.shortcut ? `${command.label}（${compactTerminalShortcut(command.shortcut)}）` : command.label;
+}
+
 function renderTerminalFunctionCommandOptions() {
   if (!terminalFunctionCommandButtonsEl) {
     return;
@@ -152,7 +160,7 @@ function renderTerminalFunctionCommandOptions() {
     button.dataset.key = command.key;
     button.dataset.action = command.action || "";
     button.dataset.command = command.command || "";
-    button.textContent = command.label;
+    button.textContent = terminalCommandMenuLabel(command);
     button.title = command.shortcut ? `${command.label} (${command.shortcut})` : command.label;
     prepareMobileKeyControl(button);
     const enterDelayMs = terminalCommandEnterDelayMs(command);
@@ -179,7 +187,7 @@ function renderTerminalSlashCommandMenu() {
     button.dataset.key = command.key;
     button.dataset.action = command.action || "";
     button.dataset.command = command.command || "";
-    button.textContent = command.label;
+    button.textContent = terminalCommandMenuLabel(command);
     button.title = command.shortcut ? `${command.label} (${command.shortcut})` : command.label;
     button.setAttribute("role", "menuitem");
     const enterDelayMs = terminalCommandEnterDelayMs(command);

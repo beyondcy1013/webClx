@@ -6,7 +6,6 @@ const indexHtml = readFileSync(new URL("../static/index.html", import.meta.url),
 const appJs = readEntryScriptBundle("index.html");
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
 const terminalJs = readEntryScriptBundle("terminal.html");
-
 assert.match(
   appJs,
   /DEFAULT_TERMINAL_RENAME_PRESETS[\s\S]*"完结"[\s\S]*"复用对话"/,
@@ -63,6 +62,42 @@ assert.match(
 
 assert.match(
   terminalJs,
+  /function createSessionRenameHistoryButton\(label, value, title\)[\s\S]*button\.dataset\.preset = value/,
+  "rename dialog should build a button from the first conversation history entry",
+);
+
+assert.match(
+  terminalJs,
+  /async function loadSessionRenameFirstConversation\(\)[\s\S]*terminalInputHistoryNameFromEntry\(entries\[0\]\)/,
+  "rename dialog should asynchronously resolve the first conversation entry",
+);
+
+assert.match(
+  terminalJs,
+  /renderSessionRenamePresets\(\);[\s\S]*loadSessionRenameFirstConversation\(\);/,
+  "rename dialog should open immediately while conversation history loads in the background",
+);
+
+assert.match(
+  terminalJs,
+  /requestId !== terminalRenameHistoryRequestId \|\| state\.renamingSessionId !== sessionId/,
+  "stale conversation-history responses must not replace the active rename dialog",
+);
+
+assert.match(
+  terminalJs,
+  /function renderSessionRenamePresets\(\)[\s\S]*if \(state\.renamingSessionId\) \{[\s\S]*terminalRenameHistoryPresetLoading[\s\S]*terminalRenameHistoryPresetValue[\s\S]*state\.terminalRenamePresets\.forEach/,
+  "session refreshes must re-render the conversation-history quick button while the rename dialog stays open",
+);
+
+assert.match(
+  terminalJs,
+  /function conversationNameFromHistoryEntry\(entry\)[\s\S]*replace\(\/\\s\+\/g, "_"\)[\s\S]*slice\(0, 120\)/,
+  "conversation history naming should remain shared by the history panel and rename dialog",
+);
+
+assert.match(
+  terminalJs,
   /function sessionRenameSavedName\(sessionName\)[\s\S]*replace\(\/_\+\$\/, ""\)/,
   "terminal page should remove trailing underscores when saving a rename",
 );
@@ -81,7 +116,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function openTerminalRenameDialog\(name, trigger\)[\s\S]*terminalRenameTriggerEl = trigger[\s\S]*sessionRenameDialogEl\.showModal\(\)[\s\S]*focusTextInputToEnd\(sessionRenameInputEl\)[\s\S]*function closeSessionRenameEditor\(\)[\s\S]*sessionRenameDialogEl\.close\(\)[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*trigger\?\.focus\(\)[\s\S]*\}, 0\)/,
+  /function openTerminalRenameDialog\(name, trigger\)[\s\S]*terminalPageRenameTriggerEl = trigger[\s\S]*sessionRenameDialogEl\.showModal\(\)[\s\S]*focusTextInputToEnd\(sessionRenameInputEl\)[\s\S]*function closeSessionRenameEditor\(\)[\s\S]*sessionRenameDialogEl\.close\(\)[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*trigger\?\.focus\(\)[\s\S]*\}, 0\)/,
   "terminal management dialog should focus its input and restore focus on close",
 );
 
@@ -93,8 +128,32 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /sessionRenameDialogEl\.addEventListener\("cancel"[\s\S]*event\.preventDefault\(\)[\s\S]*closeSessionRenameEditor\(\)[\s\S]*sessionRenameDialogEl\.addEventListener\("click"[\s\S]*event\.target === sessionRenameDialogEl[\s\S]*closeSessionRenameEditor\(\)[\s\S]*sessionRenameCancelButton\.addEventListener\("click"[\s\S]*closeSessionRenameEditor\(\)/,
-  "terminal management dialog should close through Escape, backdrop, or cancel",
+  /sessionRenameDialogEl\.addEventListener\("cancel"[\s\S]*event\.preventDefault\(\)[\s\S]*closeSessionRenameEditor\(\)[\s\S]*sessionRenameCancelButton\.addEventListener\("click"[\s\S]*closeSessionRenameEditor\(\)/,
+  "terminal management dialog should close through Escape or Cancel",
+);
+
+assert.doesNotMatch(
+  terminalHtml,
+  /<form id="session-rename-form"[^>]*method="dialog"/,
+  "drag selection ending outside must not implicitly submit and close the rename dialog",
+);
+
+assert.doesNotMatch(
+  indexHtml,
+  /<form id="session-rename-form"[^>]*method="dialog"/,
+  "workspace rename drag selection must not implicitly submit and close the dialog",
+);
+
+assert.match(
+  terminalHtml,
+  /dialog-backdrop-guard\.js\?v=20260916c/,
+  "all native dialogs should absorb backdrop clicks instead of dismissing",
+);
+
+assert.match(
+  indexHtml,
+  /dialog-backdrop-guard\.js\?v=20260916c/,
+  "all native dialogs should absorb backdrop clicks instead of dismissing",
 );
 
 assert.match(

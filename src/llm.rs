@@ -6,13 +6,30 @@ use std::time::Instant;
 use auth_core::{
     ApiResponsesProxyMode, StoredApiPreset, api_preset_enables_local_upstream_proxy_on_apply,
     api_provider_base_url, api_provider_base_url_for_mode, effective_api_responses_proxy,
-    local_proxy_api_key_for_preset_id,
+    is_local_webclx_api_url, local_proxy_api_key_for_preset_id,
 };
 use reqwest::header;
 use serde_json::{Value, json};
 
 const UPSTREAM_PRESET_ID_HEADER: &str = "x-webclx-upstream-preset-id";
 const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u64 = 128;
+
+/// 目标是 webClx 本地中继 URL 时附加服务端本地令牌。登录加固后
+/// `/api/upstream/*` 等代理路由同样要求会话或本地令牌；服务端自发的
+/// 中继请求（预设测试、Agent 调用）只能靠该令牌通过 `require_auth`。
+/// 令牌仅发往本机中继，不会出现在直连上游的请求里。
+pub(crate) fn apply_local_relay_auth_headers(
+    request: reqwest::RequestBuilder,
+    target_url: &str,
+) -> reqwest::RequestBuilder {
+    if !is_local_webclx_api_url(target_url) {
+        return request;
+    }
+    match crate::auth_guard::server_local_api_token() {
+        Some(token) => request.header(auth_core::WEBCLX_LOCAL_API_TOKEN_HEADER, token),
+        None => request,
+    }
+}
 
 #[derive(Debug)]
 pub struct LlmCallError {
@@ -263,6 +280,7 @@ async fn call_chat_completions(
     if let Some(preset_id) = upstream_preset_id {
         request = request.header(UPSTREAM_PRESET_ID_HEADER, preset_id);
     }
+    let request = apply_local_relay_auth_headers(request, base_url);
     let response = request.send().await.map_err(|error| LlmCallError {
         endpoint: endpoint.clone(),
         status: None,
@@ -356,6 +374,7 @@ async fn call_responses_conversation(
     if let Some(preset_id) = target.upstream_preset_id.as_deref() {
         request = request.header(UPSTREAM_PRESET_ID_HEADER, preset_id);
     }
+    let request = apply_local_relay_auth_headers(request, &target.base_url);
     let response = request.send().await.map_err(|error| LlmCallError {
         endpoint: endpoint.clone(),
         status: None,
@@ -417,23 +436,24 @@ async fn call_anthropic_conversation(
     let endpoint = anthropic_messages_url(&target.base_url);
     let body = anthropic_conversation_request_body(model, &messages, &tools, options);
     let started = Instant::now();
-    let response = client
-        .post(&endpoint)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "application/json")
-        .header("anthropic-version", "2023-06-01")
-        .header("x-api-key", &target.api_key)
-        .header(header::AUTHORIZATION, format!("Bearer {}", target.api_key))
-        .json(&body)
-        .send()
-        .await
-        .map_err(|error| LlmCallError {
-            endpoint: endpoint.clone(),
-            status: None,
-            latency_ms: started.elapsed().as_millis(),
-            message: format!("LLM 请求失败: {error}"),
-            response_body: String::new(),
-        })?;
+    let request = apply_local_relay_auth_headers(
+        client
+            .post(&endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "application/json")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", &target.api_key)
+            .header(header::AUTHORIZATION, format!("Bearer {}", target.api_key))
+            .json(&body),
+        &target.base_url,
+    );
+    let response = request.send().await.map_err(|error| LlmCallError {
+        endpoint: endpoint.clone(),
+        status: None,
+        latency_ms: started.elapsed().as_millis(),
+        message: format!("LLM 请求失败: {error}"),
+        response_body: String::new(),
+    })?;
     let status = response.status();
     let response_text = response.text().await.map_err(|error| LlmCallError {
         endpoint: endpoint.clone(),
@@ -917,6 +937,7 @@ async fn call_responses(
     if let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) {
         request = request.header("ChatGPT-Account-Id", account_id);
     }
+    let request = apply_local_relay_auth_headers(request, endpoint);
     let response = request.send().await.map_err(|error| LlmCallError {
         endpoint: endpoint.to_string(),
         status: None,
@@ -1101,6 +1122,7 @@ mod tests {
         use_local_proxy: bool,
     ) -> StoredApiPreset {
         StoredApiPreset {
+            interchange_source: None,
             id: "api-test".to_string(),
             name: "API Test".to_string(),
             saved_at: 0,
@@ -1121,8 +1143,42 @@ mod tests {
             access_token: String::new(),
             account_id: String::new(),
             access_mode: None,
+            favorite: false,
             switch_count: 0,
         }
+    }
+
+    #[test]
+    fn local_relay_auth_headers_target_only_webclx_loopback_urls() {
+        crate::auth_guard::set_server_local_api_token(Arc::from("unit-test-local-token"));
+
+        let client = reqwest::Client::new();
+        let relay_request = apply_local_relay_auth_headers(
+            client.get("http://127.0.0.1:11111/api/upstream/openai/v1/models"),
+            "http://127.0.0.1:11111/api/upstream/openai/v1/models",
+        )
+        .build()
+        .expect("relay request builds");
+        assert_eq!(
+            relay_request
+                .headers()
+                .get(auth_core::WEBCLX_LOCAL_API_TOKEN_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(crate::auth_guard::server_local_api_token().unwrap_or(""))
+        );
+
+        let upstream_request = apply_local_relay_auth_headers(
+            client.get("https://open.bigmodel.cn/api/coding/paas/v4/models"),
+            "https://open.bigmodel.cn/api/coding/paas/v4",
+        )
+        .build()
+        .expect("upstream request builds");
+        assert!(
+            upstream_request
+                .headers()
+                .get(auth_core::WEBCLX_LOCAL_API_TOKEN_HEADER)
+                .is_none()
+        );
     }
 
     #[test]

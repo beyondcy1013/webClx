@@ -149,6 +149,27 @@ assert.match(
   "terminal touch selection should suppress browser-native text selection so only the xterm handles appear",
 );
 
+const selectionCopyStart = terminalFocusSelectionJs.indexOf("function syncTerminalSelectionCopyButton()");
+const selectionCopyEnd = terminalFocusSelectionJs.indexOf("\nfunction syncTerminalSelectionControls()", selectionCopyStart);
+assert.ok(selectionCopyStart >= 0 && selectionCopyEnd > selectionCopyStart);
+const selectionCopySource = terminalFocusSelectionJs.slice(selectionCopyStart, selectionCopyEnd);
+assert.match(
+  selectionCopySource,
+  /currentTerminalSelectionPosition\(\)[\s\S]*selectionBottom[\s\S]*terminalSelectionCopyButton\.style\.left[\s\S]*terminalSelectionCopyButton\.style\.top/,
+  "selection copy should be positioned from the selected range near its lower edge",
+);
+assert.match(
+  selectionCopySource,
+  /const belowTop = selectionBottom \+ gap;[\s\S]*belowTop <= maxTop[\s\S]*lowerSelectionTop - buttonHeight - gap/,
+  "selection copy should fall back above the selection when there is no room below",
+);
+
+assert.match(
+  terminalStyles,
+  /\.terminal-selection-copy \{[\s\S]*position: absolute;[\s\S]*top: 8px;[\s\S]*left: 8px;[\s\S]*bottom: auto;/,
+  "selection copy should use dynamic top/left coordinates instead of a fixed bottom offset",
+);
+
 assert.match(
   terminalJs,
   /document\.addEventListener\("selectstart", preventNativeTerminalTouchSelection, \{ capture: true \}\);/,
@@ -171,6 +192,18 @@ assert.match(
   terminalFocusSelectionJs,
   /function handleTerminalTouchScrollMove\(event\) \{[\s\S]*terminalTouchScrollStep\([\s\S]*term\.scrollLines\(step\.lines\);[\s\S]*clearTerminalTouchSelectionCandidate\(touch\.identifier\);[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);/,
   "terminal touch scrolling should accumulate pixels, scroll through xterm, and cancel long press",
+);
+
+assert.match(
+  terminalFocusSelectionJs,
+  /function terminalCanScrollTouchPixels\(deltaPixels\) \{[\s\S]*?return deltaPixels < 0[\s\S]*?Number\(buffer\.viewportY\) > 0[\s\S]*?Number\(buffer\.viewportY\) < Number\(buffer\.baseY\);[\s\S]*?\}/,
+  "touch scroll eligibility should use the real pixel gesture before rounding, so one-pixel jitter cannot end the gesture",
+);
+
+assert.match(
+  terminalFocusSelectionJs,
+  /if \(!terminalCanScrollTouchPixels\(deltaPixels\)\) \{/,
+  "touchmove must keep preventing native scrolling while the buffer still has scrollable pixels",
 );
 
 assert.match(

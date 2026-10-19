@@ -11,6 +11,10 @@ const authStyles = readFileSync(
   new URL("../static/styles-auth.css", import.meta.url),
   "utf8",
 );
+const presetBindingSource = readFileSync(
+  new URL("../static/app-preset-form-event-bindings.js", import.meta.url),
+  "utf8",
+);
 
 const context = {
   TextDecoder,
@@ -199,3 +203,13 @@ assert.match(
   /\.auth-actions\s*>\s*\.button\s*\{[^}]*flex:\s*0\s+0\s+auto;/,
   "Codex_OAuth action buttons should not collapse into narrow multi-line controls on mobile",
 );
+
+assert.match(indexHtml, /id="auth-oauth-browser-start"[^>]*>浏览器登录</);
+assert.match(indexHtml, /id="auth-oauth-callback"/);
+assert.match(indexHtml, /id="auth-oauth-exchange"[^>]*>兑换并回填 token</);
+assert.match(authManagerSource, /\/api\/auth\/oauth\/codex\/browser\/start/);
+assert.match(authManagerSource, /\/api\/auth\/oauth\/codex\/browser\/exchange/);
+assert.match(authManagerSource, /session\?\.flow === "browser"/);
+assert.match(authManagerSource, /populateAuthFormFromRawText\(rawAuthText/);
+assert.match(presetBindingSource, /startAuthBrowserOauthSession/);
+assert.match(presetBindingSource, /exchangeAuthBrowserOauthSession/);

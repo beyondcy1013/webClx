@@ -71,7 +71,7 @@ async def run_workflow(page, expect_creation):
         """
         () => !terminalToolExecutionRunning
           && document.querySelector('#terminal-tool-menu-status')
-            ?.textContent.includes('\u6267\u884c\u5b8c\u6210')
+            ?.textContent.includes('工作环境已打开')
         """,
         timeout=30_000,
     )

@@ -77,19 +77,35 @@ async def main():
         options = await page.locator(
             "#terminal-project-command-select option"
         ).all_text_contents()
-        assert "指定预设+fork（持久切换）" in options
-        assert "指定预设+resume（持久切换）" in options
-        assert "指定预设终端" in options
+        assert "临时 / 新终端 / fork" in options
+        assert "临时 / 新终端 / resume" in options
+        assert "临时 / 新终端 / 新对话" in options
 
         source_terminal_name = await page.evaluate(
             "() => state.sessions.find((session) => session.id === state.activeSessionId)?.name || ''"
         )
-        await page.select_option(
-            "#terminal-project-command-select", "designate_preset_terminal"
+        await page.click("#terminal-project-command-button")
+        await page.click(
+            "#terminal-project-command-menu "
+            "button[data-project-action='designate_preset_terminal']"
         )
         await page.wait_for_selector("#terminal-specified-task-dialog[open]")
         await page.wait_for_function(
             "() => Boolean(document.querySelector('#terminal-specified-task-preset').value)"
+        )
+        preset_pointerdown_allowed = await page.locator(
+            "#terminal-specified-task-preset"
+        ).evaluate(
+            """select => select.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true,
+                cancelable: true,
+                pointerType: 'mouse',
+                button: 0,
+            }))"""
+        )
+        assert preset_pointerdown_allowed, (
+            "the terminal focus guard must not cancel the preset select's native "
+            "mouse interaction"
         )
         results["terminal"] = {
             "session": await page.locator(
@@ -115,7 +131,7 @@ async def main():
         assert results["terminal"]["terminalName"] == source_terminal_name
         source_terminal_base = name_without_auto_indices(source_terminal_name)
         assert results["terminal"]["finalTerminalName"] == f"{source_terminal_base}_new"
-        assert results["terminal"]["title"] == "指定预设终端"
+        assert results["terminal"]["title"] == "指定预设临时终端"
         assert results["terminal"]["sessionVisible"]
         assert results["terminal"]["geometry"]["inViewport"]
         assert not results["terminal"]["geometry"]["pageOverflow"]
@@ -126,26 +142,16 @@ async def main():
                 const originalOpenTerminalSpecifiedTaskDialog =
                     openTerminalSpecifiedTaskDialog;
                 const sourceSessionId = state.activeSessionId;
-                const renderListeners = new Set();
                 const sourceContext = {{
                     sessionId: sourceSessionId,
-                    term: {{
-                        text: 'terminal buffer before /fork',
-                        onRender(callback) {{
-                            renderListeners.add(callback);
-                            window.__designateForkWaitAttached = true;
-                            return {{ dispose: () => renderListeners.delete(callback) }};
-                        }},
-                    }},
+                    term: {{}},
                 }};
                 window.__designateForkOriginals = {{
                     ensureTerminalSessionCache,
                     terminalContextSocketOpen,
                     terminalInitialReplaySettled,
-                    readTerminalBufferTailTextFrom,
                     openTerminalSpecifiedTaskDialog,
                 }};
-                window.__designateForkReadLimits = [];
                 openTerminalSpecifiedTaskDialog = async (trigger, options = {{}}) => {{
                     window.__designateForkDialogOptions = {{ ...options }};
                     return originalOpenTerminalSpecifiedTaskDialog(trigger, options);
@@ -155,60 +161,29 @@ async def main():
                 }});
                 terminalContextSocketOpen = (context) => context === sourceContext;
                 terminalInitialReplaySettled = (context) => context === sourceContext;
-                readTerminalBufferTailTextFrom = (terminal, maxLines = 240) => {{
-                    window.__designateForkReadLimits.push(maxLines);
-                    return String(terminal?.text || '')
-                        .split('\\n')
-                        .slice(-maxLines)
-                        .join('\\n');
-                }};
                 detectAgentResumeIdComplete = async () => ({{
                     resumeId: '{ORIGINAL_SESSION_ID}',
                     command: 'codex resume {ORIGINAL_SESSION_ID}',
                     program: 'codex',
                 }});
                 runTerminalSlashCommandByKey = async (key, options) => {{
-                    const accepted = key === 'fork' && options.sessionId === sourceSessionId;
-                    window.__designateForkRenderPending = true;
-                    return accepted;
-                }};
-                window.__resolveDesignateForkRender = () => {{
-                    sourceContext.term.text = [
-                        'Token usage: total=298,446 input=269,724 output=28,722',
-                        'To continue this session, run codex resume {ORIGINAL_SESSION_ID}',
-                        'MCP client for `openchatcut` failed to start',
-                        'handshaking with MCP server failed',
-                        'Send message error Transport',
-                        'HTTP request failed',
-                        'error sending request for url',
-                        'when send initialize request',
-                        'MCP startup incomplete (failed: openchatcut)',
-                        '',
-                        'Improve documentation in @filename',
-                    ].join('\\n');
-                    for (const listener of renderListeners) {{
-                        listener({{ start: 0, end: 10 }});
-                    }}
+                    window.__designateForkUnexpectedShortcut = [key, options];
+                    return false;
                 }};
                 window.__restoreDesignateForkFakes = () => {{
                     const originals = window.__designateForkOriginals;
                     ensureTerminalSessionCache = originals.ensureTerminalSessionCache;
                     terminalContextSocketOpen = originals.terminalContextSocketOpen;
                     terminalInitialReplaySettled = originals.terminalInitialReplaySettled;
-                    readTerminalBufferTailTextFrom = originals.readTerminalBufferTailTextFrom;
                     openTerminalSpecifiedTaskDialog = originals.openTerminalSpecifiedTaskDialog;
                 }};
             }}"""
         )
-        await page.select_option(
-            "#terminal-project-command-select", "designate_preset_fork"
+        await page.click("#terminal-project-command-button")
+        await page.click(
+            "#terminal-project-command-menu "
+            "button[data-project-action='designate_preset_fork']"
         )
-        await page.wait_for_function(
-            "() => window.__designateForkRenderPending === true"
-            " && window.__designateForkWaitAttached === true"
-        )
-        assert not await page.locator("#terminal-specified-task-dialog").is_visible()
-        await page.evaluate("() => window.__resolveDesignateForkRender()")
         await page.wait_for_selector("#terminal-specified-task-dialog[open]")
         await page.wait_for_function(
             f"() => document.querySelector('#terminal-specified-task-session-id')"
@@ -235,14 +210,16 @@ async def main():
             "codexLocked": await page.locator(
                 'input[name="terminal-specified-task-agent"][value="codex"]'
             ).is_disabled(),
+            "temporaryChecked": await page.locator(
+                "#terminal-specified-task-temporary"
+            ).is_checked(),
             "geometry": await dialog_geometry(page),
-            "bufferReadLimits": await page.evaluate(
-                "() => window.__designateForkReadLimits"
+            "unexpectedShortcut": await page.evaluate(
+                "() => window.__designateForkUnexpectedShortcut || null"
             ),
         }
         assert results["fork"]["session"] == ORIGINAL_SESSION_ID
-        assert results["fork"]["bufferReadLimits"]
-        assert all(limit == 20 for limit in results["fork"]["bufferReadLimits"])
+        assert results["fork"]["unexpectedShortcut"] is None
         assert results["fork"]["sourceTerminalName"] == source_terminal_name
         assert results["fork"]["finalTerminalName"] == f"{source_terminal_base}_fork"
         await page.locator("#terminal-specified-task-terminal-name").fill("custom-fork")
@@ -256,8 +233,9 @@ async def main():
             ).text_content()
         ).strip()
         assert results["fork"]["editedFinalTerminalName"] == "custom-fork_fork"
-        assert results["fork"]["title"] == "指定预设+fork（持久切换）"
+        assert results["fork"]["title"] == "指定预设+fork（临时）"
         assert results["fork"]["codexLocked"]
+        assert results["fork"]["temporaryChecked"]
         assert results["fork"]["geometry"]["inViewport"]
         await page.evaluate("() => window.__restoreDesignateForkFakes()")
         await page.screenshot(
@@ -279,10 +257,14 @@ async def main():
         results["fork"]["submittedTerminalName"] = await page.evaluate(
             "() => window.__designateForkSubmittedOptions?.terminalName || ''"
         )
+        results["fork"]["submittedSessionAction"] = await page.evaluate(
+            "() => window.__designateForkSubmittedOptions?.sessionAction || ''"
+        )
         results["fork"]["closedAfterLaunch"] = not await page.locator(
             "#terminal-specified-task-dialog"
         ).is_visible()
         assert results["fork"]["submittedTerminalName"] == "custom-fork_fork"
+        assert results["fork"]["submittedSessionAction"] == "fork"
         assert results["fork"]["closedAfterLaunch"]
 
         await page.evaluate(

@@ -198,6 +198,7 @@ async def main():
         assert await page.locator(
             "#terminal-specified-task-fixed-options"
         ).is_visible()
+        assert await page.locator("#terminal-specified-task-temporary").is_checked()
         assert not await page.locator(
             "#terminal-specified-task-timeout-field"
         ).is_visible()

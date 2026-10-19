@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
     time::{Duration, SystemTime},
 };
 
@@ -18,6 +18,11 @@ const STARTUP_INSTALL_LOCK_FILE: &str = ".webclx-startup-install.lock";
 const STARTUP_INSTALL_LOG_FILE: &str = "webclx-startup-install.log";
 const STALE_LOCK_AFTER: Duration = Duration::from_secs(60 * 60);
 const NPM_REGISTRY: &str = "https://registry.npmjs.org";
+/// Node/npm 安装命令需要下载，给足时限但仍要有界；`--version` 探测是秒级短命令。
+const INSTALL_COMMAND_BUDGET: Duration = Duration::from_secs(300);
+const INSTALL_COMMAND_MAX_OUTPUT: usize = 4 * 1024 * 1024;
+const VERSION_CHECK_BUDGET: Duration = Duration::from_secs(10);
+const VERSION_CHECK_MAX_OUTPUT: usize = 64 * 1024;
 #[cfg(not(windows))]
 const DEFAULT_COMMAND_BIN_DIR: &str = "/usr/local/bin";
 
@@ -417,17 +422,20 @@ fn install_user_local_node(paths: &BootstrapPaths, path_env: &str, log: &mut Fil
     }
 
     let script = user_local_node_install_script();
-    let output = Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg("-c")
         .arg(script)
         .arg("webclx-node-install")
         .arg(&paths.data_dir)
         .env("PATH", path_env)
-        .env("HOME", &paths.home_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("failed to run Node.js installer")?;
+        .env("HOME", &paths.home_dir);
+    let output = crate::process_exec::bounded_output(
+        command,
+        INSTALL_COMMAND_BUDGET,
+        INSTALL_COMMAND_MAX_OUTPUT,
+    )
+    .context("failed to run Node.js installer")?;
     log_output(log, "node install", &output);
 
     if !output.status.success() {
@@ -535,7 +543,8 @@ fn ensure_npm_cli(
     fs::create_dir_all(&paths.npm_prefix)
         .with_context(|| format!("cannot create {}", paths.npm_prefix.display()))?;
 
-    let output = Command::new(npm_path)
+    let mut command = Command::new(npm_path);
+    command
         .args([
             "install",
             "-g",
@@ -549,11 +558,13 @@ fn ensure_npm_cli(
         .arg(&paths.npm_prefix)
         .env("PATH", path_env.as_str())
         .env("HOME", &paths.home_dir)
-        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("failed to run npm install for {package_name}"))?;
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false");
+    let output = crate::process_exec::bounded_output(
+        command,
+        INSTALL_COMMAND_BUDGET,
+        INSTALL_COMMAND_MAX_OUTPUT,
+    )
+    .with_context(|| format!("failed to run npm install for {package_name}"))?;
     log_output(log, &format!("npm install {package_name}"), &output);
 
     if !output.status.success() {
@@ -667,13 +678,10 @@ fn command_version_check_succeeds(command_name: &str, path_env: &str) -> bool {
         return false;
     };
 
-    Command::new(command_path)
-        .arg("--version")
-        .env("PATH", path_env)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let mut command = Command::new(command_path);
+    command.arg("--version").env("PATH", path_env);
+    crate::process_exec::bounded_output(command, VERSION_CHECK_BUDGET, VERSION_CHECK_MAX_OUTPUT)
+        .is_ok_and(|output| output.status.success())
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -702,12 +710,13 @@ fn log_tool_version(command_name: &str, path_env: &str, log: &mut File) {
         return;
     };
 
-    let output = Command::new(&command_path)
-        .arg("--version")
-        .env("PATH", path_env)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+    let mut command = Command::new(&command_path);
+    command.arg("--version").env("PATH", path_env);
+    let output = crate::process_exec::bounded_output(
+        command,
+        VERSION_CHECK_BUDGET,
+        VERSION_CHECK_MAX_OUTPUT,
+    );
 
     match output {
         Ok(output) if output.status.success() => {

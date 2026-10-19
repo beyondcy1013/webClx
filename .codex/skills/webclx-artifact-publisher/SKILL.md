@@ -9,10 +9,11 @@ Use this skill after a build creates an artifact that the user should download f
 
 Current default policy:
 
-- Publish Android APKs after successful Android builds. APK publication must update both the download catalog and the Android update manifest consumed by clients.
+- Publish Android APKs after successful Android builds. APK publication must update both the webClx download catalog and its Android artifact manifest.
+- Do not assume the webClx artifact manifest is the application's production automatic-update center. When a project has a separate runtime update repository or public update endpoint, its project-owned publish/deploy workflow is an additional completion gate.
 - Give every downloadable release artifact a versioned filename. APK names must use a form such as `lyyNote-0.1.8.apk`; never publish a generic APK name such as `lyyNote.apk`.
 - Retain at most the latest three artifacts for each project. A successful publish must leave the new artifact plus at most two older artifacts, ordered by `published_at`; webClx removes older records and their managed files.
-- Publish Windows build outputs when the user needs to install or download them on another machine.
+- Publish Windows build outputs when the user needs to install or download them on another machine. If the Windows client has a production automatic-update endpoint, publishing its platform/architecture manifest and verified installer there is also required.
 - Do not publish Linux build outputs that are meant to run or deploy directly on the same machine.
 - Publish Linux artifacts only when the user explicitly asks for a download link or remote transfer artifact.
 
@@ -55,14 +56,15 @@ Use a `.part` or `.tmp` suffix while copying, then rename atomically. webClx ign
    - Use `publish-artifact.sh` for APKs, release notes, custom labels, or any artifact that needs strict response verification.
    - Use direct drop only when the file name itself is sufficient metadata.
 5. Use the script with the final artifact path, not an intermediate temporary file. For APKs, pass the verified version through `--version`. The script appends it to a generic source filename automatically; pass `--name` when a clearer product filename is needed.
-6. For an APK, the helper must query `/api/artifacts/update/android/{project}` after publication and fail unless its version, file name, SHA-256, size, and download URL match the newly published artifact. This manifest is the update center; it is derived from the artifact index rather than a separate SQL write.
-7. Read the JSON response and query `/api/artifacts`. Verify that the matching project contains the newly published artifact and no more than three entries.
-8. Report:
+6. For an APK, the helper must query `/api/artifacts/update/android/{project}` after publication and fail unless its version, file name, SHA-256, size, and download URL match the newly published artifact. This is webClx's artifact manifest; it is derived from the artifact index rather than a separate SQL write.
+7. Inspect the project's AGENTS instructions and release documentation for a distinct production automatic-update repository. If one exists for Android or Windows, use the project-owned deployment script through `webclx-compile-and-deploy`, then read the public production manifest and fully download its referenced artifact. Verify platform, architecture, version, file name, size, and SHA-256 against the built artifact. Do not claim a client release complete after only publishing to webClx.
+8. Read the JSON response and query `/api/artifacts`. Verify that the matching project contains the newly published artifact and no more than three entries.
+9. Report:
    - `download_url` or absolute download URL
    - `/downloads` page URL
    - `/api/artifacts/update/android/{project}` URL for APKs
    - project, file name, size
-9. If webClx is unavailable, say so and keep the local artifact path visible.
+10. For projects with a separate update center, also report its public manifest and artifact URLs. If either webClx or the production update center is unavailable, say which publication surface remains incomplete and keep the local artifact path visible.
 
 ## Migrating Old Publishers
 
@@ -86,4 +88,4 @@ Use a `.part` or `.tmp` suffix while copying, then rename atomically. webClx ign
 
 For APKs, the script rejects a missing `--version`, a non-APK download suffix, or a download name that omits the supplied version. If the source APK is named `lyyNote.apk`, `--version 0.1.8` produces `lyyNote-0.1.8.apk`; an explicit `--name` must also contain `0.1.8`.
 
-The webClx API stores files under `.webclx-artifacts/` in the running webClx app directory and serves them through stable HTTP download endpoints. The Android update center selects its latest eligible version from that same index; there is no separate SQL table to update. Rely on the server retention policy; do not manually edit `index.json` to prune versions. Do not publish secrets, signing keys, config files with credentials, or unverified build outputs.
+The webClx API stores files under `.webclx-artifacts/` in the running webClx app directory and serves them through stable HTTP download endpoints. Its Android artifact manifest selects the latest eligible version from that same index; there is no separate SQL table to update. A project's client may consume a different production update endpoint, which must be published separately according to that project's rules. Rely on the server retention policy; do not manually edit `index.json` to prune versions. Do not publish secrets, signing keys, config files with credentials, or unverified build outputs.

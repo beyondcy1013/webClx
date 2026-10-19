@@ -13,7 +13,7 @@ const robots = readFileSync(new URL('../site/robots.txt', import.meta.url), 'utf
 const sitemap = readFileSync(new URL('../site/sitemap.xml', import.meta.url), 'utf8');
 
 test('public site exposes download, trial, security, and commercial paths', () => {
-  assert.match(html, /releases\/tag\/v1\.8\.11/);
+  assert.match(html, /releases\/tag\/v1\.10\.15/);
   assert.match(html, /hosted-trial\.yml/);
   assert.match(html, /COMMERCIAL\.md/);
   assert.match(html, /SECURITY\.md/);
@@ -72,7 +72,7 @@ test('public site exposes crawler and canonical sharing metadata', () => {
   assert.match(robots, /Sitemap: https:\/\/beyondcy1013\.github\.io\/webClx\/sitemap\.xml/);
   assert.match(sitemap, /https:\/\/beyondcy1013\.github\.io\/webClx\//);
   assert.match(sitemap, /https:\/\/beyondcy1013\.github\.io\/webClx\/demo\.html/);
-  assert.match(sitemap, /https:\/\/github\.com\/beyondcy1013\/webClx\/releases\/tag\/v1\.8\.11/);
+  assert.match(sitemap, /https:\/\/github\.com\/beyondcy1013\/webClx\/releases\/tag\/v1\.10\.15/);
 });
 
 test('GitHub Pages workflow deploys only the public site directory', () => {

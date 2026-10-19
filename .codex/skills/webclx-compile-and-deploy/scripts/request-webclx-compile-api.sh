@@ -380,10 +380,33 @@ if [ "$PRINT_PAYLOAD" = true ]; then
 fi
 
 refresh_local_auth_args
-curl -fsS --noproxy '*' \
+response="$(curl -fsS --noproxy '*' \
   "${LOCAL_AUTH_ARGS[@]}" \
   -X POST "$BASE_URL/api/build/compile" \
   -H 'Content-Type: application/json' \
-  -d "$payload"
+  -d "$payload")"
+printf '%s\n' "$response"
 
 echo
+
+# 把结果获取方式直接告诉调用方：有源终端回调的请求可忽略，仍可主动查询；
+# 不支持回调的第三方智能体必须轮询查询接口直到 done=true。
+if command -v jq >/dev/null 2>&1; then
+  callback_supported="$(jq -r '.callback_supported // empty' <<<"$response")"
+  query_url="$(jq -r '.query.url // empty' <<<"$response")"
+  poll_secs="$(jq -r '.query.suggested_poll_seconds // 15' <<<"$response")"
+  request_id="$(jq -r '.request_id // empty' <<<"$response")"
+  if [ -n "$query_url" ]; then
+    if [ "$callback_supported" = "true" ]; then
+      echo ">>> 完成后结果将通过源终端回调返回；如需主动查询状态："
+    else
+      echo ">>> 本请求无源终端回调，请按建议间隔轮询查询接口获取结果："
+    fi
+    echo "    GET $query_url  (建议间隔 ${poll_secs}s)"
+    echo "    轮询至 done=true；state=succeeded|failed|timed_out 为终态，run.log_path 为集中日志路径。"
+  elif [ -n "$request_id" ]; then
+    echo ">>> 服务端未返回 query 提示（旧版本 webClx），可稍后查询："
+    echo "    GET $BASE_URL/api/build/compile/requests/$request_id"
+  fi
+  echo
+fi

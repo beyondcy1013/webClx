@@ -6,6 +6,8 @@ let terminalCursorCorrectionLastStyleKey = "";
 let terminalCursorCorrectionFrame = 0;
 let terminalSoftKeyboardCursorEl = null;
 let terminalSoftKeyboardCursorLastStyleKey = "";
+const terminalCursorCorrectionImeHelpers = new WeakSet();
+let terminalCursorCorrectionImeFrame = 0;
 
 function isTerminalCursorHidden() {
   return term?._core?.coreService?.isCursorHidden === true;
@@ -144,7 +146,25 @@ function terminalViewportPlaceholderRanges(activeBuffer, row) {
   return ranges;
 }
 
+function terminalContextRunsCodebuddyAgent() {
+  const sessions = Array.isArray(state?.sessions) ? state.sessions : [];
+  const session = sessions.find((item) => item?.id === state.activeSessionId);
+  const agent = String(session?.activity_agent || session?.activityAgent || "")
+    .trim()
+    .toLowerCase();
+  return agent.includes("codebuddy");
+}
+
 function terminalCursorCorrectionTarget() {
+  // CodeBuddy uses the same `›` input prompt as Codex, so the `›`-based
+  // heuristic below cannot tell them apart.  Unlike Codex/Claude, CodeBuddy
+  // keeps its own caret in place; suppressing xterm's native caret and
+  // re-anchoring the IME composition box to rows-3 breaks in-place deletion
+  // for freshly typed CJK text.  Skip cursor correction entirely for it.
+  if (terminalContextRunsCodebuddyAgent()) {
+    return null;
+  }
+
   if (
     !terminalCursorGuard ||
     typeof terminalCursorGuard.detectBottomStatusCursorCorrection !== "function" ||
@@ -169,8 +189,28 @@ function terminalCursorCorrectionTarget() {
     lines.push(terminalViewportLineText(activeBuffer, row));
   }
   const inputRow = rows - 3;
-  const applicationCursorRows =
-    inputRow >= 0 && terminalViewportLineHasApplicationCursor(activeBuffer, inputRow) ? [inputRow] : [];
+  // Codex/Claude draw their own inverse-video caret inside the TUI input box
+  // while editing text or showing placeholder text.  If we keep correcting the
+  // caret in that case, xterm's native caret falls back to the bottom status
+  // row and the visible caret jumps between the input box and the status bar.
+  // Leave the application-drawn caret alone instead.  Only treat the row as an
+  // application caret when it really is a Codex/Claude input line (starts with
+  // `›`); other TUIs such as CodeBuddy also emit inverse-video cells for their
+  // selection/highlight/cursor, and suppressing xterm's native caret there
+  // hides the real caret and makes in-place deletion appear broken.
+  if (
+    inputRow >= 0 &&
+    activeBuffer.cursorY !== inputRow &&
+    terminalCursorGuard?.isLikelyCodexInputLine?.(lines[inputRow]) &&
+    terminalViewportLineHasApplicationCursor(activeBuffer, inputRow)
+  ) {
+    return {
+      applicationCursorOnly: true,
+      row: inputRow,
+      column: 0,
+    };
+  }
+  const applicationCursorRows = terminalViewportEditableApplicationCursorRows();
   const placeholderRanges =
     inputRow >= 0 ? terminalViewportPlaceholderRanges(activeBuffer, inputRow) : [];
 
@@ -183,6 +223,26 @@ function terminalCursorCorrectionTarget() {
     applicationCursorRows,
     placeholderRanges,
   });
+}
+
+function terminalViewportEditableApplicationCursorRows() {
+  const activeBuffer = term.buffer?.active;
+  if (
+    !activeBuffer ||
+    typeof activeBuffer.cursorY !== "number" ||
+    !Number.isFinite(activeBuffer.cursorY)
+  ) {
+    return [];
+  }
+
+  const rows = Math.max(Number(term.rows) || 0, 0);
+  const rowsWithApplicationCursor = [];
+  for (let row = 0; row < rows; row += 1) {
+    if (terminalViewportLineHasApplicationCursor(activeBuffer, row)) {
+      rowsWithApplicationCursor.push(row);
+    }
+  }
+  return rowsWithApplicationCursor;
 }
 
 function terminalCellDimensions() {
@@ -214,6 +274,60 @@ function terminalCursorCorrectionElement() {
   }
 
   return terminalCursorCorrectionEl;
+}
+
+function syncTerminalImeAnchorForCursorCorrection(target, dimensions) {
+  const screen = term.element?.querySelector(".xterm-screen");
+  const helper = terminalHelperTextarea();
+  installTerminalCursorCorrectionImeAnchor(helper);
+  const compositionView = screen?.querySelector(".composition-view.active");
+  if (!(compositionView instanceof HTMLElement) || !(helper instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  const x = target.column * dimensions.width;
+  const y = target.row * dimensions.height;
+  compositionView.style.left = `${x}px`;
+  compositionView.style.top = `${y}px`;
+  compositionView.style.height = `${dimensions.height}px`;
+  compositionView.style.lineHeight = `${dimensions.height}px`;
+  helper.style.left = `${x}px`;
+  helper.style.top = `${y}px`;
+  helper.style.height = `${dimensions.height}px`;
+  helper.style.lineHeight = `${dimensions.height}px`;
+}
+
+function installTerminalCursorCorrectionImeAnchor(helper) {
+  if (
+    !(helper instanceof HTMLTextAreaElement) ||
+    terminalCursorCorrectionImeHelpers.has(helper)
+  ) {
+    return;
+  }
+
+  const resync = () => {
+    syncTerminalCursorCorrection();
+    scheduleTerminalCursorCorrectionImeAnchor();
+  };
+  helper.addEventListener("compositionstart", resync);
+  helper.addEventListener("compositionupdate", resync);
+  terminalCursorCorrectionImeHelpers.add(helper);
+}
+
+function scheduleTerminalCursorCorrectionImeAnchor() {
+  if (terminalCursorCorrectionImeFrame) {
+    return;
+  }
+
+  terminalCursorCorrectionImeFrame = window.requestAnimationFrame(() => {
+    terminalCursorCorrectionImeFrame = 0;
+    const compositionView = term.element?.querySelector(".composition-view.active");
+    if (!(compositionView instanceof HTMLElement)) {
+      return;
+    }
+    syncTerminalCursorCorrection();
+    scheduleTerminalCursorCorrectionImeAnchor();
+  });
 }
 
 function terminalSoftKeyboardVisible() {
@@ -337,6 +451,10 @@ function syncTerminalCursorCorrection() {
     return;
   }
   const target = terminalCursorCorrectionTarget();
+  if (target?.applicationCursorOnly) {
+    suppressTerminalNativeCursorForApplicationCursor();
+    return;
+  }
   const dimensions = target ? terminalCellDimensions() : null;
   if (!target || !dimensions) {
     if (!terminalCursorCorrectionActive) {
@@ -386,7 +504,22 @@ function syncTerminalCursorCorrection() {
     marker.style.transform = `translate(${geometry.x}px, ${geometry.y}px)`;
     terminalCursorCorrectionLastStyleKey = styleKey;
   }
+  syncTerminalImeAnchorForCursorCorrection(target, dimensions);
   setTerminalCursorHiddenForCorrection(true);
+}
+
+function suppressTerminalNativeCursorForApplicationCursor() {
+  terminalCursorCorrectionDeactivateCount = 0;
+  terminalCursorCorrectionLastTarget = null;
+  terminalCursorCorrectionLastStyleKey = "";
+  if (terminalCursorCorrectionEl) {
+    terminalCursorCorrectionEl.hidden = true;
+  }
+  // Do not draw a second caret: the Codex/Claude TUI already owns the input
+  // caret.  Only suppress xterm's native caret so it cannot fall back to the
+  // bottom status line and blink "in front of" the real input caret.
+  setTerminalCursorHiddenForCorrection(true);
+  syncTerminalSoftKeyboardCursor();
 }
 
 function scheduleTerminalCursorCorrection() {

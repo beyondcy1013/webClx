@@ -1,19 +1,45 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-const expectedLabels = [
-  "终端管理",
-  "工作区",
-  "历史工作区",
-  "Codex_API",
-  "Claude_API",
-  "设置",
-  "远程桌面",
-  "Agent",
-  "Codex_OAuth",
-  "归档列表",
-  "编译产物",
-];
+const expectedByPath = {
+  "../static/index.html": [
+    "终端管理",
+    "工作区",
+    "历史工作区",
+    "LLM_API",
+    "Claude_API",
+    "设置",
+    "DeepSeek Agent",
+    "智能体协作",
+    "归档列表",
+    "编译产物",
+  ],
+  "../static/terminal.html": [
+    "终端管理",
+    "工作区",
+    "历史工作区",
+    "LLM_API",
+    "Claude_API",
+    "设置",
+    "DeepSeek Agent",
+    "智能体协作",
+    "服务器",
+    "归档列表",
+    "编译产物",
+  ],
+  "../static/agent-profiles.html": [
+    "终端管理",
+    "工作区",
+    "历史工作区",
+    "LLM_API",
+    "Claude_API",
+    "设置",
+    "DeepSeek Agent",
+    "智能体协作",
+    "归档列表",
+    "编译产物",
+  ],
+};
 
 function navigationItems(relativePath) {
   const html = readFileSync(new URL(relativePath, import.meta.url), "utf8");
@@ -34,7 +60,7 @@ function navigationItems(relativePath) {
 for (const relativePath of [
   "../static/index.html",
   "../static/terminal.html",
-  "../static/agent.html",
+  "../static/agent-profiles.html",
 ]) {
   const items = navigationItems(relativePath);
   assert.equal(items[0]?.label, "终端管理", `${relativePath} should lead with 终端管理`);
@@ -45,7 +71,7 @@ for (const relativePath of [
   );
   assert.deepEqual(
     items.map(({ label }) => label),
-    expectedLabels,
+    expectedByPath[relativePath],
     `${relativePath} should expose the shared top-level navigation order`,
   );
 }
@@ -92,8 +118,23 @@ assert.match(
 );
 assert.match(
   responsiveStyles,
-  /\.terminal-page \.terminal-page-nav \{[\s\S]*?border: 0;[\s\S]*?border-radius: 0;[\s\S]*?background: transparent;[\s\S]*?backdrop-filter: none;/,
-  "mobile terminal navigation must not restore the rounded outer frame",
+  /\.terminal-page \.terminal-page-nav \{[\s\S]*?border: 0;[\s\S]*?border-radius: 0;[\s\S]*?background: var\(--panel-opaque\);[\s\S]*?backdrop-filter: none;/,
+  "mobile terminal navigation must keep an opaque scroll-covering layer without restoring the rounded outer frame",
+);
+assert.match(
+  sharedStyles,
+  /\.terminal-page-nav \{[\s\S]*?background: var\(--panel-opaque\);[\s\S]*?isolation: isolate;/,
+  "terminal navigation must remain opaque and isolated while terminal output scrolls underneath it",
+);
+assert.match(
+  sharedStyles,
+  /:root\[data-theme="dark"\] \.browser-topbar\.terminal-page-nav[\s\S]*?background: var\(--panel-opaque\);/,
+  "terminal navigation must override the dark-theme transparent browser-topbar rule with higher specificity",
+);
+assert.match(
+  responsiveStyles,
+  /:root\[data-theme="dark"\] \.terminal-page \.terminal-page-nav[\s\S]*?background: var\(--panel-opaque\);/,
+  "mobile terminal navigation must keep an opaque background under dark theme",
 );
 
 console.log("top navigation order tests passed");

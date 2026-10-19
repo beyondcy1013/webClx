@@ -513,16 +513,14 @@ async fn proxy_openai_responses_conversion(
         // terminal tail never contains the "限额将在 {time} 重置" text the
         // auto-continue time patterns rely on. Record it here keyed by preset
         // id; the terminal error auto-continue scanner consumes it.
-        if status == StatusCode::TOO_MANY_REQUESTS
-            && crate::quota_reset_cache::base_url_is_zhipu_upstream(&preset.base_url)
-            && let Ok(body_str) = std::str::from_utf8(&upstream_body)
-            && let Some(reset_at) = crate::quota_reset_cache::parse_zhipu_quota_reset(body_str)
-        {
-            state.quota_reset_cache.record_for_preset(
+        if let Ok(body_str) = std::str::from_utf8(&upstream_body)
+            && let Some(reset_at) = state.quota_reset_cache.capture_zhipu_quota_response(
                 &preset.id,
                 &preset.base_url,
-                reset_at.clone(),
-            );
+                status.as_u16(),
+                body_str,
+            )
+        {
             tracing::info!(
                 "{}",
                 gateway_message(

@@ -4,7 +4,7 @@ import test from "node:test";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
-test("preset execution uses the shared apply path instead of temporary runtimes", () => {
+test("preset execution has no runtime gate or alternate config home", () => {
   const authModule = read("src/auth.rs");
   const authRoutes = read("src/routes/auth.rs");
   const cli = read("src/cli.rs");
@@ -16,31 +16,36 @@ test("preset execution uses the shared apply path instead of temporary runtimes"
   );
   assert.doesNotMatch(authModule, /temporary_runtime/);
   assert.doesNotMatch(authRoutes, /temporary-preset-runtime/);
-  assert.match(authRoutes, /preset-run-leases/);
-  assert.doesNotMatch(cli, /preset-run-leases/);
+  assert.doesNotMatch(authRoutes, /preset-run-leases",\s*post/);
+  assert.match(authRoutes, /acknowledge_removed_preset_run_lease/);
+  assert.match(
+    authModule,
+    /acknowledge_removed_preset_run_lease[\s\S]*compatibility_only[\s\S]*true/,
+  );
+  assert.doesNotMatch(cli, /preset-run-leases|acquire_lease|heartbeat_lease|release_lease/);
   assert.match(cli, /client\.apply\(kind, &target, Some\(&cwd\)\)\.await/);
   assert.doesNotMatch(cli, /TemporaryPresetRuntime|runner_path|cleanup_runtime/);
 });
 
-test("a manual preset switch is queued behind an isolated task config lease instead of rejected", () => {
+test("manual preset switches are written directly without pending runtime gates", () => {
   const apply = read("src/auth/apply.rs");
-  const lease = read("src/auth/preset_run_lease.rs");
   const apiManager = read("static/app-api-manager.js");
 
   assert.doesNotMatch(apply, /try_lock_active_config_write\(\)/);
-  assert.match(lease, /queue_preset_switch_if_running/);
-  assert.match(lease, /pending_switch/);
-  assert.match(lease, /restore_snapshot[\s\S]*apply_selected_preset_locked/);
+  assert.doesNotMatch(apply, /queue_preset_switch_if_running|pending_switch/);
+  assert.equal(existsSync(new URL("../src/auth/preset_run_lease.rs", import.meta.url)), false);
   assert.match(apiManager, /response\.deferred/);
 });
 
-test("specified launches and in-terminal switches delegate to webclx run", () => {
+test("specified launches and in-terminal switches delegate temporary ownership to webclx run", () => {
   const specifiedActions = read("static/specified-preset-actions.js");
   const inPlaceSwitch = read("static/terminal-in-place-preset-switch.js");
 
-  assert.match(specifiedActions, /webclx run/);
+  assert.match(specifiedActions, /specifiedPresetRunCommand/);
+  assert.doesNotMatch(specifiedActions, /acquireSpecifiedPresetLease|releaseSpecifiedPresetLease/);
   assert.doesNotMatch(specifiedActions, /temporary-preset-runtime|runner_path|runtimeRunner/);
   assert.match(inPlaceSwitch, /specifiedPresetRunCommand/);
+  assert.doesNotMatch(inPlaceSwitch, /acquireSpecifiedPresetLease|releaseSpecifiedPresetLease/);
   assert.doesNotMatch(inPlaceSwitch, /action:\s*["']prepare["']|runtimeRunner|runtimeId/);
 });
 
@@ -54,13 +59,11 @@ test("preset execution never creates alternate Codex or Claude config homes", ()
   assert.doesNotMatch(startupTools, /export CLAUDE_CONFIG_DIR=|CLAUDE_CONFIG_SNAPSHOT_WRAPPER/);
 });
 
-test("webclx run documents that the selected shared preset remains active", () => {
+test("webclx run documents the absence of a runtime preset gate", () => {
   const cli = read("src/cli.rs");
 
-  assert.match(cli, /selected preset remains active for subsequent processes/);
-  assert.doesNotMatch(cli, /configuration is restored after the agent has read/);
-  assert.doesNotMatch(cli, /hold the global preset gate while the agent runs/);
-  assert.doesNotMatch(cli, /configuration is restored after the agent exits/);
+  assert.match(cli, /no runtime preset gate is held/);
+  assert.doesNotMatch(cli, /global preset gate|全局预设门禁/);
 });
 
 test("reserved config-home variables are rejected by the preset environment gate", () => {

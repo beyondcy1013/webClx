@@ -1,7 +1,7 @@
 use std::{
     fs, io,
     path::Path,
-    sync::OnceLock,
+    sync::{OnceLock, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -16,15 +16,16 @@ use axum::{
     response::IntoResponse,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Semaphore};
 
 use tracing::warn;
 
 use crate::{ApiResult, AppError, AppState};
+use reqwest::Url;
 
 pub const SESSION_COOKIE_NAME: &str = "webclx_session";
 /// 从设置读取登录会话保持天数，默认 30 天。
@@ -36,6 +37,8 @@ const CREDENTIALS_FILE_NAME: &str = ".webclx-login-credentials.json";
 const INITIAL_PASSWORD_FILE_NAME: &str = ".webclx-initial-password";
 const CREDENTIALS_VERSION: u8 = 2;
 const INITIAL_PASSWORD_RANDOM_BYTES: usize = 24;
+const TRUST_SECRET_FILE_NAME: &str = ".webclx-cross-instance-trust";
+const TICKET_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_USERNAME: &str = "webclx";
 const MAX_CONCURRENT_PASSWORD_VERIFICATIONS: usize = 2;
 const MAX_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
@@ -45,21 +48,28 @@ const LEGACY_SHA256_SALT_BYTES: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
-static SESSION_SECRET: OnceLock<Vec<u8>> = OnceLock::new();
-static CREDENTIALS: OnceLock<LoginCredentials> = OnceLock::new();
+static SESSION_SECRET: OnceLock<RwLock<Vec<u8>>> = OnceLock::new();
+static CROSS_INSTANCE_TRUST_SECRET: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+static CREDENTIALS: OnceLock<RwLock<LoginCredentials>> = OnceLock::new();
 static LOGIN_VERIFICATION_SLOTS: Semaphore =
     Semaphore::const_new(MAX_CONCURRENT_PASSWORD_VERIFICATIONS);
+static PASSWORD_UPDATE_LOCK: Mutex<()> = Mutex::const_new(());
 
-fn session_secret(state: &AppState) -> io::Result<&'static [u8]> {
+fn session_secret(state: &AppState) -> io::Result<Vec<u8>> {
     if let Some(secret) = SESSION_SECRET.get() {
-        return Ok(secret);
+        return secret
+            .read()
+            .map(|secret| secret.clone())
+            .map_err(|_| io::Error::other("会话密钥锁已损坏"));
     }
     let secret = load_or_create_secret(&state.app_dir)?;
-    let _ = SESSION_SECRET.set(secret);
+    let _ = SESSION_SECRET.set(RwLock::new(secret));
     SESSION_SECRET
         .get()
-        .map(Vec::as_slice)
-        .ok_or_else(|| io::Error::other("无法初始化会话密钥"))
+        .ok_or_else(|| io::Error::other("无法初始化会话密钥"))?
+        .read()
+        .map(|secret| secret.clone())
+        .map_err(|_| io::Error::other("会话密钥锁已损坏"))
 }
 
 fn load_or_create_secret(app_dir: &Path) -> io::Result<Vec<u8>> {
@@ -75,15 +85,20 @@ fn load_or_create_secret(app_dir: &Path) -> io::Result<Vec<u8>> {
         crate::private_file::tighten_permissions(&path)?;
         return Ok(bytes);
     }
-    let mut secret = vec![0u8; 64];
-    rand::thread_rng().fill_bytes(&mut secret);
+    let secret = generate_session_secret();
     crate::private_file::write_atomic(&path, &secret)?;
     Ok(secret)
 }
 
+fn generate_session_secret() -> Vec<u8> {
+    let mut secret = vec![0u8; 64];
+    rand::thread_rng().fill_bytes(&mut secret);
+    secret
+}
+
 pub fn initialize_session_secret(app_dir: &Path) -> io::Result<()> {
     let secret = load_or_create_secret(app_dir)?;
-    let _ = SESSION_SECRET.set(secret);
+    let _ = SESSION_SECRET.set(RwLock::new(secret));
     Ok(())
 }
 
@@ -110,22 +125,206 @@ struct InitialCredentials {
     password: String,
 }
 
-fn credentials(state: &AppState) -> Result<&'static LoginCredentials, AppError> {
+fn credentials(state: &AppState) -> Result<LoginCredentials, AppError> {
     if let Some(credentials) = CREDENTIALS.get() {
-        return Ok(credentials);
+        return credentials
+            .read()
+            .map(|credentials| credentials.clone())
+            .map_err(|_| AppError::internal("登录凭据锁已损坏"));
     }
     let loaded = load_or_create_credentials(&state.app_dir)
         .map_err(|error| AppError::internal(format!("加载登录凭据失败: {error}")))?;
-    let _ = CREDENTIALS.set(loaded);
+    let _ = CREDENTIALS.set(RwLock::new(loaded));
     CREDENTIALS
         .get()
-        .ok_or_else(|| AppError::internal("无法初始化登录凭据"))
+        .ok_or_else(|| AppError::internal("无法初始化登录凭据"))?
+        .read()
+        .map(|credentials| credentials.clone())
+        .map_err(|_| AppError::internal("登录凭据锁已损坏"))
 }
 
 pub fn initialize_credentials(app_dir: &Path) -> io::Result<()> {
     let loaded = load_or_create_credentials(app_dir)?;
-    let _ = CREDENTIALS.set(loaded);
+    let _ = CREDENTIALS.set(RwLock::new(loaded));
     Ok(())
+}
+
+fn load_cross_instance_trust_secret(app_dir: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path = app_dir.join(TRUST_SECRET_FILE_NAME);
+    if !crate::private_file::validate_optional_existing(&path)? {
+        return Ok(None);
+    }
+    let secret = fs::read(&path)?;
+    if secret.len() < 32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cross-instance trust secret is too short",
+        ));
+    }
+    crate::private_file::tighten_permissions(&path)?;
+    Ok(Some(secret))
+}
+
+pub fn initialize_cross_instance_trust_secret(app_dir: &Path) -> io::Result<()> {
+    let _ = CROSS_INSTANCE_TRUST_SECRET.set(load_cross_instance_trust_secret(app_dir)?);
+    Ok(())
+}
+
+fn cross_instance_trust_secret() -> Option<&'static [u8]> {
+    CROSS_INSTANCE_TRUST_SECRET.get().and_then(Option::as_deref)
+}
+
+#[derive(Serialize, Deserialize)]
+struct CrossInstanceTicketPayload {
+    aud: String,
+    exp: u64,
+    user: String,
+}
+
+pub fn issue_cross_instance_ticket(
+    target_origin: &str,
+    headers: &HeaderMap,
+    state: &AppState,
+) -> Result<String, AppError> {
+    let Some(secret) = cross_instance_trust_secret() else {
+        return Err(AppError::not_found("跨实例免登录未启用"));
+    };
+
+    let parsed_origin =
+        Url::parse(target_origin).map_err(|_| AppError::bad_request("目标服务器地址无效"))?;
+    if !parsed_origin.path().is_empty() && parsed_origin.path() != "/" {
+        return Err(AppError::bad_request("目标服务器地址无效"));
+    }
+    let aud = format!(
+        "{}://{}{}",
+        parsed_origin.scheme(),
+        parsed_origin
+            .host_str()
+            .ok_or_else(|| AppError::bad_request("目标服务器地址无效"))?,
+        parsed_origin
+            .port_or_known_default()
+            .map(|port| format!(":{port}"))
+            .unwrap_or_default(),
+    );
+    let user = verify_session_from_headers(headers, state).ok_or_else(|| AppError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "宿主会话无效".to_string(),
+    })?;
+
+    let exp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs() + TICKET_TTL_SECS)
+        .unwrap_or(0);
+    let payload = CrossInstanceTicketPayload {
+        aud,
+        exp,
+        user: user.trim().to_lowercase(),
+    };
+    let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap_or_default());
+    let mut mac = HmacSha256::new_from_slice(&secret)
+        .map_err(|error| AppError::internal(format!("构造跨实例签名失败: {error}")))?;
+    mac.update(payload_b64.as_bytes());
+    let sig = hex::encode(mac.finalize().into_bytes());
+    Ok(format!("{payload_b64}.{sig}"))
+}
+
+#[derive(Deserialize)]
+pub struct CrossInstanceLoginRequest {
+    pub ticket: String,
+}
+
+pub async fn cross_instance_ticket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> ApiResult<Json<CrossInstanceTicketResponse>> {
+    let target_origin = headers
+        .get("X-WebClx-Target-Origin")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if !target_origin.starts_with("http://") && !target_origin.starts_with("https://") {
+        return Err(AppError::bad_request("目标服务器地址无效"));
+    }
+    let ticket = issue_cross_instance_ticket(target_origin, &headers, &state)?;
+    Ok(Json(CrossInstanceTicketResponse { ticket }))
+}
+
+#[derive(Serialize)]
+pub struct CrossInstanceTicketResponse {
+    pub ticket: String,
+}
+
+pub async fn cross_instance_login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CrossInstanceLoginRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let Some(secret) = cross_instance_trust_secret() else {
+        return Err(AppError::not_found("跨实例免登录未启用"));
+    };
+
+    let (payload_b64, sig_hex) = payload.ticket.split_once('.').ok_or_else(|| AppError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "跨实例凭证无效".to_string(),
+    })?;
+    let mut mac = HmacSha256::new_from_slice(&secret)
+        .map_err(|error| AppError::internal(format!("验证跨实例签名失败: {error}")))?;
+    mac.update(payload_b64.as_bytes());
+    let expected = mac.finalize().into_bytes();
+    let provided = hex::decode(sig_hex).map_err(|_| AppError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "跨实例凭证无效".to_string(),
+    })?;
+    if !bool::from(subtle::ConstantTimeEq::ct_eq(&provided[..], &expected[..])) {
+        return Err(AppError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "跨实例凭证无效".to_string(),
+        });
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD.decode(payload_b64).map_err(|_| AppError {
+        status: StatusCode::UNAUTHORIZED,
+        message: "跨实例凭证无效".to_string(),
+    })?;
+    let ticket: CrossInstanceTicketPayload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| AppError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "跨实例凭证无效".to_string(),
+        })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    let forwarded_proto = headers
+        .get("X-Forwarded-Proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    let request_origin = format!("{forwarded_proto}://{host}");
+    let listen_origin = format!("http://{}", state.listen_addr);
+    if ticket.exp <= now
+        || ticket.user.is_empty()
+        || (ticket.aud != request_origin && ticket.aud != listen_origin)
+    {
+        return Err(AppError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "跨实例凭证已过期或不适用于本服务器".to_string(),
+        });
+    }
+
+    let cookie_value = issue_session_cookie(&ticket.user, &state)?;
+    let ttl = session_ttl(&state.workspace_settings);
+    let mut headers = axum::http::HeaderMap::new();
+    append_session_cookie(&mut headers, &cookie_value, ttl.as_secs())?;
+    Ok((
+        headers,
+        Json(LoginResponse {
+            ok: true,
+            user: ticket.user,
+        }),
+    ))
 }
 
 fn load_or_create_credentials(app_dir: &Path) -> io::Result<LoginCredentials> {
@@ -259,6 +458,18 @@ fn write_private_json_atomic(path: &Path, value: &impl Serialize) -> io::Result<
     crate::private_file::write_atomic(path, &json)
 }
 
+fn store_credentials(app_dir: &Path, credentials: &LoginCredentials) -> io::Result<()> {
+    write_private_json_atomic(
+        &app_dir.join(CREDENTIALS_FILE_NAME),
+        &StoredCredentials {
+            version: CREDENTIALS_VERSION,
+            username: credentials.username.clone(),
+            salt: String::new(),
+            password_hash: credentials.password_hash.clone(),
+        },
+    )
+}
+
 fn password_hash_for_user(user: &str, state: &AppState) -> Result<Option<String>, AppError> {
     let creds = credentials(state)?;
     if !user.eq_ignore_ascii_case(&creds.username) {
@@ -273,7 +484,7 @@ struct SessionPayload {
     exp: u64,
 }
 
-fn issue_session_cookie(user: &str, state: &AppState) -> Result<String, AppError> {
+pub(crate) fn issue_session_cookie(user: &str, state: &AppState) -> Result<String, AppError> {
     let ttl = session_ttl(&state.workspace_settings);
     let exp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -287,7 +498,7 @@ fn issue_session_cookie(user: &str, state: &AppState) -> Result<String, AppError
     let payload_b64 = URL_SAFE_NO_PAD.encode(&payload_bytes);
     let secret = session_secret(state)
         .map_err(|error| AppError::internal(format!("加载会话密钥失败: {error}")))?;
-    let mut mac = HmacSha256::new_from_slice(secret)
+    let mut mac = HmacSha256::new_from_slice(&secret)
         .map_err(|error| AppError::internal(format!("构造会话签名失败: {error}")))?;
     mac.update(payload_b64.as_bytes());
     let sig = hex::encode(mac.finalize().into_bytes());
@@ -298,7 +509,8 @@ fn issue_session_cookie(user: &str, state: &AppState) -> Result<String, AppError
 pub fn verify_session_cookie(value: Option<&str>, state: &AppState) -> Option<String> {
     let value = value?;
     let (payload_b64, sig_hex) = value.split_once('.')?;
-    let mut mac = HmacSha256::new_from_slice(session_secret(state).ok()?).ok()?;
+    let secret = session_secret(state).ok()?;
+    let mut mac = HmacSha256::new_from_slice(&secret).ok()?;
     mac.update(payload_b64.as_bytes());
     let expected = mac.finalize().into_bytes();
     let provided = hex::decode(sig_hex).ok()?;
@@ -338,6 +550,100 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub ok: bool,
     pub user: String,
+}
+
+#[derive(Deserialize)]
+pub struct UpdatePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Serialize)]
+pub struct UpdatePasswordResponse {
+    pub ok: bool,
+    pub message: String,
+}
+
+pub async fn update_password(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdatePasswordRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if payload.current_password.is_empty() {
+        return Err(AppError::bad_request("请输入当前密码"));
+    }
+    if payload.new_password.is_empty() {
+        return Err(AppError::bad_request("新密码不能为空"));
+    }
+    if payload.current_password.len() > 4096 || payload.new_password.len() > 4096 {
+        return Err(AppError::bad_request("密码长度不能超过 4096 字节"));
+    }
+
+    let _update_guard = PASSWORD_UPDATE_LOCK.lock().await;
+    let current = credentials(&state)?;
+    let _verification_slot = LOGIN_VERIFICATION_SLOTS
+        .try_acquire()
+        .map_err(|_| AppError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "密码校验请求过多，请稍后重试".to_string(),
+        })?;
+    let current_password = payload.current_password;
+    let current_hash = current.password_hash.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        let parsed = PasswordHash::new(&current_hash)
+            .map_err(|error| format!("登录凭据格式无效: {error}"))?;
+        Ok::<bool, String>(
+            Argon2::default()
+                .verify_password(current_password.as_bytes(), &parsed)
+                .is_ok(),
+        )
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("密码校验任务失败: {error}")))?
+    .map_err(AppError::internal)?;
+    if !verified {
+        return Err(AppError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "当前密码错误".to_string(),
+        });
+    }
+
+    let new_password = payload.new_password;
+    let password_hash = tokio::task::spawn_blocking(move || hash_password_argon2(&new_password))
+        .await
+        .map_err(|error| AppError::internal(format!("密码哈希任务失败: {error}")))?
+        .map_err(|error| AppError::internal(format!("生成新密码哈希失败: {error}")))?;
+    let updated = LoginCredentials {
+        username: current.username,
+        password_hash,
+    };
+    store_credentials(&state.app_dir, &updated)
+        .map_err(|error| AppError::internal(format!("保存新登录凭据失败: {error}")))?;
+    *CREDENTIALS
+        .get()
+        .ok_or_else(|| AppError::internal("登录凭据尚未初始化"))?
+        .write()
+        .map_err(|_| AppError::internal("登录凭据锁已损坏"))? = updated;
+    remove_initial_password_file(&state.app_dir)
+        .map_err(|error| AppError::internal(format!("无法删除初始登录凭据: {error}")))?;
+
+    let secret = generate_session_secret();
+    crate::private_file::write_atomic(&state.app_dir.join(SECRET_FILE_NAME), &secret)
+        .map_err(|error| AppError::internal(format!("轮换会话密钥失败: {error}")))?;
+    *SESSION_SECRET
+        .get()
+        .ok_or_else(|| AppError::internal("会话密钥尚未初始化"))?
+        .write()
+        .map_err(|_| AppError::internal("会话密钥锁已损坏"))? = secret;
+
+    let mut headers = HeaderMap::new();
+    append_expired_session_cookie(&mut headers, SESSION_COOKIE_NAME)?;
+    Ok((
+        headers,
+        Json(UpdatePasswordResponse {
+            ok: true,
+            message: "WebUI 登录密码已更新，请重新登录。".to_string(),
+        }),
+    ))
 }
 
 pub async fn login(
@@ -435,6 +741,19 @@ pub async fn session_status(
     })
 }
 
+/// Nginx auth_request endpoint for sibling services on the same browser host.
+/// Unlike the normal auth middleware, loopback callers receive no exemption.
+pub async fn proxy_auth_check(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> StatusCode {
+    if verify_session_from_headers(&headers, &state).is_some() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::UNAUTHORIZED
+    }
+}
+
 fn session_cookie_values(headers: &HeaderMap) -> Vec<String> {
     let Some(raw) = headers.get(COOKIE).and_then(|value| value.to_str().ok()) else {
         return Vec::new();
@@ -500,6 +819,31 @@ mod tests {
         );
 
         assert_eq!(verify_session_from_headers(&headers, &state).as_deref(), Some("beyondcy"));
+    }
+
+    #[tokio::test]
+    async fn proxy_auth_check_requires_a_valid_signed_cookie() {
+        let state = test_state();
+
+        assert_eq!(
+            proxy_auth_check(State(state.clone()), HeaderMap::new()).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let mut local_token_headers = HeaderMap::new();
+        local_token_headers.insert(
+            axum::http::header::AUTHORIZATION,
+            "Bearer test-local-api-token".parse().unwrap(),
+        );
+        assert_eq!(
+            proxy_auth_check(State(state.clone()), local_token_headers).await,
+            StatusCode::UNAUTHORIZED
+        );
+
+        let valid = issue_session_cookie("beyondcy", &state).unwrap();
+        let mut cookie_headers = HeaderMap::new();
+        cookie_headers.insert(COOKIE, format!("{SESSION_COOKIE_NAME}={valid}").parse().unwrap());
+        assert_eq!(proxy_auth_check(State(state), cookie_headers).await, StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -595,6 +939,31 @@ mod tests {
 
         assert!(!initial_path.exists());
         remove_initial_password_file(&app_dir).unwrap();
+        std::fs::remove_dir_all(app_dir).unwrap();
+    }
+
+    #[test]
+    fn updated_credentials_are_persisted_as_argon2id_and_replace_the_old_password() {
+        let app_dir = unique_temp_dir("webclx-login-update-credentials-test");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let old_hash = hash_password_argon2("old-password").unwrap();
+        let updated = LoginCredentials {
+            username: "existing-user".to_string(),
+            password_hash: hash_password_argon2("new-password").unwrap(),
+        };
+
+        store_credentials(&app_dir, &updated).unwrap();
+
+        let stored = read_stored_credentials(&app_dir.join(CREDENTIALS_FILE_NAME))
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.version, CREDENTIALS_VERSION);
+        assert_eq!(stored.username, "existing-user");
+        assert!(is_valid_argon2id_hash(&stored.password_hash));
+        assert!(verify_password("new-password", &stored.password_hash));
+        assert!(!verify_password("old-password", &stored.password_hash));
+        assert_ne!(stored.password_hash, old_hash);
+        assert_eq!(private_file_mode(&app_dir.join(CREDENTIALS_FILE_NAME)), 0o600);
         std::fs::remove_dir_all(app_dir).unwrap();
     }
 
@@ -802,6 +1171,13 @@ mod tests {
             local_api_token: std::sync::Arc::from("test-local-api-token"),
             workspace_settings: settings::SettingsManager::load(&app_dir).unwrap(),
             auth_manager: auth::AuthPresetManager::load(&app_dir).unwrap(),
+            codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+                app_dir.clone(),
+                std::env::temp_dir(),
+            )
+            .unwrap(),
+            agy_manager: crate::agy::Manager::load(app_dir.clone(), std::env::temp_dir()),
+            devin_manager: crate::devin::DevinManager::load(app_dir.clone(), std::env::temp_dir()),
             codex_oauth_manager: auth::CodexOAuthManager::new(),
             codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
             proxy_manager: proxy::ProxyManager::load(&app_dir).unwrap(),
@@ -816,11 +1192,9 @@ mod tests {
             preset_test_scheduler: auth::PresetTestScheduler::new(
                 &app_dir.join(".webclx-terminal-sessions.json"),
             ),
-            preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-                app_dir.join(".webclx-preset-run-lease.json"),
-            ),
             agent_manager: crate::agent::AgentManager::new(&app_dir),
             agent_config: crate::agent::AgentConfigManager::new(&app_dir),
+            collaboration_manager: crate::collaboration::CollaborationManager::new(&app_dir),
         }
     }
 

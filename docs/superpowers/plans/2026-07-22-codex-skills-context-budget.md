@@ -162,7 +162,7 @@
 
 - [x] **Step 2: Smoke-test routing**
 
-  Confirm that representative prompts still select `webclx-compile-and-deploy`, `webclx-artifact-publisher`, `host-aliases`, `browser-qa`, `context-budget`, and `skill-bidirectional-sync`. Open fresh sessions in `/home/codes/stockScreener` and `/home/codes/kidsAI` and confirm their project-local skills remain discoverable even if their global aliases were archived.
+  Confirm that representative prompts still select `webclx-compile-and-deploy`, `webclx-artifact-publisher`, `host-aliases`, `browser-qa`, `context-budget`, and `skill-bidirectional-sync`. Open fresh sessions in `/home/codes/stock/stockScreener` and `/home/codes/apps/kidsAI` and confirm their project-local skills remain discoverable even if their global aliases were archived.
 
 - [x] **Step 3: Run final checks**
 

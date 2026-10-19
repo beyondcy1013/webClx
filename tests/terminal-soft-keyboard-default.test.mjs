@@ -38,4 +38,4 @@ assert.match(
 );
 assert.match(appHtml, /app-settings-event-bindings\.js\?v=20260730a/);
 assert.match(appHtml, /app\.js\?v=20260806a/);
-assert.match(terminalHtml, /terminal\.js\?v=20260810a/);
+assert.match(terminalHtml, /terminal\.js\?v=20260814a/);

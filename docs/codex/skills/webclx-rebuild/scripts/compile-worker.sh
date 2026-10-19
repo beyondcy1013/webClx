@@ -34,12 +34,13 @@ fi
 QUEUE_DIR=""
 WORK_DIR=""
 BASE_URL="http://127.0.0.1:11111"
-REPO_DIR="/home/codes/webClx"
+REPO_DIR="/home/codes/tools/webClx"
 QUIET_SECS=0
 COMMAND_TIMEOUT_SECS="${WEBCLX_COMMAND_TIMEOUT_SECS:-600}"
 MAX_CONCURRENCY="${WEBCLX_COMPILE_MAX_CONCURRENCY:-5}"
 CALLBACK_RETRY_COUNT="${WEBCLX_CALLBACK_RETRY_COUNT:-300}"
 CALLBACK_RETRY_MAX_TIME="${WEBCLX_CALLBACK_RETRY_MAX_TIME:-300}"
+TERMINAL_CALLBACK_HTTP_TIMEOUT="${WEBCLX_TERMINAL_CALLBACK_HTTP_TIMEOUT:-45}"
 
 local_token_file() {
   if [ -n "${WEBCLX_LOCAL_TOKEN_FILE:-}" ]; then
@@ -185,6 +186,9 @@ elif [ "$MAX_CONCURRENCY" -gt 32 ]; then
 fi
 if [[ ! "$CALLBACK_RETRY_COUNT" =~ ^[0-9]+$ ]] || [ "$CALLBACK_RETRY_COUNT" -lt 1 ]; then
   CALLBACK_RETRY_COUNT=300
+fi
+if [[ ! "$TERMINAL_CALLBACK_HTTP_TIMEOUT" =~ ^[0-9]+$ ]] || [ "$TERMINAL_CALLBACK_HTTP_TIMEOUT" -lt 30 ]; then
+  TERMINAL_CALLBACK_HTTP_TIMEOUT=45
 fi
 if [[ ! "$CALLBACK_RETRY_MAX_TIME" =~ ^[0-9]+$ ]] || [ "$CALLBACK_RETRY_MAX_TIME" -lt 1 ]; then
   CALLBACK_RETRY_MAX_TIME=300
@@ -633,6 +637,18 @@ count_requests() {
   find "$REQUESTS_DIR" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l
 }
 
+count_run_requests() {
+  local current_run_dir="$1"
+  local count=0 file request_id
+  while IFS= read -r -d '' file; do
+    request_id=$(json_get "$file" '.request_id')
+    if [ -n "$request_id" ]; then
+      count=$((count + 1))
+    fi
+  done < <(find "$current_run_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  printf '%s\n' "$count"
+}
+
 absorb_matching_pending_requests() {
   local selected_spec="$1"
   local destination_dir="$2"
@@ -773,6 +789,7 @@ notify_build_complete() {
     --noproxy '*' \
     --retry "$CALLBACK_RETRY_COUNT" \
     --retry-max-time "$CALLBACK_RETRY_MAX_TIME" \
+    --retry-all-errors \
     --retry-delay 1 \
     --retry-connrefused \
     "${LOCAL_AUTH_ARGS[@]}" \
@@ -836,25 +853,75 @@ notify_terminal() {
   local message_target_terminal_name="$1"
   local data="$2"
   local delivery_id="$3"
-  local payload response
+  local completed_build_request_id="$4"
+  local payload response callback_attempt=0 callback_deadline
   payload=$(jq -nc \
     --arg target "$message_target_terminal_name" \
     --arg data "$data" \
     --arg delivery_id "$delivery_id" \
-    '{target:$target,data:$data,submit:true,submit_enters:1,bracketed_paste:true,verify_submission:true,delivery_id:$delivery_id,completed_build_request_id:$delivery_id}')
-  refresh_local_auth_args
-  response=$(curl -fsS \
-    --noproxy '*' \
-    --retry "$CALLBACK_RETRY_COUNT" \
-    --retry-max-time "$CALLBACK_RETRY_MAX_TIME" \
-    --retry-delay 1 \
-    --retry-connrefused \
-    "${LOCAL_AUTH_ARGS[@]}" \
-    -H 'Content-Type: application/json' \
-    -X POST \
-    "$BASE_URL/api/terminal/sessions/message" \
-    -d "$payload") || return 1
-  printf '%s' "$response" | jq -e '.ok == true and .submitted == true' >/dev/null
+    --arg completed_build_request_id "$completed_build_request_id" \
+    '{target:$target,data:$data,submit:true,submit_enters:1,bracketed_paste:true,verify_submission:true,delivery_id:$delivery_id,completed_build_request_id:$completed_build_request_id}')
+  callback_deadline=$((SECONDS + CALLBACK_RETRY_MAX_TIME))
+  while :; do
+    # The service restart can rotate the loopback token. Refresh immediately
+    # before every attempt instead of letting curl reuse a stale header.
+    refresh_local_auth_args
+    if response=$(curl -fsS \
+      --noproxy '*' \
+      --connect-timeout 2 \
+      --max-time "$TERMINAL_CALLBACK_HTTP_TIMEOUT" \
+      "${LOCAL_AUTH_ARGS[@]}" \
+      -H 'Content-Type: application/json' \
+      -X POST \
+      "$BASE_URL/api/terminal/sessions/message" \
+      -d "$payload") \
+      && printf '%s' "$response" | jq -e '.ok == true and .submitted == true' >/dev/null; then
+      return 0
+    fi
+
+    callback_attempt=$((callback_attempt + 1))
+    if [ "$callback_attempt" -ge "$CALLBACK_RETRY_COUNT" ] || [ "$SECONDS" -ge "$callback_deadline" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+# Failure notifications must remain visible even when the Agent is in an error
+# state, has exited, or cannot append a new rollout record for verification.
+# This deliberately uses the plain PTY delivery contract; delivery itself is
+# the guarantee, not a Codex rollout acknowledgement.
+notify_terminal_unverified() {
+  local message_target_terminal_name="$1"
+  local data="$2"
+  local delivery_id="$3"
+  local payload response callback_attempt=0 callback_deadline
+  payload=$(jq -nc \
+    --arg target "$message_target_terminal_name" \
+    --arg data "$data" \
+    --arg delivery_id "$delivery_id" \
+    '{target:$target,data:$data,submit:true,submit_enters:1,bracketed_paste:true,verify_submission:false,delivery_id:$delivery_id}')
+  callback_deadline=$((SECONDS + CALLBACK_RETRY_MAX_TIME))
+  while :; do
+    refresh_local_auth_args
+    if response=$(curl -fsS \
+      --noproxy '*' \
+      --connect-timeout 2 \
+      --max-time "$TERMINAL_CALLBACK_HTTP_TIMEOUT" \
+      "${LOCAL_AUTH_ARGS[@]}" \
+      -H 'Content-Type: application/json' \
+      -X POST \
+      "$BASE_URL/api/terminal/sessions/message" \
+      -d "$payload") \
+      && printf '%s' "$response" | jq -e '.ok == true and .submitted == true' >/dev/null; then
+      return 0
+    fi
+    callback_attempt=$((callback_attempt + 1))
+    if [ "$callback_attempt" -ge "$CALLBACK_RETRY_COUNT" ] || [ "$SECONDS" -ge "$callback_deadline" ]; then
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 notify_terminal_toast() {
@@ -881,10 +948,46 @@ notify_terminal_toast() {
     -d "$payload" >/dev/null
 }
 
+compile_completion_delivery_id() {
+  printf '[webclx-callback:complete:%s]\n' "$1"
+}
+
+# External callback contract: an http(s):// source_terminal_name is a callback
+# URL (e.g. devin-inbox /webclx/callback), not a webClx terminal. The worker
+# POSTs the result JSON there instead of writing to a terminal input box; the
+# receiver delivers it into the agent session as a visible user message.
+notify_external_callback() {
+  local url="$1"
+  local payload="$2"
+  local response callback_attempt=0 callback_deadline
+  callback_deadline=$((SECONDS + CALLBACK_RETRY_MAX_TIME))
+  while :; do
+    # Any 2xx is a delivery. A JSON body with ok=false is a receiver-side
+    # rejection worth retrying; a body without ok (or no body) is accepted.
+    if response=$(curl -fsS \
+      --noproxy '*' \
+      --connect-timeout 2 \
+      --max-time "$TERMINAL_CALLBACK_HTTP_TIMEOUT" \
+      -H 'Content-Type: application/json' \
+      -X POST \
+      "$url" \
+      -d "$payload") \
+      && { [ -z "$response" ] || printf '%s' "$response" | jq -e 'if type == "object" then (.ok // true) else true end' >/dev/null 2>&1; }; then
+      return 0
+    fi
+
+    callback_attempt=$((callback_attempt + 1))
+    if [ "$callback_attempt" -ge "$CALLBACK_RETRY_COUNT" ] || [ "$SECONDS" -ge "$callback_deadline" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
 notify_request_file() {
   local file="$1"
-  local source_terminal_id source_terminal_name source_tmux_session tmux_derived_id notify_target request_id note spec key request_kind project project_dir project_path status started_at finished_at
-  local install_report request_log_file log_label report_label report_summary summary next_step run_context subject message toast_message toast_tone lock_key lock_file shown_started_at shown_finished_at is_noop_deploy notification_failed error_summary superseded_by
+  local source_terminal_id source_terminal_name source_tmux_session tmux_derived_id notify_target request_id delivery_id fallback_delivery_id final_message fallback_message note spec key request_kind project project_dir project_path status started_at finished_at
+  local install_report request_log_file log_label report_label report_summary summary next_step run_context subject message toast_message toast_tone lock_key lock_file shown_started_at shown_finished_at is_noop_deploy notification_failed error_summary superseded_by callback_state callback_payload
   source_terminal_id=$(json_get "$file" '.source_terminal_id')
   source_terminal_name=$(json_get "$file" '.source_terminal_name')
   source_tmux_session=$(json_get "$file" '.source_tmux_session')
@@ -1012,6 +1115,44 @@ notify_request_file() {
   if [ -n "$note" ]; then
     message="$message 原始备注：$note。"
   fi
+  delivery_id=$(compile_completion_delivery_id "$request_id")
+  fallback_delivery_id="[webclx-callback:unverified:${request_id}]"
+  final_message="${message} ${delivery_id}"
+  fallback_message="${message} ${fallback_delivery_id}"
+  if [[ "$notify_target" == http://* || "$notify_target" == https://* ]]; then
+    callback_state="failed"
+    if [ "$status" -eq 0 ]; then
+      if [ -n "$superseded_by" ]; then
+        callback_state="superseded"
+      else
+        callback_state="succeeded"
+      fi
+    elif [ -n "$timedout_label" ]; then
+      callback_state="timed_out"
+    fi
+    callback_payload=$(jq -nc \
+      --arg request_id "$request_id" \
+      --arg request_kind "$request_kind" \
+      --arg state "$callback_state" \
+      --arg project "$project" \
+      --arg project_path "$project_path" \
+      --arg project_dir "$project_dir" \
+      --argjson exit_status "$status" \
+      --arg message "$final_message" \
+      --arg query_url "$BASE_URL/api/build/compile/requests/$request_id" \
+      --arg log_path "$request_log_file" \
+      --arg install_report "$install_report" \
+      --arg superseded_by "$superseded_by" \
+      --arg started_at "$started_at" \
+      --arg finished_at "$finished_at" \
+      --arg note "$note" \
+      '{request_id:$request_id,request_kind:$request_kind,state:$state,project:$project,project_path:$project_path,project_dir:$project_dir,exit_status:$exit_status,message:$message,query_url:$query_url,log_path:$log_path,install_report:$install_report,superseded_by:$superseded_by,started_at:$started_at,finished_at:$finished_at,note:$note}')
+    if ! notify_external_callback "$notify_target" "$callback_payload"; then
+      echo "failed external callback source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name notify_target=$notify_target request=$request_id" >>"$log_file"
+      notification_failed=1
+    fi
+    return "$notification_failed"
+  fi
   lock_key=$(printf '%s' "$notify_target" | sha256sum | awk '{print $1}')
   lock_file="$run_dir/notify-$lock_key.lock"
   if ! (
@@ -1021,9 +1162,16 @@ notify_request_file() {
       echo "failed to notify source terminal toast source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name source_tmux_session=$source_tmux_session notify_target=$notify_target request=$request_id" >>"$log_file"
       callback_failed=1
     fi
-    if ! notify_terminal "$notify_target" "$message" "$request_id"; then
+    if ! notify_terminal "$notify_target" "$final_message" "$delivery_id" "$request_id"; then
       echo "failed to notify source terminal source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name source_tmux_session=$source_tmux_session notify_target=$notify_target request=$request_id" >>"$log_file"
-      callback_failed=1
+      # A failed build must still produce a visible terminal message. The
+      # verified path is preferred, but it must not suppress this fallback.
+      if notify_terminal_unverified "$notify_target" "$fallback_message" "$fallback_delivery_id"; then
+        printf '%s\n' "$(date '+%F %T')" >"$run_dir/notification-fallback-$key"
+      else
+        echo "failed fallback notification source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name source_tmux_session=$source_tmux_session notify_target=$notify_target request=$request_id" >>"$log_file"
+        callback_failed=1
+      fi
     fi
     exit "$callback_failed"
   ) 8>"$lock_file"; then
@@ -1487,7 +1635,7 @@ while true; do
   absorb_matching_pending_requests "$selected_spec" "$run_dir"
   flock -u 7
 
-  request_count=$(find "$run_dir" -maxdepth 1 -type f -name '*.json' | wc -l)
+  request_count=$(count_run_requests "$run_dir")
   if [ "$request_count" -eq 0 ]; then
     release_coalescing_lock
     continue
@@ -1580,7 +1728,7 @@ while true; do
     # deploy resources. Take one final snapshot before compilation starts.
     flock 7
     absorb_matching_pending_requests "$spec" "$run_dir"
-    request_count=$(find "$run_dir" -maxdepth 1 -type f -name '*.json' | wc -l)
+    request_count=$(count_run_requests "$run_dir")
     current_requested_at=0
     current_request_id=""
     while IFS= read -r -d '' request_file; do

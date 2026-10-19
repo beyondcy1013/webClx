@@ -3,6 +3,7 @@ function getInitialTab() {
   // Legacy hash URLs (#sessions, #settings/compile) still work for old bookmarks.
   const path = window.location.pathname.toLowerCase();
   const hash = window.location.hash.toLowerCase();
+  if (window.accountKindFromUrl?.()) return "api";
 
   if (
     path === "/workspace_history" ||
@@ -18,22 +19,23 @@ function getInitialTab() {
   if (path === "/archives" || hash === "#terminal-archives" || hash === "#archives") {
     return "terminal-archives";
   }
-  if (
-    path === "/codex_oauth" ||
-    path === "/auth" ||
-    hash === "#inspect" ||
-    hash === "#auth"
-  ) {
-    return "auth";
-  }
-  if (path === "/codex_api" || path === "/api" || hash === "#api") {
+  if (path === "/agy" || path === "/agy_auth" || hash === "#agy" || hash === "#agy_auth") {
+    // agy_auth 现在是 LLM_API 视图下的账号类型子页签。
     return "api";
   }
-  if (path === "/claude_api" || path === "/claude" || hash === "#claude") {
-    return "claude";
-  }
-  if (path === "/desktop" || hash === "#desktop") {
-    return "desktop";
+  if (
+    path === "/codex_api" ||
+    path === "/codex_oauth" ||
+    path === "/claude_api" ||
+    path === "/claude" ||
+    path === "/auth" ||
+    path === "/codex_api/oauth" ||
+    path === "/codex_api/api" ||
+    path === "/api" ||
+    hash === "#inspect" ||
+    hash === "#api"
+  ) {
+    return "api";
   }
   if (path.startsWith("/settings") || hash === "#settings" || hash.startsWith("#settings/")) {
     return "settings";
@@ -55,6 +57,7 @@ function getInitialSettingsTab() {
 }
 
 const WORKSPACE_HISTORY_STORAGE_KEY = "webclx:workspace-history";
+const WORKSPACE_HISTORY_SEARCH_HISTORY_STORAGE_KEY = "webclx:workspace-history-search-history";
 const WORKSPACE_HISTORY_MIGRATED_STORAGE_KEY = "webclx:workspace-history-config-migrated";
 const MAX_WORKSPACE_HISTORY_ITEMS = 50;
 const SESSION_VIEWS_REFRESH_DELAY_MS = 2000;
@@ -160,6 +163,7 @@ const {
   DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_FACTOR,
   DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
   DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
+  DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
   DEFAULT_TERMINAL_FAB_ACTION_COLOR,
   DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
   DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
@@ -167,6 +171,7 @@ const {
   DEFAULT_TERMINAL_QUICK_COMMANDS,
   DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
   DEFAULT_TERMINAL_RENAME_PRESETS,
+  DEFAULT_TERMINAL_AGENT_COMMANDS,
   DEFAULT_TERMINAL_SLASH_COMMANDS,
   DEFAULT_TERMINAL_COMMAND_COLLECTIONS,
   TERMINAL_TOOL_ACTION_TYPES,
@@ -185,6 +190,7 @@ const {
   cloneDefaultTerminalFunctionCommands,
   cloneDefaultTerminalQuickCommands,
   cloneDefaultTerminalCommandCollections,
+  cloneDefaultTerminalAgentCommands,
   ensureBuiltInTerminalFunctionCommands,
   ensureBuiltInTerminalSlashCommands,
   ensureBuiltInTerminalToolEntries,
@@ -212,6 +218,7 @@ const {
   normalizeTerminalQuickText,
   normalizeTerminalRenamePreset,
   normalizeTerminalRenamePresets,
+  normalizeTerminalAgentCommands,
   normalizeTerminalSoftKeyboardScale,
   normalizeTerminalScrollbackLines,
   normalizeTerminalTouchSelectionLongPressMs,
@@ -274,6 +281,7 @@ const DEFAULT_COMPILE_MAX_CONCURRENCY = 5;
 const DEFAULT_COMPILE_ENVIRONMENT = Object.freeze([]);
 const MAX_COMPILE_ENV_VARS = 64;
 const DEFAULT_SESSION_TTL_DAYS = 30;
+const DEFAULT_WEBUI_PASSWORD_MIN_LENGTH = 0;
 const DEFAULT_TERMINAL_ERROR_MATCH_LINE_LIMIT = 12;
 const DEFAULT_TERMINAL_COMPLETION_BELL_ENABLED = true;
 const PRESET_SYNC_SECTIONS = Object.freeze([
@@ -288,7 +296,9 @@ const PRESET_SYNC_PROXY_WARNING =
 const DEFAULT_TERMINAL_ERROR_KEYWORDS = Object.freeze([
   "stream disconnected before completion:",
   "Concurrency limit exceeded for user, please retry later",
+  "stream disconnected before completion: Our servers are currently overloaded. Please try again later.",
   "Selected model is at capacity. Please try a different model.",
+  "该模型当前访问量过大，请您稍后再试",
   "API Error: Request rejected (429)",
   "已达到 5 小时的使用上限",
   "sending request for url",
@@ -299,15 +309,17 @@ const DEFAULT_TERMINAL_ERROR_KEYWORDS = Object.freeze([
   "last status: 404",
   "unexpected status 502 Bad Gateway: Upstream service temporarily unavailable, url:",
   "429 Too Many Requests",
+  "unexpected status 503 Service Unavailable: Service temporarily unavailable,",
   "503 Service Unavailable",
   "404 Not Found",
+  "Server tool \\\"openrouter:web_search\\\" failed",
 ]);
 const TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE = "continue";
 const TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE = "compact_then_continue";
 const TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY = "mark_only";
 const TERMINAL_ERROR_KEYWORD_ACTION_LABELS = Object.freeze({
   [TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE]: "继续",
-  [TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE]: "先 /compact 再继续",
+  [TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE]: "仅发送 /compact",
   [TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY]: "仅标记错误",
 });
 const DEFAULT_TERMINAL_ERROR_KEYWORD_ACTIONS = Object.freeze([
@@ -341,10 +353,15 @@ function applyDocumentTitle(hostName = state.hostName) {
     : APP_TITLE_BASE;
 }
 
+const initialLocationSearchParams = new URLSearchParams(window.location.search);
+
 const state = {
-  currentPath: new URLSearchParams(window.location.search).get("path") || "",
+  currentPath: initialLocationSearchParams.get("path") || "",
+  initialWorkspacePathProvided: initialLocationSearchParams.has("path"),
+  initialReturnTerminalSessionId:
+    initialLocationSearchParams.get("terminal_session") || "",
   returnTerminalSessionId:
-    new URLSearchParams(window.location.search).get("terminal_session") || "",
+    initialLocationSearchParams.get("terminal_session") || "",
   currentFilePath: "",
   currentFileEditable: false,
   dirty: false,
@@ -364,6 +381,7 @@ const state = {
   terminalCommandCollections: normalizeTerminalCommandCollections(cloneDefaultTerminalCommandCollections()),
   terminalToolEntries: [],
   terminalRenamePresets: normalizeTerminalRenamePresets(DEFAULT_TERMINAL_RENAME_PRESETS),
+  terminalAgentCommands: cloneDefaultTerminalAgentCommands(),
   terminalQuickStartDefaultKey: DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
   terminalDefaultEnvVars: [],
   terminalShortcutExpandedGroups: { slash: false, function: false },
@@ -373,11 +391,13 @@ const state = {
   defaultTerminalCommandCollections: normalizeTerminalCommandCollections(cloneDefaultTerminalCommandCollections()),
   defaultTerminalToolEntries: [],
   defaultTerminalRenamePresets: normalizeTerminalRenamePresets(DEFAULT_TERMINAL_RENAME_PRESETS),
+  defaultTerminalAgentCommands: cloneDefaultTerminalAgentCommands(),
   defaultTerminalQuickStartDefaultKey: DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
   defaultTerminalDefaultEnvVars: [],
   terminalQuickEditingIndex: -1,
   showDotEntries: false,
   showAllWorkspaceSessions: true,
+  terminalNewSessionBehavior: "dialog",
   desktopTerminalSoftKeyboardEnabled: true,
   terminalSoftKeyboardScale: DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
   terminalFloatingButtonOffsetVh: DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
@@ -392,6 +412,7 @@ const state = {
   terminalAutoContinueBackoffMaxMinutes: DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
   terminalAutoContinueRespectManualInterrupt:
     DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
+  terminalAutoCompactSkipCodebuddy: DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
   terminalAutoContinueTimePatterns: [...DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS],
   terminalAutoContinueActiveWindow: "",
   terminalScheduledInputAvoidWindow: DEFAULT_TERMINAL_SCHEDULED_INPUT_AVOID_WINDOW,
@@ -404,6 +425,7 @@ const state = {
   compileMaxConcurrency: DEFAULT_COMPILE_MAX_CONCURRENCY,
   compileEnvironment: [],
   sessionTtlDays: DEFAULT_SESSION_TTL_DAYS,
+  webuiPasswordMinLength: DEFAULT_WEBUI_PASSWORD_MIN_LENGTH,
   favoritePaths: [],
   claudeModelOptions: [...DEFAULT_CLAUDE_MODEL_OPTIONS],
   claudeDefaultConfigEntries: cloneDefaultClaudeDefaultConfigEntries(),
@@ -416,6 +438,9 @@ const state = {
   showFullPath: DEFAULT_SHOW_FULL_PATH,
   workspaceBrowserIconPath: DEFAULT_WORKSPACE_BROWSER_ICON_PATH,
   terminalWorkspaceIconPath: DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
+  terminalGroupManagerEmoji: "👑",
+  terminalGroupExecutorEmojiMode: "random",
+  terminalGroupExecutorEmoji: "⚙️",
   themeMode: readStoredThemeMode(),
   fontSizeTiers: [...DEFAULT_FONT_SIZE_TIERS],
   proxyPresets: [],
@@ -466,6 +491,9 @@ const state = {
   apiPresetTestResults: new Map(),
   apiPresetsTesting: new Set(),
   claudePresets: [],
+  claudePresetGroupMode: "base_url",
+  claudePresetSearchTerm: "",
+  claudePresetSelectionMode: false,
   claudePresetExportSelection: new Set(),
   claudePresetsLoaded: false,
   claudePresetsLoading: false,
@@ -474,8 +502,6 @@ const state = {
   remotePresetConfigSummary: null,
   remotePresetConfigSourceUrl: "",
   presetSyncRemoteUrlHistory: [],
-  desktopRemoteUrl: "",
-  desktopRemoteUrlHistory: [],
   upstreamProxy: {
     codex_api_proxy_enabled: false,
     claude_proxy_enabled: false,
@@ -505,7 +531,14 @@ const state = {
   workspaceHistorySearchToken: 0,
   workspaceHistorySearchDebounceId: 0,
   workspaceHistorySettingsReady: false,
- workspaceHistorySearchAllWorkspaces: false,
+  workspaceHistoryLoadState: "idle",
+  workspaceHistoryLoadCompleted: 0,
+  workspaceHistoryLoadTotal: 0,
+  workspaceHistoryLoadItemCount: 0,
+  workspaceHistoryLoadCurrent: "",
+  workspaceHistoryLoadPending: [],
+  workspaceHistoryLoadError: "",
+  workspaceHistorySearchAllWorkspaces: false,
   workspaceHistoryRecentOnly: true,
  sessionRequestToken: 0,
   terminalArchiveRequestToken: 0,
@@ -533,13 +566,19 @@ const terminalLink = document.getElementById("open-terminal-root");
 const directorySessionListEl = document.getElementById("directory-session-list");
 const workspaceHistoryViewEl = document.getElementById("workspace-history-view");
 const workspaceHistoryStatusEl = document.getElementById("workspace-history-status");
+const workspaceHistoryProgressPanelEl = document.getElementById("workspace-history-progress-panel");
+const workspaceHistoryCurrentWorkEl = document.getElementById("workspace-history-current-work");
+const workspaceHistoryProgressLabelEl = document.getElementById("workspace-history-progress-label");
+const workspaceHistoryProgressEl = document.getElementById("workspace-history-progress");
 const workspaceHistoryListEl = document.getElementById("workspace-history-list");
+const workspaceHistoryPathCopyButton = document.getElementById("copy-workspace-history-path");
 const workspaceHistoryPathSelectEl = document.getElementById("workspace-history-path-select");
 const workspaceHistoryTerminalButton = document.getElementById("workspace-history-terminal");
 const workspaceHistoryDeleteButton = document.getElementById("workspace-history-delete");
 const workspaceHistoryRefreshButton = document.getElementById("workspace-history-refresh");
 const workspaceHistorySearchFormEl = document.getElementById("workspace-history-search-form");
 const workspaceHistorySearchInputEl = document.getElementById("workspace-history-search-input");
+const workspaceHistorySearchHistoryEl = document.getElementById("workspace-history-search-history");
 const workspaceHistorySearchSubmitButton = document.getElementById("workspace-history-search-submit");
 const workspaceHistorySearchClearButton = document.getElementById("workspace-history-search-clear");
 const workspaceHistorySearchAllEl = document.getElementById("workspace-history-search-all");
@@ -569,27 +608,25 @@ const authImportFormEl = document.getElementById("auth-import-form");
 const authImportTextEl = document.getElementById("auth-import-text");
 const authImportCancelButton = document.getElementById("auth-import-cancel");
 const authOauthStartButton = document.getElementById("auth-oauth-start");
+const authOauthBrowserStartButton = document.getElementById("auth-oauth-browser-start");
+const authOauthExchangeButton = document.getElementById("auth-oauth-exchange");
+const authOauthCallbackInputEl = document.getElementById("auth-oauth-callback");
+const authOauthCallbackFieldEl = document.getElementById("auth-oauth-callback-field");
 const authOauthOpenLinkEl = document.getElementById("auth-oauth-open-link");
 const authOauthCopyCodeButton = document.getElementById("auth-oauth-copy-code");
 const authOauthSessionPanelEl = document.getElementById("auth-oauth-session-panel");
 const authOauthSessionSummaryEl = document.getElementById("auth-oauth-session-summary");
 const authOauthUserCodeEl = document.getElementById("auth-oauth-user-code");
+const authOauthUrlContainerEl = document.getElementById("auth-oauth-url-container");
+const authOauthUrlDisplayEl = document.getElementById("auth-oauth-url-display");
+const authOauthOpenUrlEl = document.getElementById("auth-oauth-open-url");
+const authOauthCopyUrlButton = document.getElementById("auth-oauth-copy-url");
 const authOauthStatusEl = document.getElementById("auth-oauth-status");
 const tabButtons = document.querySelectorAll(".tab-button[data-tab]");
 const workspaceViewEl = document.getElementById("workspace-view");
 const authViewEl = document.getElementById("auth-view");
 const apiViewEl = document.getElementById("api-view");
-const claudeViewEl = document.getElementById("claude-view");
 const settingsViewEl = document.getElementById("settings-view");
-const desktopViewEl = document.getElementById("desktop-view");
-const desktopFrameEl = document.getElementById("desktop-frame");
-const desktopReloadButtonEl = document.getElementById("desktop-reload");
-const desktopUrlInputEl = document.getElementById("desktop-url-input");
-const desktopUrlHistoryEl = document.getElementById("desktop-url-history");
-const desktopApplyUrlButtonEl = document.getElementById("desktop-apply-url");
-const desktopOpenButtonEl = document.getElementById("desktop-open-button");
-const desktopFallbackUrlEl = document.getElementById("desktop-fallback-url");
-const desktopFallbackOpenEl = document.getElementById("desktop-fallback-open");
 const settingsCategoryButtons = document.querySelectorAll(
   ".settings-category-button[data-settings-category]",
 );
@@ -604,6 +641,7 @@ const compileCommandTimeoutInputEl = document.getElementById("compile-command-ti
 const compileMaxConcurrencyInputEl = document.getElementById("compile-max-concurrency-input");
 const compileEnvironmentInputEl = document.getElementById("compile-environment-input");
 const sessionTtlDaysInputEl = document.getElementById("session-ttl-days-input");
+const webuiPasswordMinLengthInputEl = document.getElementById("webui-password-min-length-input");
 const workspaceDirInputEl = document.getElementById("workspace-dir-input");
 const terminalUserSelectEl = document.getElementById("terminal-user-select");
 const terminalQuickCommandsListEl = document.getElementById("terminal-quick-commands-list");
@@ -634,9 +672,13 @@ const terminalCommandCollectionAddBtnEl = document.getElementById("terminal-comm
 const terminalShortcutsListEl = document.getElementById("terminal-shortcuts-list");
 const terminalShortcutsResetButtonEl = document.getElementById("terminal-shortcuts-reset");
 const terminalRenamePresetsInputEl = document.getElementById("terminal-rename-presets-input");
+const terminalAgentCommandsInputEl = document.getElementById("terminal-agent-commands-input");
 const showDotEntriesInputEl = document.getElementById("show-dot-entries-input");
 const workspaceShowHiddenInputEl = document.getElementById("workspace-show-hidden-input");
 const showAllWorkspaceSessionsInputEl = document.getElementById("show-all-workspace-sessions-input");
+const terminalNewSessionBehaviorInputEl = document.getElementById(
+  "terminal-new-session-behavior-input",
+);
 const desktopTerminalSoftKeyboardInputEl = document.getElementById(
   "desktop-terminal-soft-keyboard-input",
 );
@@ -677,6 +719,9 @@ const terminalAutoContinueBackoffMaxMinutesInputEl = document.getElementById(
 const terminalAutoContinueRespectManualInterruptInputEl = document.getElementById(
   "terminal-auto-continue-respect-manual-interrupt-input",
 );
+const terminalAutoCompactSkipCodebuddyInputEl = document.getElementById(
+  "terminal-auto-compact-skip-codebuddy-input",
+);
 const terminalAutoContinueTimePatternsInputEl = document.getElementById(
   "terminal-auto-continue-time-patterns-input",
 );
@@ -713,10 +758,21 @@ const codexCommonApprovalNeverInputEl = document.getElementById("codex-common-ap
 const codexCommonSandboxFullAccessInputEl = document.getElementById(
   "codex-common-sandbox-full-access",
 );
+const codexCommonAnimationsDisabledInputEl = document.getElementById(
+  "codex-common-animations-disabled",
+);
+const codexCommonAltScreenDisabledInputEl = document.getElementById(
+  "codex-common-alt-screen-disabled",
+);
+const codexCommonDaemonDisabledInputEl = document.getElementById("codex-common-daemon-disabled");
 const codexCommonConfigPathEl = document.getElementById("codex-common-config-path");
 const codexCommonConfigRefreshButtonEl = document.getElementById("codex-common-config-refresh");
 const codexCommonConfigSaveButtonEl = document.getElementById("codex-common-config-save");
 const codexCommonConfigStatusEl = document.getElementById("codex-common-config-status");
+const codexGlobalSettingsOpenButtonEl = document.getElementById("codex-global-settings-open");
+const claudeGlobalSettingsOpenButtonEl = document.getElementById("claude-global-settings-open");
+const codexGlobalSettingsDialogEl = document.getElementById("codex-global-settings-dialog");
+const codexGlobalSettingsCloseButtonEl = document.getElementById("codex-global-settings-close");
 const settingsConfigFileSelectEl = document.getElementById("settings-config-file-select");
 const settingsConfigFilePathEl = document.getElementById("settings-config-file-path");
 const settingsConfigFileMetaEl = document.getElementById("settings-config-file-meta");
@@ -731,6 +787,10 @@ const workspaceBrowserIconPathInputEl = document.getElementById(
 const terminalWorkspaceIconPathInputEl = document.getElementById(
   "terminal-workspace-icon-path-input",
 );
+const terminalGroupManagerEmojiInputEl = document.getElementById("terminal-group-manager-emoji-input");
+const terminalGroupExecutorEmojiModeEl = document.getElementById("terminal-group-executor-emoji-mode");
+const terminalGroupExecutorEmojiInputEl = document.getElementById("terminal-group-executor-emoji-input");
+const terminalGroupExecutorEmojiFieldEl = document.getElementById("terminal-group-executor-emoji-field");
 const presetSyncRemoteUrlInputEl = document.getElementById("preset-sync-remote-url");
 const presetSyncRemoteUrlHistoryEl = document.getElementById("preset-sync-remote-url-history");
 const presetSyncPreviewBtnEl = document.getElementById("preset-sync-preview-btn");
@@ -984,6 +1044,11 @@ const systemProxyAllInputEl = document.getElementById("system-proxy-all-input");
 const systemProxyNoInputEl = document.getElementById("system-proxy-no-input");
 const systemSaveProxyBtnEl = document.getElementById("system-save-proxy-btn");
 const systemClearProxyBtnEl = document.getElementById("system-clear-proxy-btn");
+const webuiCurrentPasswordInputEl = document.getElementById("webui-current-password-input");
+const webuiNewPasswordInputEl = document.getElementById("webui-new-password-input");
+const webuiConfirmPasswordInputEl = document.getElementById("webui-confirm-password-input");
+const webuiSavePasswordBtnEl = document.getElementById("webui-save-password-btn");
+const webuiPasswordStatusEl = document.getElementById("webui-password-status");
 const authCurrentFileEl = document.getElementById("auth-current-file");
 const authCurrentAccountEl = document.getElementById("auth-current-account");
 const authConfigFileEl = document.getElementById("auth-config-file");
@@ -998,18 +1063,6 @@ const authImportFileButton = document.getElementById("auth-import-file-button");
 const authImportFileInputEl = document.getElementById("auth-import-file");
 const authClipboardImportButton = document.getElementById("auth-clipboard-import");
 const authClipboardExportButton = document.getElementById("auth-clipboard-export");
-const apiAccountImportFileButton = document.getElementById("api-account-import-file-button");
-const apiAccountImportFileInputEl = document.getElementById("api-account-import-file");
-const apiAccountImportTextButton = document.getElementById("api-account-import-text-button");
-const apiAccountImportDialogEl = document.getElementById("api-account-import-dialog");
-const apiAccountImportFormEl = document.getElementById("api-account-import-form");
-const apiAccountImportTextEl = document.getElementById("api-account-import-text");
-const apiAccountImportCancelButton = document.getElementById("api-account-import-cancel");
-const apiAccountImportSubmitButton = document.getElementById("api-account-import-submit");
-const apiAccountImportStatusEl = document.getElementById("api-account-import-dialog-status");
-const apiAccountImportInlineStatusEl = document.getElementById("api-account-import-status");
-const apiClipboardImportButton = document.getElementById("api-clipboard-import");
-const apiClipboardExportButton = document.getElementById("api-clipboard-export");
 const authSavePresetButton = document.getElementById("auth-save-preset");
 const authSaveAsNewPresetButton = document.getElementById("auth-save-as-new-preset");
 const authApplyEditedPresetButton = document.getElementById("auth-apply-edited-preset");
@@ -1018,14 +1071,10 @@ const authRefreshAllQuotaButton = document.getElementById("auth-refresh-all-quot
 const authTestAllPresetsButton = document.getElementById("auth-test-all-presets");
 const authFormStatusEl = document.getElementById("auth-form-status");
 const authPresetListEl = document.getElementById("auth-preset-list");
-const apiManagerStatusEl = document.getElementById("api-manager-status");
 const apiCurrentFileEl = document.getElementById("api-current-file");
 const apiConfigFileEl = document.getElementById("api-config-file");
 const apiCurrentTargetEl = document.getElementById("api-current-target");
 const apiPresetFileEl = document.getElementById("api-preset-file");
-const apiPresetGroupModeInputEl = document.getElementById("api-preset-group-mode");
-const apiPresetSearchInputEl = document.getElementById("api-preset-search");
-const apiPresetSelectionModeButtonEl = document.getElementById("api-preset-selection-mode");
 const apiPresetNameEl = document.getElementById("api-preset-name");
 const apiPresetRowNumberEl = document.getElementById("api-preset-row-number");
 const apiConfigOverridesDetailsEl = document.getElementById("api-config-overrides-details");
@@ -1046,20 +1095,22 @@ const apiApplyUpstreamProxyOnSwitchInputEl = document.getElementById("api-apply-
 const apiTerminalStartupDetailsEl = document.getElementById("api-terminal-startup-details");
 const apiTerminalEnvInputEl = document.getElementById("api-terminal-env-input");
 const apiTerminalStartupScriptInputEl = document.getElementById("api-terminal-startup-script-input");
-const apiAddPresetButton = document.getElementById("api-add-preset");
 const apiPresetEditorPanelEl = document.getElementById("api-preset-editor-panel");
+const apiPresetEditorModeLabelEl = document.getElementById("api-preset-editor-mode-label");
 const apiSavePresetButton = document.getElementById("api-save-preset");
 const apiSaveAsNewPresetButton = document.getElementById("api-save-as-new-preset");
 const apiApplyEditedPresetButton = document.getElementById("api-apply-edited-preset");
 const apiClearInputButton = document.getElementById("api-clear-input");
-const apiTestAllPresetsButton = document.getElementById("api-test-all-presets");
 const apiFormStatusEl = document.getElementById("api-form-status");
-const apiPresetListEl = document.getElementById("api-preset-list");
-const apiPresetMobileListEl = document.getElementById("api-preset-mobile-list");
 const claudeManagerStatusEl = document.getElementById("claude-manager-status");
 const claudeCurrentFileEl = document.getElementById("claude-current-file");
 const claudeCurrentTargetEl = document.getElementById("claude-current-target");
 const claudePresetFileEl = document.getElementById("claude-preset-file");
+const claudePresetGroupModeInputEl = document.getElementById("claude-preset-group-mode");
+const claudePresetSearchInputEl = document.getElementById("claude-preset-search");
+const claudePresetSelectionModeButtonEl = document.getElementById("claude-preset-selection-mode");
+const claudeAddPresetButton = document.getElementById("claude-add-preset");
+const claudePresetEditorPanelEl = document.getElementById("claude-preset-editor-panel");
 const claudeProviderNameInputEl = document.getElementById("claude-provider-name-input");
 const claudeAuthTokenInputEl = document.getElementById("claude-auth-token-input");
 const claudeBaseUrlInputEl = document.getElementById("claude-base-url-input");
@@ -1086,6 +1137,7 @@ const claudeClipboardImportButton = document.getElementById("claude-clipboard-im
 const claudeClipboardExportButton = document.getElementById("claude-clipboard-export");
 const claudeFormStatusEl = document.getElementById("claude-form-status");
 const claudePresetListEl = document.getElementById("claude-preset-list");
+const claudePresetMobileListEl = document.getElementById("claude-preset-mobile-list");
 const claudeUpstreamProxyToggleEl = document.getElementById("claude-upstream-proxy-toggle");
 const claudeAccessModeInputEl = document.getElementById("claude-access-mode-input");
 const authApplyInputButton = document.getElementById("auth-apply-input");
@@ -1356,13 +1408,13 @@ function renderCurrentPath(
   currentPathEl.appendChild(fragment);
 }
 
-async function copyCurrentPath(button) {
-  const path = normalizeAbsolutePath(state.currentDirectory?.display_path || state.workspaceDir || "/");
+async function copyDirectoryPath(path, button, statusElement = fileStatusEl) {
+  const normalizedPath = normalizeAbsolutePath(path || "/");
   let copied = false;
 
   if (navigator.clipboard?.writeText) {
     try {
-      await navigator.clipboard.writeText(path);
+      await navigator.clipboard.writeText(normalizedPath);
       copied = true;
     } catch {
       // Some browsers only allow execCommand while handling the original click.
@@ -1371,7 +1423,7 @@ async function copyCurrentPath(button) {
 
   if (!copied) {
     const textarea = document.createElement("textarea");
-    textarea.value = path;
+    textarea.value = normalizedPath;
     textarea.setAttribute("readonly", "true");
     textarea.style.position = "fixed";
     textarea.style.opacity = "0";
@@ -1398,13 +1450,87 @@ async function copyCurrentPath(button) {
         }
       }, 1200);
     }
-    updateStatus(fileStatusEl, `已复制当前路径：${path}`, "ok");
+    updateStatus(statusElement, `已复制当前路径：${normalizedPath}`, "ok");
     showToast("已复制当前路径。", "ok", 2000);
   } else {
-    updateStatus(fileStatusEl, "复制当前路径失败，请手动选择路径复制。", "warn");
+    updateStatus(statusElement, "复制当前路径失败，请手动选择路径复制。", "warn");
     showToast("复制当前路径失败。", "warn", 4000);
   }
   return copied;
+}
+
+async function copyApiPresetFieldFromLabel(label) {
+  const field = label?.closest("label.field");
+  const input = field?.querySelector(
+    'input:not([type="checkbox"]):not([type="radio"]), textarea',
+  );
+  if (!input) return false;
+
+  const value = String(input.value || "");
+  const fieldName = label.textContent.trim();
+  if (!value) {
+    updateStatus(apiFormStatusEl, `当前${fieldName}没有可复制的内容。`, "muted");
+    return false;
+  }
+
+  let copied = false;
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(value);
+      copied = true;
+    } catch {
+      // Fall through to the synchronous browser fallback.
+    }
+  }
+  if (!copied) {
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      copied = Boolean(document.execCommand?.("copy"));
+    } catch {
+      copied = false;
+    } finally {
+      textarea.remove();
+    }
+  }
+
+  updateStatus(
+    apiFormStatusEl,
+    copied ? `已复制${fieldName}内容。` : `复制${fieldName}失败，请手动选择内容复制。`,
+    copied ? "ok" : "warn",
+  );
+  if (copied) showToast(`已复制${fieldName}内容。`, "ok", 2000);
+  return copied;
+}
+
+function bindApiPresetLabelCopy() {
+  if (!apiPresetEditorPanelEl || apiPresetEditorPanelEl.dataset.labelCopyBound === "true") return;
+  apiPresetEditorPanelEl.dataset.labelCopyBound = "true";
+  apiPresetEditorPanelEl.addEventListener("click", (event) => {
+    const label = event.target.closest(".field-label");
+    if (!label || !apiPresetEditorPanelEl.contains(label)) return;
+    void copyApiPresetFieldFromLabel(label);
+  });
+}
+
+async function copyCurrentPath(button) {
+  const path = state.currentDirectory?.display_path || state.workspaceDir || "/";
+  return copyDirectoryPath(path, button, fileStatusEl);
+}
+
+async function copyWorkspaceHistoryPath(button) {
+  const path = workspaceHistorySelectedPath();
+  if (!path) {
+    updateStatus(workspaceHistoryStatusEl, "当前没有可复制的历史工作区目录。", "warn");
+    showToast("当前没有可复制的目录。", "warn", 3000);
+    return false;
+  }
+  return copyDirectoryPath(path, button, workspaceHistoryStatusEl);
 }
 
 function redirectToLogin() {
@@ -1674,7 +1800,14 @@ async function renameFreshTerminalForRestore(session, requestedPath, terminalNam
 
 async function openFreshTerminalSession(
   path,
-  { runCommand = "", quickStart = !runCommand, terminalName = "" } = {},
+  {
+    runCommand = "",
+    quickStart = !runCommand,
+    terminalName = "",
+    origin = "normal",
+    ownerKey = "",
+    codexApiPresetId = "",
+  } = {},
 ) {
   const requestedPath = String(path || "").trim().startsWith("/")
     ? normalizeAbsolutePath(path)
@@ -1683,14 +1816,11 @@ async function openFreshTerminalSession(
 
   let session;
   try {
-    session = await requestJson("/api/terminal/sessions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        path: requestedPath,
-      }),
+    session = await WebClxNewTerminal.createSession(requestJson, {
+      path: requestedPath,
+      origin,
+      ownerKey,
+      codexApiPresetId,
     });
   } catch {
     window.location.assign(
@@ -1721,6 +1851,18 @@ async function openFreshTerminalSession(
       runCommand: command,
     }),
   );
+  return session;
+}
+
+function openNewTerminal(path, trigger = null) {
+  return WebClxNewTerminal.openWithBehavior({
+    behavior: state.terminalNewSessionBehavior,
+    openDialog: () => openTerminalNewSessionDialog(trigger, path, {
+      launchTerminal: openFreshTerminalSession,
+      updatePageStatus: showToast,
+    }),
+    createDirect: () => openFreshTerminalSession(path),
+  });
 }
 
 function openFreshTerminalLink(event, path) {
@@ -1729,7 +1871,7 @@ function openFreshTerminalLink(event, path) {
   }
 
   event.preventDefault();
-  openFreshTerminalSession(path);
+  openNewTerminal(path, event.currentTarget);
 }
 
 function openFreshTerminalRunLink(event, path, command, {
@@ -1857,12 +1999,6 @@ async function performRemoteCopy() {
 }
 
 if (remoteCopyDialogEl) {
-  remoteCopyDialogEl.addEventListener("click", (event) => {
-    if (event.target === remoteCopyDialogEl) {
-      closeRemoteCopyDialog();
-    }
-  });
-
   document.getElementById("remote-copy-cancel")?.addEventListener("click", () => {
     closeRemoteCopyDialog();
   });
@@ -2156,8 +2292,20 @@ function startAuthOauthSession() {
   return authManager.startAuthOauthSession();
 }
 
+function startAuthBrowserOauthSession() {
+  return authManager.startAuthBrowserOauthSession();
+}
+
+function exchangeAuthBrowserOauthSession() {
+  return authManager.exchangeAuthBrowserOauthSession();
+}
+
 function copyAuthOauthUserCode() {
   return authManager.copyAuthOauthUserCode();
+}
+
+function copyAuthOauthAuthorizeUrl() {
+  return authManager.copyAuthOauthAuthorizeUrl();
 }
 
 function refreshAllAuthPresetQuotas() {
@@ -2178,9 +2326,11 @@ bindSettingsEventHandlers();
 
 bindPresetFormEventHandlers();
 
-bindDesktopFrameEvents();
-
 function init() {
+  document.addEventListener("webclx:terminal-role-emoji-changed", () => {
+    if (typeof renderSessions === "function") renderSessions();
+  });
+  bindApiPresetLabelCopy();
   enhanceWorkspaceIconSelect(directorySessionListEl, () => state.terminalWorkspaceIconPath);
   enhanceWorkspaceIconSelect(sessionsSessionListEl, () => state.terminalWorkspaceIconPath);
   if (systemLogoutBtnEl) {
@@ -2207,8 +2357,8 @@ function init() {
 
   loadSettings()
     .then(async () => {
+      await refreshCurrentWorkspaceDirectoryFromTerminal({ restoreWorkspacePath: true });
       await loadDirectory();
-      await refreshCurrentWorkspaceDirectoryFromTerminal();
     })
     .catch((error) => {
       console.error("init failed:", error);
@@ -2217,6 +2367,7 @@ function init() {
   function applyUrlTab() {
     const tab = getInitialTab();
     const settingsTab = getInitialSettingsTab();
+    window.applyAccountKindFromUrl?.();
     if (state.activeTab !== tab) {
       setActiveTab(tab);
     }
@@ -2237,4 +2388,65 @@ if (document.readyState === "loading") {
   init();
 }
 
-bindUpdateEventHandlers();
+// sub2api manager wiring
+(function () {
+  const sub2apiOpenButton = document.getElementById("sub2api-manager-open-button");
+
+  function requestJsonShim(url, options = {}) {
+    return fetch(url, {
+      credentials: "same-origin",
+      ...options,
+    }).then(async (response) => {
+      const text = await response.text();
+      let data;
+      try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+      if (!response.ok) {
+        throw new Error(data?.message || data?.error || `HTTP ${response.status}`);
+      }
+      return data;
+    });
+  }
+
+  function updateStatusShim(element, message, tone) {
+    if (!element) return;
+    element.textContent = message;
+    element.dataset.tone = tone || "muted";
+    element.hidden = !message;
+  }
+
+  if (window.sub2apiManager && typeof window.sub2apiManager.init === "function") {
+    window.sub2apiManager.init({
+      requestJson: requestJsonShim,
+      updateStatus: updateStatusShim,
+      sub2apiManagerDialogEl: document.getElementById("sub2api-manager-dialog"),
+      sub2apiManagerFormEl: document.getElementById("sub2api-manager-form"),
+      sub2apiProfileSelectEl: document.getElementById("sub2api-profile-select"),
+      sub2apiBaseUrlInputEl: document.getElementById("sub2api-base-url"),
+      sub2apiEmailInputEl: document.getElementById("sub2api-email"),
+      sub2apiPasswordInputEl: document.getElementById("sub2api-password"),
+      sub2apiTotpSectionEl: document.getElementById("sub2api-totp-section"),
+      sub2apiTotpCodeInputEl: document.getElementById("sub2api-totp-code"),
+      sub2apiTempTokenInputEl: document.getElementById("sub2api-temp-token"),
+      sub2apiConnectButtonEl: document.getElementById("sub2api-connect-button"),
+      sub2apiManagerStatusEl: document.getElementById("sub2api-manager-status"),
+      sub2apiAccountsSectionEl: document.getElementById("sub2api-accounts-section"),
+      sub2apiAccountListEl: document.getElementById("sub2api-account-list"),
+      sub2apiImportSelectedButtonEl: document.getElementById("sub2api-import-selected"),
+      sub2apiManagerCancelButtonEl: document.getElementById("sub2api-manager-cancel"),
+    });
+    window.sub2apiManager.bindEvents();
+
+    if (sub2apiOpenButton) {
+      sub2apiOpenButton.addEventListener("click", () => window.sub2apiManager.open());
+    }
+    const codexSub2apiButton = document.getElementById("codex-account-sub2api");
+    if (codexSub2apiButton) {
+      codexSub2apiButton.addEventListener("click", () => window.sub2apiManager.open());
+    }
+    const sub2apiAutoActivateButton = document.getElementById("sub2api-auto-activate");
+    if (sub2apiAutoActivateButton && window.sub2apiManager?.handleAutoActivate) {
+      sub2apiAutoActivateButton.addEventListener("click", () => window.sub2apiManager.handleAutoActivate());
+    }
+
+  }
+})();

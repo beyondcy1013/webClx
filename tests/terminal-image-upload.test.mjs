@@ -11,26 +11,26 @@ const androidMain = readFileSync(
 
 assert.match(
   terminalHtml,
-  /id="terminal-function-command-menu"[\s\S]*id="terminal-image-upload-button"[\s\S]*data-action="upload_terminal_image"[\s\S]*>上传图片<\/button>[\s\S]*id="terminal-image-upload-input"[\s\S]*type="file"[\s\S]*accept="image\/png,image\/jpeg,image\/gif,image\/webp,image\/bmp"[\s\S]*multiple/,
-  "the all-purpose command menu should expose a multi-image picker",
+  /id="terminal-function-command-menu"[\s\S]*id="terminal-file-upload-button"[\s\S]*data-action="upload_terminal_file"[\s\S]*>上传文件<\/button>[\s\S]*id="terminal-file-upload-input"[\s\S]*type="file"[\s\S]*multiple/,
+  "the all-purpose command menu should expose a multi-file picker",
 );
 
 assert.match(
   terminalJs,
-  /button\.dataset\.action === "upload_terminal_image"[\s\S]*closeTerminalFunctionCommandMenu\(\);[\s\S]*openTerminalImageUploadPicker\(\)/,
+  /button\.dataset\.action === "upload_terminal_file"[\s\S]*closeTerminalFunctionCommandMenu\(\);[\s\S]*openTerminalFileUploadPicker\(\)/,
   "the upload command should close the menu and open the shared file picker",
 );
 
 assert.match(
   terminalJs,
-  /async function handleTerminalImageUploadSelection\(\)[\s\S]*terminalImageUploadInputEl\?\.files[\s\S]*pasteTerminalPartsDirectly\([\s\S]*type: "images", blobs: files[\s\S]*progressMessage: "正在上传所选图片…"/,
-  "selected images should reuse the terminal paste upload path",
+  /async function handleTerminalFileUploadSelection\(\)[\s\S]*terminalFileUploadInputEl\?\.files[\s\S]*pasteTerminalPartsDirectly\([\s\S]*type: "files", blobs: files[\s\S]*progressMessage: "正在上传所选文件…"/,
+  "selected files should reuse the terminal paste upload path",
 );
 
 assert.match(
   terminalJs,
-  /terminalImageUploadInputEl\.addEventListener\("change", handleTerminalImageUploadSelection\)/,
-  "the picker should upload after a client selection",
+  /terminalFileUploadInputEl\.addEventListener\("change", handleTerminalFileUploadSelection\)/,
+  "the file picker should upload after a client selection",
 );
 
 assert.match(

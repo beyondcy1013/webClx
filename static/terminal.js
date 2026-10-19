@@ -3,8 +3,13 @@ const LEGACY_IDLE_SESSION_STORAGE_KEY = "webclx:idle-terminal-sessions";
 const TERMINAL_PATH_EXPANDED_STORAGE_KEY = "webclx:terminal-path-expanded";
 const TERMINAL_WIDE_MODE_STORAGE_KEY = "webclx:terminal-wide-mode";
 const TERMINAL_AUTO_CONTINUE_STORAGE_KEY = "webclx:terminal-auto-continue-on-error";
+const TERMINAL_AUTO_COMPACT_STORAGE_KEY = "webclx:terminal-auto-compact-sessions";
+const TERMINAL_AUTO_COMPACT_STATUS_STORAGE_KEY = "webclx:terminal-auto-compact-status";
+const TERMINAL_AUTO_COMPACT_LAST_SENT_STORAGE_KEY = "webclx:terminal-auto-compact-last-sent";
+const TERMINAL_SESSION_REFLOW_STORAGE_KEY = "webclx:terminal-session-reflow-sessions";
 const TERMINAL_SESSION_DETAILS_STORAGE_KEY = "webclx:terminal-session-details";
 const TERMINAL_SESSION_AGENT_STORAGE_KEY = "webclx:terminal-session-agent";
+const TERMINAL_SESSION_CONTEXT_STORAGE_KEY = "webclx:terminal-session-context";
 const TERMINAL_AUTO_CONTINUE_SCHEDULE_ACK_STORAGE_KEY =
   "webclx:terminal-auto-continue-schedule-acks";
 // Legacy localStorage keys kept only for stale cross-tab cancel broadcasts.
@@ -42,6 +47,7 @@ const {
   DEFAULT_TERMINAL_QUICK_COMMANDS,
   DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
   DEFAULT_TERMINAL_RENAME_PRESETS,
+  DEFAULT_TERMINAL_AGENT_COMMANDS,
   DEFAULT_TERMINAL_SLASH_COMMANDS,
   DEFAULT_TERMINAL_COMMAND_COLLECTIONS,
   TERMINAL_TOOL_ACTION_TYPES,
@@ -56,6 +62,7 @@ const {
   THEME_MODE_STORAGE_KEY,
   cloneDefaultTerminalFunctionCommands,
   cloneDefaultTerminalCommandCollections,
+  cloneDefaultTerminalAgentCommands,
   ensureBuiltInTerminalFunctionCommands,
   ensureBuiltInTerminalSlashCommands,
   ensureBuiltInTerminalToolEntries,
@@ -76,6 +83,7 @@ const {
   normalizeTerminalQuickText,
   normalizeTerminalRenamePreset,
   normalizeTerminalRenamePresets,
+  normalizeTerminalAgentCommands,
   normalizeTerminalSoftKeyboardScale,
   normalizeTerminalScrollbackLines,
   normalizeTerminalTouchSelectionLongPressMs,
@@ -186,6 +194,22 @@ function storeTerminalSessionAgent(enabled) {
   }
 }
 
+function readStoredTerminalSessionContext() {
+  try {
+    return window.localStorage.getItem(TERMINAL_SESSION_CONTEXT_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function storeTerminalSessionContext(enabled) {
+  try {
+    window.localStorage.setItem(TERMINAL_SESSION_CONTEXT_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Keep the toggle usable when storage is unavailable.
+  }
+}
+
 function applyDocumentTitle(hostName = state.hostName) {
   const normalizedHostName = normalizeHostName(hostName);
   document.title = normalizedHostName
@@ -207,6 +231,145 @@ function storeTerminalAutoContinueOnError(enabled) {
   } catch {
     // Keep the runtime toggle active even if persistence is unavailable.
   }
+}
+
+function readStoredTerminalAutoCompactSessionIds() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TERMINAL_AUTO_COMPACT_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeTerminalAutoCompactSessionIds(sessionIds) {
+  try {
+    window.localStorage.setItem(TERMINAL_AUTO_COMPACT_STORAGE_KEY, JSON.stringify(Array.from(sessionIds)));
+  } catch {
+    // Keep the runtime toggle usable when storage is unavailable.
+  }
+}
+
+function readStoredTerminalSessionReflowIds() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TERMINAL_SESSION_REFLOW_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeTerminalSessionReflowIds(sessionIds) {
+  try {
+    window.localStorage.setItem(
+      TERMINAL_SESSION_REFLOW_STORAGE_KEY,
+      JSON.stringify(Array.from(sessionIds)),
+    );
+  } catch {
+    // Keep the current terminal usable when storage is unavailable.
+  }
+}
+
+function readStoredTerminalAutoCompactStatusSessionIds() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TERMINAL_AUTO_COMPACT_STATUS_STORAGE_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function storeTerminalAutoCompactStatusSessionIds(sessionIds) {
+  try {
+    window.localStorage.setItem(TERMINAL_AUTO_COMPACT_STATUS_STORAGE_KEY, JSON.stringify(Array.from(sessionIds)));
+  } catch {
+    // Keep status display usable when storage is unavailable.
+  }
+}
+
+function readStoredTerminalAutoCompactLastSent() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TERMINAL_AUTO_COMPACT_LAST_SENT_STORAGE_KEY) || "{}");
+    const entries = Object.entries(parsed && typeof parsed === "object" ? parsed : {});
+    return new Map(entries.filter(([, value]) => value && typeof value === "object"));
+  } catch {
+    return new Map();
+  }
+}
+
+function storeTerminalAutoCompactLastSent(lastSent) {
+  try {
+    window.localStorage.setItem(
+      TERMINAL_AUTO_COMPACT_LAST_SENT_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(lastSent)),
+    );
+  } catch {
+    // Keep the runtime guard active when storage is unavailable.
+  }
+}
+
+function syncAutoCompactToggleForActiveSession() {
+  if (!sessionAutoCompactToggleEl) return;
+  const sessionId = String(state.activeSessionId || "");
+  const session = state.sessions.find((item) => item?.id === sessionId);
+  const allowed = Boolean(sessionId && isSessionCompactCapableAgent(session));
+  sessionAutoCompactToggleEl.checked = Boolean(allowed && state.autoCompactSessionIds.has(sessionId));
+  sessionAutoCompactToggleEl.disabled = !allowed;
+  sessionAutoCompactToggleEl.title = allowed ? "" : "此智能体禁止由 webClx 发送 /compact。";
+}
+
+function setAutoCompactForActiveSession(enabled) {
+  const sessionId = String(state.activeSessionId || "");
+  if (!sessionId) return;
+  if (enabled && !terminalCompactCommandAllowed("/compact", sessionId)) {
+    syncAutoCompactToggleForActiveSession();
+    return;
+  }
+  if (enabled) state.autoCompactSessionIds.add(sessionId);
+  else {
+    state.autoCompactSessionIds.delete(sessionId);
+    state.autoCompactHandledSessions.delete(sessionId);
+    state.autoCompactLastSent.delete(sessionId);
+    state.terminalUserInputAt.delete(sessionId);
+    storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+    state.autoCompactStatusSessionIds.delete(sessionId);
+    storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
+  }
+  const scheduledTimer = state.autoCompactScheduledTimers.get(sessionId);
+  if (scheduledTimer) {
+    window.clearTimeout(scheduledTimer);
+    state.autoCompactScheduledTimers.delete(sessionId);
+  }
+  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
+  syncAutoCompactToggleForActiveSession();
+  if (enabled) maybeAutoCompactCompletedSessions();
+}
+
+function enableAutoCompactForSession(sessionId) {
+  const normalizedId = String(sessionId || "").trim();
+  if (!normalizedId) return;
+  state.autoCompactSessionIds.add(normalizedId);
+  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
+  syncAutoCompactToggleForActiveSession();
+}
+
+function disableAutoCompactForSession(sessionId) {
+  const normalizedId = String(sessionId || "").trim();
+  if (!normalizedId) return;
+  state.autoCompactSessionIds.delete(normalizedId);
+  state.autoCompactHandledSessions.delete(normalizedId);
+  state.autoCompactLastSent.delete(normalizedId);
+  state.terminalUserInputAt.delete(normalizedId);
+  storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+  state.autoCompactStatusSessionIds.delete(normalizedId);
+  const scheduledTimer = state.autoCompactScheduledTimers.get(normalizedId);
+  if (scheduledTimer) {
+    window.clearTimeout(scheduledTimer);
+    state.autoCompactScheduledTimers.delete(normalizedId);
+  }
+  storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
+  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
+  syncAutoCompactToggleForActiveSession();
 }
 
 async function persistTerminalAutoContinueOnError(enabled) {
@@ -300,8 +463,11 @@ const state = {
   pendingSessionRefresh: null,
   hasConnectedOnce: false,
   workspaceDir: "",
+  workspaceHistory: [],
+  favoritePaths: [],
   currentPath: initialLocation.path,
   showAllWorkspaceSessions: true,
+  terminalNewSessionBehavior: "dialog",
   terminalWorkspaceIconPath: DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
   resumeArchives: [],
   legacyIdleMigrationAttempted: false,
@@ -322,16 +488,30 @@ const state = {
   terminalCommandCollections: normalizeTerminalCommandCollections(cloneDefaultTerminalCommandCollections()),
   terminalToolEntries: [],
   terminalRenamePresets: normalizeTerminalRenamePresets(DEFAULT_TERMINAL_RENAME_PRESETS),
+  terminalAgentCommands: cloneDefaultTerminalAgentCommands(),
   terminalQuickStartDefaultKey: DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY,
   terminalActivityAgentDisplay: DEFAULT_TERMINAL_ACTIVITY_AGENT_DISPLAY,
   terminalAutoContinueIntervalSeconds: DEFAULT_TERMINAL_AUTO_CONTINUE_INTERVAL_SECONDS,
   terminalCompletionBellEnabled: true,
   terminalWideMode: readStoredTerminalWideMode(),
+  terminalSessionReflowIds: readStoredTerminalSessionReflowIds(),
   showSessionDetails: readStoredTerminalSessionDetails(),
   showSessionAgent: readStoredTerminalSessionAgent(),
+  showSessionContext: readStoredTerminalSessionContext(),
+  sessionContextCache: new Map(),
   autoContinueOnError: readStoredTerminalAutoContinueOnError(),
   autoContinueHandledErrors: new Map(),
   autoContinueScheduledTimers: new Map(),
+  autoCompactSessionIds: readStoredTerminalAutoCompactSessionIds(),
+  autoCompactHandledSessions: new Set(),
+  autoCompactScheduledTimers: new Map(),
+  autoCompactStatusSessionIds: readStoredTerminalAutoCompactStatusSessionIds(),
+  autoCompactCompactingSessionIds: new Set(),
+  terminalUserInputAt: new Map(),
+  // The auto-typed /compact command is intentionally not echoed into the
+  // terminal history. Keep its output position so a compact completion cannot
+  // immediately look like a fresh "待查看" event.
+  autoCompactLastSent: readStoredTerminalAutoCompactLastSent(),
   completionSoundPreviousStates: new Map(),
   completionSoundBaselineReady: false,
   creatingSession: false,
@@ -347,11 +527,14 @@ const state = {
 
 const statusEl = document.getElementById("terminal-status");
 const terminalPathEl = document.getElementById("terminal-path");
+const currentTerminalNameCopyButton = document.getElementById("copy-current-terminal-name");
 const sessionSelectEl = document.getElementById("session-switcher");
 const agentSessionSelectEl = document.getElementById("agent-session-switcher");
 const sessionDetailToggleEl = document.getElementById("session-detail-toggle");
 const sessionAgentToggleEl = document.getElementById("session-agent-toggle");
+const sessionContextToggleEl = document.getElementById("session-context-toggle");
 const sessionAutoContinueToggleEl = document.getElementById("session-auto-continue-toggle");
+const sessionAutoCompactToggleEl = document.getElementById("session-auto-compact-toggle");
 const terminalSessionSortButtonEl = document.getElementById("terminal-sort-directory-sessions");
 const navigateBackButton = document.getElementById("navigate-back");
 const terminalWorkflowsButton = document.getElementById("terminal-workflows-button");
@@ -359,10 +542,12 @@ const navigateForwardButton = document.getElementById("navigate-forward");
 const renameSessionButton = document.getElementById("rename-session");
 const pasteClipboardButton = document.getElementById("paste-clipboard");
 const createSessionButton = document.getElementById("create-session");
+const saveExperienceSessionButton = document.getElementById("save-experience-session");
 const deleteSessionButton = document.getElementById("delete-session");
 const idleSessionButton = document.getElementById("idle-session");
 const archiveResumeButton = document.getElementById("archive-resume");
 const idleSessionSelectEl = document.getElementById("idle-session-select");
+const hiddenSessionSelectEl = document.getElementById("hidden-session-select");
 const terminalNavToggleButton = document.getElementById("toggle-terminal-path");
 const sessionRenameDialogEl = document.getElementById("terminal-rename-dialog");
 const sessionRenameFormEl = document.getElementById("session-rename-form");
@@ -370,7 +555,24 @@ const sessionRenameInputEl = document.getElementById("session-rename-input");
 const sessionRenamePresetsEl = document.getElementById("session-rename-presets");
 const sessionRenameCancelButton = document.getElementById("session-rename-cancel");
 const terminalRenameDialogStatusEl = document.getElementById("terminal-rename-dialog-status");
-
+const terminalGroupDialogEl = document.getElementById("terminal-group-dialog");
+const terminalGroupFormEl = document.getElementById("terminal-group-form");
+const terminalGroupSessionListEl = document.getElementById("terminal-group-session-list");
+const terminalGroupCancelButton = document.getElementById("terminal-group-cancel");
+const terminalGroupDialogStatusEl = document.getElementById("terminal-group-dialog-status");
+const terminalGroupMoveUpButton = document.getElementById("terminal-group-move-up");
+const terminalGroupMoveDownButton = document.getElementById("terminal-group-move-down");
+const terminalGroupFixedOrderEl = document.getElementById("terminal-group-fixed-order");
+const terminalGroupNameEl = document.getElementById("terminal-group-name");
+const terminalGroupColorEl = document.getElementById("terminal-group-color");
+const terminalGroupColorValueEl = document.getElementById("terminal-group-color-value");
+const terminalGroupSortTabs = Array.from(document.querySelectorAll(".terminal-group-sort-tab"));
+const terminalGroupManagerDialog = document.getElementById("terminal-group-manager-dialog");
+const terminalGroupManagerForm = document.getElementById("terminal-group-manager-form");
+const terminalGroupManagerTarget = document.getElementById("terminal-group-manager-target");
+const terminalGroupManagerInput = document.getElementById("terminal-group-manager-rename-input");
+const terminalGroupManagerStatus = document.getElementById("terminal-group-manager-status");
+const terminalGroupManagerCancelButton = document.getElementById("terminal-group-manager-cancel");
 function syncCreateSessionButton() {
   if (!createSessionButton) {
     return;
@@ -401,6 +603,7 @@ const scrollTerminalBottomButton = document.getElementById("scroll-terminal-bott
 const scrollTerminalTopButton = document.getElementById("scroll-terminal-top");
 const terminalInputHistoryButton = document.getElementById("terminal-input-history-button");
 const terminalSoftKeyboardToggleButton = document.getElementById("terminal-soft-keyboard-toggle");
+const terminalOrientationToggleButton = document.getElementById("terminal-orientation-toggle");
 const terminalScheduleButton = document.getElementById("terminal-schedule-button");
 const terminalAgentsDocDialogEl = document.getElementById("terminal-agents-doc-dialog");
 const terminalAgentsDocFormEl = document.getElementById("terminal-agents-doc-form");
@@ -423,6 +626,7 @@ const terminalInputHistoryStatusEl = document.getElementById("terminal-input-his
 const terminalInputHistoryCopyButton = document.getElementById("terminal-input-history-copy");
 const terminalInputHistoryCloseButton = document.getElementById("terminal-input-history-close");
 const terminalPasteDialogEl = document.getElementById("terminal-paste-dialog");
+const terminalScheduledTasksDialogEl = document.getElementById("terminal-scheduled-tasks-dialog");
 const terminalPasteFormEl = document.getElementById("terminal-paste-form");
 const terminalPasteTextEl = document.getElementById("terminal-paste-text");
 const terminalPasteCancelButton = document.getElementById("terminal-paste-cancel");
@@ -444,6 +648,8 @@ const terminalSelectionStartHandle = document.getElementById("terminal-selection
 const terminalSelectionEndHandle = document.getElementById("terminal-selection-end-handle");
 const terminalContextMenuEl = document.getElementById("terminal-context-menu");
 const terminalContextCopyAllButton = document.getElementById("terminal-context-copy-all");
+const terminalContextSelectAllButton = document.getElementById("terminal-context-select-all");
+const terminalContextAgentPromptButton = document.getElementById("terminal-context-agent-prompt");
 const terminalQuickCommandButtonsEl = document.getElementById("terminal-quick-command-buttons");
 const terminalEscapeCommandButtonEl = document.getElementById("terminal-escape-command-button");
 const terminalSlashCommandButtonEl = document.getElementById("terminal-slash-command-button");
@@ -486,6 +692,7 @@ const terminalQuotaPresetSelectEl = document.getElementById("terminal-quota-pres
 const terminalQuotaSaveConfigBtnEl = document.getElementById("terminal-quota-save-config");
 const terminalQuotaConfigStatusEl = document.getElementById("terminal-quota-config-status");
 const terminalQuotaDefaultProviderEl = document.getElementById("terminal-quota-default-provider");
+const terminalQuotaCustomPresetSelectEl = document.getElementById("terminal-quota-custom-preset-select");
 const terminalQuotaKeySelectEl = document.getElementById("terminal-quota-key-select");
 const terminalQuotaKeyStatusEl = document.getElementById("terminal-quota-key-status");
 
@@ -506,7 +713,7 @@ const MOBILE_KEY_SEQUENCES = {
   home: "\u001b[H",
   end: "\u001b[F",
   ctrl_a: "\u0001",
-  ctrl_e: "\u0005",
+  ctrl_t: "\u0014",
   page_up: "\u001b[5~",
   page_down: "\u001b[6~",
 };
@@ -636,6 +843,17 @@ const terminalTouchSelectionPolicy = globalThis.WebClxTerminalTouchSelectionPoli
     };
   },
 };
+const terminalReportFilter = globalThis.WebClxTerminalReportFilter || {
+  isTerminalReportSequence: () => false,
+};
+
+// Terminal layout helpers are loaded before terminal.js, but the first sync
+// happens while the host still has its CSS fallback height. Re-run it once
+// after all terminal modules have initialized so the minimum-height floor is
+// reflected in the runtime variable used by fit and resize paths.
+window.requestAnimationFrame(() => {
+  syncTerminalHostHeight();
+});
 
 let socket = null;
 let reconnectTimer = null;
@@ -669,8 +887,6 @@ let terminalSwitchPlaceholderEl = null;
 let terminalOutputQueue = [];
 let terminalOutputWriteInFlight = false;
 let terminalOutputWriteId = 0;
-let terminalInputQueue = [];
-let terminalInputFlushTimer = null;
 let pendingTerminalSize = null;
 let terminalSizeFlushTimer = null;
 let terminalSizeSettleTimer = null;
@@ -725,6 +941,11 @@ function insertOrReplaceSession(session) {
   state.sessions = sortSessionsByRecentActivity(nextSessions);
 }
 
+function isHiddenSession(sessionId) {
+  const session = state.sessions.find((item) => item.id === sessionId);
+  return Boolean(session?.hidden);
+}
+
 function isIdleSession(sessionId) {
   const session = state.sessions.find((item) => item.id === sessionId);
   return Boolean(session?.idle);
@@ -742,16 +963,34 @@ function readLegacyIdleSessionIds() {
 }
 
 function visibleSessions() {
-  return state.sessions.filter((session) => !isIdleSession(session.id));
+  return state.sessions.filter((session) => !isIdleSession(session.id) && !isHiddenSession(session.id));
 }
 
 function idleSessions() {
-  return state.sessions.filter((session) => isIdleSession(session.id));
+  return state.sessions.filter((session) => isIdleSession(session.id) && !isHiddenSession(session.id));
+}
+
+function hiddenSessions() {
+  return state.sessions.filter((session) => isHiddenSession(session.id));
 }
 
 function updateSessionIdleState(sessionId, idle) {
+  const source = state.sessions.find((session) => session.id === sessionId);
+  const groupToken = String(source?.group_token || "");
+  if (idle && groupToken) {
+    state.sessions = state.sessions.map((session) => (
+      session.group_token === groupToken ? { ...session, idle: true } : session
+    ));
+    return;
+  }
   state.sessions = state.sessions.map((session) =>
     session.id === sessionId ? { ...session, idle: Boolean(idle) } : session,
+  );
+}
+
+function updateSessionHiddenState(sessionId, hidden) {
+  state.sessions = state.sessions.map((session) =>
+    session.id === sessionId ? { ...session, hidden: Boolean(hidden), idle: false } : session,
   );
 }
 
@@ -804,26 +1043,34 @@ function markSessionOpenedLocally(sessionId) {
   }
 
   const openedAt = Date.now();
-  state.sessions = sortSessionsByRecentActivity(
-    state.sessions.map((session) => {
-      if (session.id !== sessionId) {
-        return session;
-      }
+  if (state.autoCompactStatusSessionIds?.delete(sessionId)) {
+    storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
+  }
+  state.autoCompactCompactingSessionIds?.delete(sessionId);
+  state.sessions = state.sessions.map((session) => {
+    if (session.id !== sessionId) {
+      return session;
+    }
 
-      const viewedSession = sharedSessionAfterOutputViewed(session);
-      return {
-        ...viewedSession,
-        last_opened_at: Math.max(
-          openedAt,
-          sessionTimestamp(session, "last_opened_at", "lastOpenedAt"),
-          sessionTimestamp(session, "created_at", "createdAt"),
-        ),
-      };
-    }),
-  );
+    const viewedSession = sharedSessionAfterOutputViewed(session);
+    return {
+      ...viewedSession,
+      last_opened_at: Math.max(
+        openedAt,
+        sessionTimestamp(session, "last_opened_at", "lastOpenedAt"),
+        sessionTimestamp(session, "created_at", "createdAt"),
+      ),
+    };
+  });
 }
 
 function sessionActivityState(session) {
+  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
+    return "compacting";
+  }
+  if (session?.id && state.autoCompactStatusSessionIds.has(session.id)) {
+    return "compacted";
+  }
   return sharedSessionActivityState(session);
 }
 
@@ -884,7 +1131,17 @@ function maybePlayTerminalCompletionSound(sessions) {
 }
 
 function sessionActivityLabel(session) {
-  return sharedSessionActivityLabel(session);
+  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
+    return "压缩中";
+  }
+  if (session?.id && state.autoCompactStatusSessionIds.has(session.id)) {
+    return "已压缩";
+  }
+  const label = sharedSessionActivityLabel(session);
+  if (session?.id === state.activeSessionId && label === "待查看") {
+    return "空闲";
+  }
+  return label;
 }
 
 function sessionActivityAgentLabel(session) {
@@ -900,11 +1157,14 @@ function sessionActivityAgentSuffix(session) {
 }
 
 function isSessionBusy(session) {
+  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
+    return true;
+  }
   return sharedIsSessionBusy(session);
 }
 
 function sessionActivityPrefix(session) {
-  return sharedTerminalSessionActivityPrefix(session);
+  return `[${sessionActivityLabel(session)}] `;
 }
 
 function sessionErrorContinueKey(session) {
@@ -973,6 +1233,9 @@ function scheduleSessionActivityRefresh(delayMs = TERMINAL_SESSION_ACTIVITY_REFR
       preferredSessionId: state.activeSessionId,
       preserveCurrentList: true,
     }).finally(() => {
+      if (state.showSessionContext && typeof refreshSessionsContext === "function") {
+        refreshSessionsContext();
+      }
       scheduleSessionActivityRefresh();
     });
   }, delayMs);
@@ -1000,6 +1263,9 @@ function markSessionDropdownInteracting() {
     sessionDropdownFlushTimer = null;
   }
   sessionDropdownInteracting = true;
+  if (typeof scheduleTerminalBackgroundPreconnect === "function") {
+    scheduleTerminalBackgroundPreconnect();
+  }
   restartPendingSessionEventRefresh();
 }
 
@@ -1137,7 +1403,9 @@ syncTerminalImePolicy();
 
 installTerminalProgrammaticFocusGate();
 installTerminalDialogFocusGate();
+installTerminalDialogCloseRecovery();
 document.addEventListener("pointerdown", guardTerminalActionEditableFocus, true);
+document.addEventListener("mousedown", guardTerminalActionEditableFocus, true);
 document.addEventListener("click", guardTerminalActionEditableFocus, true);
 document.addEventListener("focusin", rejectTerminalActionEditableFocus, true);
 
@@ -1148,7 +1416,11 @@ document.addEventListener("focusin", rejectTerminalActionEditableFocus, true);
 // a <select> change event on iOS/Android where focus may transfer to the
 // previously focused helper textarea).
 document.addEventListener("focusin", (event) => {
-  if (!terminalSoftKeyboardVisible() || terminalSystemImeEnabled) {
+  if (
+    !terminalSoftKeyboardVisible() ||
+    terminalSystemImeEnabled ||
+    terminalSessionSwitchFocusInProgress
+  ) {
     return;
   }
   const helper = terminalHelperTextarea();
@@ -1220,6 +1492,16 @@ function registerTerminalInstanceEventHandlers(context = activeTerminalContext) 
       if (!filtered) {
         return;
       }
+      if (terminalReportFilter.isTerminalReportSequence(filtered)) {
+        // xterm.js answers queries and focus-report modes found in replayed
+        // output. Those replies are stale, must not reach the Agent, and must
+        // never be mistaken for user input that cuts the backlog replay short.
+        if (terminalInitialReplaySettled(context)) {
+          sendTerminalInput(filtered, { terminalReport: true, flush: true });
+        }
+        return;
+      }
+      state.terminalUserInputAt.set(context.sessionId, Date.now());
       if (maybeHandleNewSessionQuickStartInput(filtered)) {
         return;
       }
@@ -1270,6 +1552,15 @@ terminalHost.addEventListener("touchcancel", (event) => {
   }
 });
 terminalHost.addEventListener("contextmenu", handleTerminalContextMenuSelection);
+// xterm.js converts wheel input into injected up/down arrow keys while a TUI
+// owns the alternate buffer, which made the Codex/Claude input box flip
+// through history on wheel scroll. Intercept at the host boundary in capture
+// phase before xterm sees the event (see terminal-output-scroll.js).
+terminalHost.addEventListener("wheel", blockTerminalAlternateBufferWheelHistory, {
+  passive: false,
+  capture: true,
+});
+
 document.addEventListener("pointerdown", closeTerminalContextMenuFromOutside, true);
 document.addEventListener("keydown", handleTerminalContextMenuKeydown, true);
 window.addEventListener("blur", closeTerminalContextMenu);
@@ -1426,7 +1717,10 @@ if (terminalCommandCollectionsMenuEl && terminalCommandCollectionsBtnEl) {
 
 terminalToolMenuBodyEl?.addEventListener("click", handleTerminalToolMenuClick);
 terminalToolMenuBackEl?.addEventListener("click", navigateTerminalToolMenuBack);
+document.getElementById("terminal-tool-search")?.addEventListener("input", handleTerminalToolSearch);
 bindTerminalSpecifiedTaskDialog();
+bindTerminalFutureTasksDialog();
+bindTerminalWorkspaceRestoresDialog();
 
 if (terminalQuotaRefreshBtnEl) {
   terminalQuotaRefreshBtnEl.addEventListener("click", () => {
@@ -1528,8 +1822,70 @@ async function copyTerminalAllText() {
   }
 }
 
+async function copyTerminalContextText() {
+  const selection = typeof term?.getSelection === "function" ? term.getSelection() : "";
+  if (selection) {
+    closeTerminalContextMenu();
+    const copied = await copyTextToClipboard(selection);
+    updateStatus(
+      copied ? "已复制选中内容。" : "复制选中内容失败，请手动复制。",
+      copied ? "ok" : "warn",
+    );
+    if (copied) {
+      term.clearSelection?.();
+      syncTerminalSelectionControls();
+      focusTerminalIfAllowed();
+    }
+    return;
+  }
+
+  await copyTerminalAllText();
+}
+
 if (terminalContextCopyAllButton) {
-  terminalContextCopyAllButton.addEventListener("click", copyTerminalAllText);
+  terminalContextCopyAllButton.addEventListener("click", async () => {
+    if (await copyTerminalContextMenuSelection()) {
+      return;
+    }
+    await copyTerminalContextText();
+  });
+}
+
+if (terminalContextSelectAllButton) {
+  terminalContextSelectAllButton.addEventListener("click", () => {
+    closeTerminalContextMenu();
+    if (typeof term?.selectAll === "function") {
+      term.selectAll();
+      syncTerminalSelectionControls();
+      updateStatus("已全选终端文本。", "ok");
+    }
+    focusTerminalIfAllowed();
+  });
+}
+
+if (terminalContextAgentPromptButton) {
+  terminalContextAgentPromptButton.addEventListener("click", async () => {
+    const selection = typeof term?.getSelection === "function" ? String(term.getSelection() || "") : "";
+    closeTerminalContextMenu();
+    if (!selection.trim()) {
+      updateStatus("当前没有可用的选中文本。", "muted");
+      focusTerminalIfAllowed();
+      return;
+    }
+    if (typeof openTerminalSpecifiedTaskDialog !== "function") {
+      updateStatus("当前页面不支持启动指定预设终端。", "warn");
+      return;
+    }
+    await openTerminalSpecifiedTaskDialog(terminalContextAgentPromptButton, {
+      temporary: true,
+      sessionAction: "new",
+      resetTask: true,
+      initialTask: selection,
+      title: "临时/新终端/新对话",
+      sourcePath: state.currentPath,
+      updatePageStatus: updateStatus,
+    });
+  });
 }
 
 if (scrollPageTopButton) {
@@ -1543,15 +1899,18 @@ if (scrollPageTopButton) {
 if (scrollTerminalBottomButton) {
   preserveSystemImeStateForControl(scrollTerminalBottomButton);
   scrollTerminalBottomButton.addEventListener("click", () => {
+    noteTerminalUserScrollIntent();
     scrollTerminalToBottom();
+    saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
   });
 }
 
 if (scrollTerminalTopButton) {
   preventPointerFocus(scrollTerminalTopButton);
   scrollTerminalTopButton.addEventListener("click", () => {
-    cancelTerminalBottomAnchor();
+    noteTerminalUserScrollIntent();
     scrollTerminalToTop();
+    saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
   });
 }
 
@@ -1570,10 +1929,46 @@ if (terminalSoftKeyboardToggleButton) {
   });
 }
 
+function androidScreenOrientationBridge() {
+  const bridge = window.WebClxAndroid;
+  return typeof bridge?.getScreenOrientation === "function"
+    && typeof bridge?.setScreenOrientation === "function"
+    ? bridge
+    : null;
+}
+
+function syncTerminalOrientationButton() {
+  if (!terminalOrientationToggleButton) {
+    return;
+  }
+  const bridge = androidScreenOrientationBridge();
+  const mode = bridge ? bridge.getScreenOrientation() : "portrait";
+  const needsRecovery = mode !== "portrait";
+  terminalOrientationToggleButton.hidden = !bridge || !needsRecovery;
+}
+
+function restoreTerminalPortraitOrientation() {
+  const bridge = androidScreenOrientationBridge();
+  if (!bridge) {
+    return;
+  }
+  if (bridge.setScreenOrientation("portrait")) {
+    syncTerminalOrientationButton();
+    updateStatus("已恢复竖屏。", "ok");
+  } else {
+    updateStatus("恢复竖屏失败。", "error");
+  }
+}
+
+if (terminalOrientationToggleButton) {
+  preventPointerFocus(terminalOrientationToggleButton);
+  syncTerminalOrientationButton();
+}
+
 if (terminalScheduleButton) {
   preventPointerFocus(terminalScheduleButton);
   terminalScheduleButton.addEventListener("click", () => {
-    openScheduledTerminalPasteDialog();
+    openScheduledTaskManagement();
   });
 }
 
@@ -1596,11 +1991,21 @@ if (terminalPasteDialogEl) {
   });
 }
 
+if (terminalScheduledTasksDialogEl) {
+  terminalScheduledTasksDialogEl.addEventListener("close", () => {
+    restoreTerminalFocusAfterDialogClose();
+  });
+}
+
 if (terminalAgentsDocFormEl) {
   terminalAgentsDocFormEl.addEventListener("submit", (event) => {
     event.preventDefault();
     saveTerminalAgentsDoc();
   });
+}
+
+if (terminalAgentsDocSaveButton) {
+  preventPointerFocus(terminalAgentsDocSaveButton);
 }
 
 if (terminalAgentsDocSelectEl) {
@@ -1617,7 +2022,21 @@ if (terminalAgentsDocSelectEl) {
       })
       .finally(() => {
         setTerminalAgentsDocBusy(false);
+        window.requestAnimationFrame(() => {
+          focusTextInputToEnd(terminalAgentsDocEditorEl);
+        });
       });
+  });
+}
+
+if (terminalAgentsDocEditorEl) {
+  terminalAgentsDocEditorEl.addEventListener("input", () => {
+    const sessionId = terminalAgentsDocSessionId || state.activeSessionId;
+    persistTerminalAgentsDocDraft(
+      sessionId,
+      terminalAgentsDocPathValue(),
+      terminalAgentsDocEditorEl.value,
+    );
   });
 }
 
@@ -1697,7 +2116,7 @@ if (terminalAgentsDocDialogEl) {
     if (terminalAgentsDocShowHiddenEl) {
       terminalAgentsDocShowHiddenEl.checked = false;
     }
-    restoreTerminalFocusAfterDialogClose();
+    restoreTerminalFocusAfterDialogClose({ desktopInput: true });
   });
 }
 
@@ -1775,6 +2194,82 @@ if (sessionAgentToggleEl) {
   });
 }
 
+let refreshingSessionsContext = false;
+
+async function fetchSessionContext(sessionId) {
+  const id = String(sessionId || "").trim();
+  if (!id) {
+    return null;
+  }
+  try {
+    const response = await requestJson(
+      `/api/terminal/sessions/${encodeURIComponent(id)}/agent-session`,
+    );
+    let contextWindow = response?.codex_status?.context_window || null;
+    if (!contextWindow && Array.isArray(response?.agents) && response.agents.includes("Codex")) {
+      try {
+        const complete = await requestJson(
+          `/api/terminal/sessions/${encodeURIComponent(id)}/agent-session/complete`,
+        );
+        contextWindow = complete?.codex_status?.context_window || null;
+      } catch {
+        // Fallback failed
+      }
+    }
+    if (contextWindow) {
+      state.sessionContextCache.set(id, contextWindow);
+      return contextWindow;
+    }
+  } catch {
+    // Session context not available.
+  }
+  return null;
+}
+
+async function refreshSessionsContext({ rerender = true } = {}) {
+  if (!state.showSessionContext || refreshingSessionsContext) {
+    return;
+  }
+  const sessions = (state.sessions || []).filter((s) => s?.id && !isIdleSession(s.id));
+  if (sessions.length === 0) {
+    return;
+  }
+  refreshingSessionsContext = true;
+  try {
+    await Promise.allSettled(
+      sessions.map((s) => fetchSessionContext(s.id)),
+    );
+    if (rerender && state.showSessionContext) {
+      renderSessions();
+    }
+  } finally {
+    refreshingSessionsContext = false;
+  }
+}
+
+function maybeRefreshSessionsContext() {
+  if (!state.showSessionContext || refreshingSessionsContext) {
+    return;
+  }
+  const sessions = (state.sessions || []).filter((s) => s?.id && !isIdleSession(s.id));
+  const hasUncached = sessions.some((s) => !state.sessionContextCache.has(s.id));
+  if (hasUncached) {
+    refreshSessionsContext({ rerender: true });
+  }
+}
+
+if (sessionContextToggleEl) {
+  sessionContextToggleEl.checked = state.showSessionContext;
+  sessionContextToggleEl.addEventListener("change", () => {
+    state.showSessionContext = sessionContextToggleEl.checked;
+    storeTerminalSessionContext(state.showSessionContext);
+    renderSessions();
+    if (state.showSessionContext) {
+      refreshSessionsContext();
+    }
+  });
+}
+
 if (sessionAutoContinueToggleEl) {
   sessionAutoContinueToggleEl.checked = state.autoContinueOnError;
   sessionAutoContinueToggleEl.addEventListener("change", () => {
@@ -1782,9 +2277,18 @@ if (sessionAutoContinueToggleEl) {
   });
 }
 
+if (sessionAutoCompactToggleEl) {
+  sessionAutoCompactToggleEl.addEventListener("change", () => {
+    setAutoCompactForActiveSession(sessionAutoCompactToggleEl.checked);
+  });
+  syncAutoCompactToggleForActiveSession();
+}
+
 if (terminalCodexFullAccessToggleEl) {
   terminalCodexFullAccessToggleEl.addEventListener("change", toggleCodexFullAccess);
 }
+
+document.getElementById("terminal-save-experience")?.addEventListener("click", sendTerminalExperienceSave);
 
 if (terminalInterruptResumeButtonEl) {
   terminalInterruptResumeButtonEl.addEventListener("click", forceInterruptAndResumeTerminalAgent);
@@ -1917,8 +2421,12 @@ if (terminalProjectCommandMenuEl && terminalProjectCommandButtonEl) {
 }
 
 createSessionButton.addEventListener("click", () => {
-  createSession({
-    enableQuickStart: true,
+  WebClxNewTerminal.openWithBehavior({
+    behavior: state.terminalNewSessionBehavior,
+    openDialog: () => openTerminalNewSessionDialog(createSessionButton),
+    createDirect: () => createSession({
+      enableQuickStart: true,
+    }),
   });
 });
 
@@ -1927,6 +2435,7 @@ function bindSessionActivitySafeSelect(selectEl) {
     return;
   }
 
+  selectEl.addEventListener("pointerenter", scheduleTerminalBackgroundPreconnect);
   selectEl.addEventListener("pointerdown", markSessionDropdownInteracting);
   selectEl.addEventListener("mousedown", markSessionDropdownInteracting);
   selectEl.addEventListener("touchstart", markSessionDropdownInteracting, { passive: true });
@@ -1953,8 +2462,13 @@ if (sessionSelectEl) {
 
     closeSessionRenameEditor();
     selectSession(sessionSelectEl.value, { pushHistory: true });
+    focusTerminalAfterSessionSwitch(sessionSelectEl);
   });
 }
+
+currentTerminalNameCopyButton?.addEventListener("click", () => {
+  copyCurrentTerminalName();
+});
 
 if (agentSessionSelectEl) {
   enhanceWorkspaceIconSelect(agentSessionSelectEl, () => state.terminalWorkspaceIconPath);
@@ -1966,6 +2480,7 @@ if (agentSessionSelectEl) {
 
     closeSessionRenameEditor();
     selectSession(agentSessionSelectEl.value, { pushHistory: true });
+    focusTerminalAfterSessionSwitch(agentSessionSelectEl);
   });
 }
 
@@ -1974,6 +2489,19 @@ if (renameSessionButton) {
     const current = activeSession();
     if (current) {
       startSessionRename(current, renameSessionButton);
+    }
+  });
+}
+
+if (saveExperienceSessionButton) {
+  saveExperienceSessionButton.addEventListener("click", () => {
+    const current = activeSession();
+    if (current) {
+      if (typeof saveExperienceAndCloseSession === "function") {
+        saveExperienceAndCloseSession(current);
+      } else {
+        deleteSession(current, { withExperienceSave: true });
+      }
     }
   });
 }
@@ -2000,6 +2528,7 @@ if (archiveResumeButton) {
 }
 
 if (idleSessionSelectEl) {
+  enhanceWorkspaceIconSelect(idleSessionSelectEl, () => state.terminalWorkspaceIconPath);
   bindSessionActivitySafeSelect(idleSessionSelectEl);
   idleSessionSelectEl.addEventListener("change", () => {
     const sessionId = idleSessionSelectEl.value;
@@ -2008,6 +2537,25 @@ if (idleSessionSelectEl) {
     }
     // 闲置下拉和活动下拉一致：选中即切换（恢复并连接）。
     restoreIdleSession(sessionId);
+    focusTerminalAfterSessionSwitch(idleSessionSelectEl);
+  });
+}
+
+if (hiddenSessionSelectEl) {
+  enhanceWorkspaceIconSelect(hiddenSessionSelectEl, () => state.terminalWorkspaceIconPath);
+  bindSessionActivitySafeSelect(hiddenSessionSelectEl);
+  hiddenSessionSelectEl.addEventListener("change", () => {
+    const sessionId = hiddenSessionSelectEl.value;
+    if (!sessionId) {
+      return;
+    }
+    // 隐藏下拉：选中即恢复并连接。
+    if (typeof restoreHiddenSession === "function") {
+      restoreHiddenSession(sessionId);
+    } else {
+      restoreIdleSession(sessionId);
+    }
+    focusTerminalAfterSessionSwitch(hiddenSessionSelectEl);
   });
 }
 
@@ -2025,11 +2573,9 @@ if (sessionRenameDialogEl) {
     event.preventDefault();
     closeSessionRenameEditor();
   });
-  sessionRenameDialogEl.addEventListener("click", (event) => {
-    if (event.target === sessionRenameDialogEl) {
-      closeSessionRenameEditor();
-    }
-  });
+  sessionRenameDialogEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+  }, true);
 }
 
 if (sessionRenamePresetsEl) {
@@ -2052,6 +2598,53 @@ if (sessionRenameFormEl) {
   sessionRenameFormEl.addEventListener("submit", (event) => {
     event.preventDefault();
     renameSession();
+  });
+}
+
+if (terminalGroupSessionListEl) {
+  terminalGroupSessionListEl.addEventListener("change", (event) => {
+    if (event.target?.type !== "checkbox") return;
+    const session = activeSession();
+    if (session) syncTerminalGroupOrderButtons(session);
+  });
+}
+
+if (terminalGroupMoveUpButton) {
+  terminalGroupMoveUpButton.addEventListener("click", () => {
+    moveTerminalGroupSession(-1);
+  });
+}
+
+if (terminalGroupMoveDownButton) {
+  terminalGroupMoveDownButton.addEventListener("click", () => {
+    moveTerminalGroupSession(1);
+  });
+}
+
+for (const tab of terminalGroupSortTabs) {
+  tab.addEventListener("click", () => {
+    setTerminalGroupSessionListSortMode(tab.dataset.sortMode || "");
+  });
+}
+
+if (terminalGroupCancelButton) {
+  terminalGroupCancelButton.addEventListener("click", () => {
+    closeTerminalGroupDialog();
+  });
+}
+
+if (terminalGroupFormEl) {
+  terminalGroupFormEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    saveTerminalGroupToken();
+  });
+}
+
+if (terminalGroupColorEl) {
+  terminalGroupColorEl.addEventListener("input", () => {
+    if (terminalGroupColorValueEl) {
+      terminalGroupColorValueEl.textContent = terminalGroupColorEl.value;
+    }
   });
 }
 
@@ -2287,9 +2880,16 @@ window.addEventListener(
 let terminalViewportResizeTimer = null;
 let terminalViewportResizeFrame = null;
 let terminalViewportResizePageSnapshot = null;
+let terminalViewportResizeTerminalSnapshot = null;
 
 function applyTerminalViewportResizeLayout(pageSnapshot, { settle = false } = {}) {
   fitTerminal();
+  // IME transitions can transiently move xterm's DOM viewport before the
+  // layout pass. Restore the last reliable session position after fitting so
+  // that transient scroll events cannot replace a previously saved bottom
+  // anchor.
+  restoreTerminalScrollSnapshot(terminalViewportResizeTerminalSnapshot);
+  scheduleTerminalScrollSnapshotRestore(terminalViewportResizeTerminalSnapshot);
   if (settle) {
     scheduleTerminalSizeSettle();
   }
@@ -2302,6 +2902,12 @@ function applyTerminalViewportResizeLayout(pageSnapshot, { settle = false } = {}
 function handleTerminalViewportResize() {
   if (terminalViewportResizeTimer === null) {
     terminalViewportResizePageSnapshot = capturePageScrollSnapshotForLayout();
+    const sessionId = state.activeSessionId;
+    terminalViewportResizeTerminalSnapshot = sessionId
+      ? terminalScrollPositions.get(sessionId)
+        ? { sessionId, ...terminalScrollPositions.get(sessionId) }
+        : captureTerminalScrollSnapshotForSession(sessionId)
+      : null;
     suppressTerminalScrollSaveForLayout(
       TERMINAL_VIEWPORT_RESIZE_DEBOUNCE_MS + TERMINAL_LAYOUT_SCROLL_SUPPRESSION_MS,
     );
@@ -2321,6 +2927,7 @@ function handleTerminalViewportResize() {
     const pageSnapshot = terminalViewportResizePageSnapshot;
     applyTerminalViewportResizeLayout(pageSnapshot, { settle: true });
     terminalViewportResizePageSnapshot = null;
+    terminalViewportResizeTerminalSnapshot = null;
   }, TERMINAL_VIEWPORT_RESIZE_DEBOUNCE_MS);
 }
 
@@ -2356,6 +2963,7 @@ window.addEventListener("popstate", async (event) => {
 
 window.addEventListener("beforeunload", () => {
   cancelNewSessionQuickStart();
+  cancelTerminalBackgroundPreconnect();
   if (sessionEventRefreshTimer !== null) {
     window.clearTimeout(sessionEventRefreshTimer);
     sessionEventRefreshTimer = null;

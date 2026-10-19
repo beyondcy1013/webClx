@@ -87,6 +87,7 @@ async fn stream_chat_completions(
     if let Some(preset_id) = target.upstream_preset_id.as_deref() {
         request = request.header(UPSTREAM_PRESET_ID_HEADER, preset_id);
     }
+    let request = super::apply_local_relay_auth_headers(request, &target.base_url);
     stream_response(request, endpoint, LlmProtocol::ChatCompletions, events).await
 }
 
@@ -111,6 +112,7 @@ async fn stream_responses(
     if let Some(preset_id) = target.upstream_preset_id.as_deref() {
         request = request.header(UPSTREAM_PRESET_ID_HEADER, preset_id);
     }
+    let request = super::apply_local_relay_auth_headers(request, &target.base_url);
     stream_response(request, endpoint, LlmProtocol::Responses, events).await
 }
 
@@ -126,14 +128,17 @@ async fn stream_anthropic(
     let endpoint = anthropic_messages_url(&target.base_url);
     let mut body = anthropic_conversation_request_body(model, &messages, &tools, options);
     body["stream"] = Value::Bool(true);
-    let request = client
-        .post(&endpoint)
-        .header(header::CONTENT_TYPE, "application/json")
-        .header(header::ACCEPT, "text/event-stream")
-        .header("anthropic-version", "2023-06-01")
-        .header("x-api-key", &target.api_key)
-        .header(header::AUTHORIZATION, format!("Bearer {}", target.api_key))
-        .json(&body);
+    let request = super::apply_local_relay_auth_headers(
+        client
+            .post(&endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT, "text/event-stream")
+            .header("anthropic-version", "2023-06-01")
+            .header("x-api-key", &target.api_key)
+            .header(header::AUTHORIZATION, format!("Bearer {}", target.api_key))
+            .json(&body),
+        &target.base_url,
+    );
     stream_response(request, endpoint, LlmProtocol::AnthropicMessages, events).await
 }
 

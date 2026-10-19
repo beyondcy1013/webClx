@@ -27,7 +27,7 @@ export CARGO_HOME=/home/root/.cargo
 export HOME=/home/root
 TOOLCHAIN_BIN="$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu/bin"
 export PATH="$CARGO_HOME/bin:$TOOLCHAIN_BIN:$PATH"
-cd /home/codes/webClx
+cd /home/codes/tools/webClx
 cargo build --target x86_64-pc-windows-gnu --release
 ```
 
@@ -70,7 +70,7 @@ bash .codex/skills/webclx-windows-deploy/scripts/deploy-webclx-windows.sh
 The script deliberately keeps these constraints together:
 
 - Cross-build the current worktree for `x86_64-pc-windows-gnu`. This target remains an explicit exception to the Linux webClx self-deploy compile queue.
-- Call `POST http://192.168.3.38:15301/api/processes/replace-restart` with `exe=webclx.exe`, `arg=serve`, and the built file. Omit `target_path`; rustCommander resolves the path from the running process and returns the runtime directory.
+- Call `POST http://HOST:PORT/api/processes/replace-restart` with `exe=webclx.exe`, `arg=serve`, and the built file. Omit `target_path`; rustCommander resolves the path from the running process and returns the runtime directory.
 - Keep `arg=serve`. The deployed file is lowercase `webclx.exe`, while the legacy no-argument path in `src/cli.rs` recognizes the exact mixed-case basename `webClx`; omitting the argument can make replacement report `restarted=true` even though the child prints help and exits.
 - Synchronize all of `static/` using the runtime directory returned by rustCommander, with a staged extraction and the single rollback slot `static.bak-prev`.
 - Verify the fresh process, `webclx version`, local/remote exe SHA-256, `/api/auth/session` HTTP 200, and the SHA-256 of HTTP-served `/assets/app.js`. The replace response alone is not a health check.

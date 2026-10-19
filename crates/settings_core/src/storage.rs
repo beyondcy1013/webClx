@@ -71,6 +71,7 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         &sanitize_terminal_tool_entries(&parsed.terminal_tool_entries),
     );
     let terminal_rename_presets = sanitize_terminal_rename_presets(&parsed.terminal_rename_presets);
+    let terminal_agent_commands = sanitize_terminal_agent_commands(&parsed.terminal_agent_commands);
     let favorite_paths = sanitize_favorite_paths(&parsed.favorite_paths)
         .context("saved favorite paths are invalid")?;
     let workspace_history = sanitize_workspace_history(&parsed.workspace_history);
@@ -153,6 +154,7 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         );
     let terminal_auto_continue_respect_manual_interrupt =
         parsed.terminal_auto_continue_respect_manual_interrupt;
+    let terminal_auto_compact_skip_codebuddy = parsed.terminal_auto_compact_skip_codebuddy;
     let terminal_auto_continue_time_patterns =
         sanitize_terminal_auto_continue_time_patterns(&parsed.terminal_auto_continue_time_patterns);
     let terminal_auto_continue_active_window = normalize_terminal_auto_continue_active_window(
@@ -185,8 +187,13 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         terminal_command_collections,
         terminal_tool_entries,
         terminal_rename_presets,
+        terminal_agent_commands,
         show_dot_entries: parsed.show_dot_entries,
         show_all_workspace_sessions: parsed.show_all_workspace_sessions,
+        terminal_new_session_behavior: parsed
+            .terminal_new_session_behavior
+            .clone()
+            .unwrap_or_else(default_terminal_new_session_behavior),
         desktop_terminal_soft_keyboard_enabled: parsed.desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -201,6 +208,7 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         terminal_auto_continue_backoff_factor,
         terminal_auto_continue_backoff_max_minutes,
         terminal_auto_continue_respect_manual_interrupt,
+        terminal_auto_compact_skip_codebuddy,
         terminal_auto_continue_time_patterns,
         terminal_auto_continue_active_window,
         terminal_scheduled_input_avoid_window,
@@ -261,8 +269,10 @@ pub(crate) fn persist_settings_file(
     terminal_command_collections: &[TerminalCommandCollection],
     terminal_tool_entries: &[TerminalToolEntry],
     terminal_rename_presets: &[String],
+    terminal_agent_commands: &[TerminalAgentCommand],
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
+    terminal_new_session_behavior: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -277,6 +287,7 @@ pub(crate) fn persist_settings_file(
     terminal_auto_continue_backoff_factor: f64,
     terminal_auto_continue_backoff_max_minutes: u32,
     terminal_auto_continue_respect_manual_interrupt: bool,
+    terminal_auto_compact_skip_codebuddy: bool,
     terminal_auto_continue_time_patterns: &[String],
     terminal_auto_continue_active_window: &str,
     terminal_scheduled_input_avoid_window: &str,
@@ -325,6 +336,8 @@ pub(crate) fn persist_settings_file(
     let sanitized_terminal_tool_entries = sanitize_terminal_tool_entries(terminal_tool_entries);
     let sanitized_terminal_rename_presets =
         sanitize_terminal_rename_presets(terminal_rename_presets);
+    let sanitized_terminal_agent_commands =
+        sanitize_terminal_agent_commands(terminal_agent_commands);
     let sanitized_terminal_error_keywords =
         sanitize_terminal_error_keywords(terminal_error_keywords);
     let sanitized_terminal_error_keyword_actions =
@@ -359,8 +372,10 @@ pub(crate) fn persist_settings_file(
         terminal_command_collections: sanitized_terminal_command_collections,
         terminal_tool_entries: sanitized_terminal_tool_entries,
         terminal_rename_presets: sanitized_terminal_rename_presets,
+        terminal_agent_commands: sanitized_terminal_agent_commands,
         show_dot_entries,
         show_all_workspace_sessions,
+        terminal_new_session_behavior: Some(terminal_new_session_behavior),
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale: normalize_terminal_soft_keyboard_scale(
             terminal_soft_keyboard_scale,
@@ -392,6 +407,7 @@ pub(crate) fn persist_settings_file(
                 terminal_auto_continue_backoff_max_minutes,
             ),
         terminal_auto_continue_respect_manual_interrupt,
+        terminal_auto_compact_skip_codebuddy,
         terminal_auto_continue_time_patterns: sanitize_terminal_auto_continue_time_patterns(
             terminal_auto_continue_time_patterns,
         ),

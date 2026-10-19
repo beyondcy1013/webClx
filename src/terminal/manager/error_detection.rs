@@ -72,6 +72,12 @@ pub(in crate::terminal) fn terminal_error_keyword_match_from_snapshot(
     }
 
     let text = String::from_utf8_lossy(snapshot);
+    // Automatic senders also call this matcher directly, bypassing the
+    // activity list's working-first check. Reuse that same bounded status
+    // window so stale errors or tool output cannot interrupt an active turn.
+    if terminal_tail_has_working_status(&terminal_tail_lines(&text, 10)) {
+        return None;
+    }
     let tail = terminal_tail_lines(&text, line_limit);
     if tail.is_empty() {
         return None;
@@ -234,15 +240,41 @@ pub(in crate::terminal) fn terminal_working_status_match_from_snapshot(
     terminal_tail_has_working_status(&tail)
 }
 
+pub(in crate::terminal) fn terminal_cline_idle_prompt_from_snapshot(
+    snapshot: &[u8],
+    line_limit: u32,
+) -> bool {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    tail.lines().any(line_is_cline_idle_prompt)
+}
+
 #[cfg_attr(test, allow(dead_code))]
 pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool {
-    tail.lines().any(|line| {
+    for line in tail.lines().rev() {
+        if line_is_completion_status(line) {
+            return false;
+        }
         let normalized = line.trim().to_lowercase();
         if normalized.contains("working (") && normalized.contains("esc to interrupt") {
             return true;
         }
-        line_is_claude_working_spinner(line)
-    })
+        if line_is_cline_idle_prompt(line) {
+            continue;
+        }
+        if line_is_claude_working_spinner(line) || line_is_agy_working_status(line) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Cline's Plan/Act placeholders end in nouns that also end in ing.
+/// Exclude only the prompt line; a real working indicator elsewhere still wins.
+fn line_is_cline_idle_prompt(line: &str) -> bool {
+    let normalized = line.trim();
+    normalized.starts_with('❯')
+        && (normalized.contains("Plan something") || normalized.contains("Ask anything"))
 }
 
 /// Detects Claude Code's active status line (the spinner shown while the agent is
@@ -252,7 +284,7 @@ pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool 
 /// because the working check only knew Codex's `working (… • esc to interrupt)`.
 fn line_is_claude_working_spinner(line: &str) -> bool {
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if !line_has_claude_status_prefix(trimmed) {
         return false;
     }
 
@@ -260,8 +292,8 @@ fn line_is_claude_working_spinner(line: &str) -> bool {
         return true;
     }
 
-    // The primary signal: the U+2026 ellipsis combined with a gerund. Plain
-    // shell/build output almost never mixes these two, so this is reliable.
+    // Require the spinner prefix too: ordinary prose and input placeholders
+    // can also contain a word ending in ing followed by an ellipsis.
     if trimmed.contains('…') && line_contains_gerund(trimmed) {
         return true;
     }
@@ -281,7 +313,7 @@ fn line_is_claude_working_spinner(line: &str) -> bool {
 
 fn line_is_claude_dynamic_status(line: &str) -> bool {
     let trimmed = strip_trailing_parenthetical(line);
-    if !trimmed.contains('…') {
+    if !trimmed.ends_with('…') && !trimmed.ends_with("...") {
         return false;
     }
     if !line_has_claude_status_prefix(trimmed) {
@@ -290,11 +322,98 @@ fn line_is_claude_dynamic_status(line: &str) -> bool {
     let Some(parenthetical) = trailing_parenthetical(line) else {
         return false;
     };
-    parenthetical.contains("tokens") && text_contains_elapsed_duration(parenthetical)
+    // CodeBuddy's custom progress labels keep an elapsed timer even before
+    // tokens arrive, including while a tool is producing no output.
+    text_contains_elapsed_duration(parenthetical)
 }
 
 fn line_has_claude_status_prefix(line: &str) -> bool {
-    matches!(line.chars().next(), Some('✻' | '●' | '·' | '✢' | '✶' | '✽' | '✺' | '✹'))
+    matches!(
+        line.chars().next(),
+        Some('✻' | '●' | '·' | '✢' | '✶' | '✷' | '✸' | '✽' | '✺' | '✹' | '∴')
+    )
+}
+
+fn line_is_agy_working_status(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with(['>', '❯', '›']) {
+        return false;
+    }
+    if line_is_agy_tool_running(trimmed) || line_is_agy_task_status(trimmed) {
+        return true;
+    }
+    let normalized = trim_terminal_status_line_prefix(trimmed).to_lowercase();
+    if normalized == "esc to cancel" || normalized == "press esc to interrupt generation." {
+        return true;
+    }
+
+    let status = strip_trailing_parenthetical(&normalized);
+    let Some(verb) = status
+        .strip_suffix("...")
+        .or_else(|| status.strip_suffix('…'))
+    else {
+        return false;
+    };
+    if !matches!(
+        verb,
+        "thinking" | "working" | "generating" | "running" | "executing" | "waiting" | "planning"
+    ) {
+        return false;
+    }
+    trailing_parenthetical(&normalized).is_none_or(|detail| {
+        text_contains_elapsed_duration(detail)
+            || detail.contains("esc to cancel")
+            || detail.contains("ctrl+o")
+    })
+}
+
+fn line_is_agy_tool_running(trimmed: &str) -> bool {
+    let normalized = trim_terminal_status_line_prefix(trimmed).to_lowercase();
+    if !normalized.starts_with("running (") && !normalized.starts_with("running(") {
+        return false;
+    }
+    line_has_claude_status_prefix(trimmed)
+        || trimmed.contains("(ctrl+o to expand)")
+        || trimmed.contains("(ctrl+o to collapse)")
+}
+
+fn line_is_agy_task_status(trimmed: &str) -> bool {
+    let lower = trimmed.to_lowercase();
+    let Some(last_word) = lower.split_whitespace().last() else {
+        return false;
+    };
+    if !matches!(last_word, "running" | "executing" | "generating" | "thinking" | "working") {
+        return false;
+    }
+    if !line_contains_bracketed_time(trimmed) {
+        return false;
+    }
+    line_has_claude_status_prefix(trimmed) || trimmed.starts_with('[')
+}
+
+fn line_contains_bracketed_time(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let after_open = &rest[open + 1..];
+        if let Some(close) = after_open.find(']') {
+            let inside = &after_open[..close];
+            if looks_like_clock_timestamp(inside) || looks_like_elapsed_duration(inside) {
+                return true;
+            }
+            rest = &after_open[close + 1..];
+        } else {
+            break;
+        }
+    }
+    false
+}
+
+fn looks_like_clock_timestamp(text: &str) -> bool {
+    let parts: Vec<&str> = text.split(':').collect();
+    (parts.len() == 2 || parts.len() == 3)
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn text_contains_elapsed_duration(text: &str) -> bool {
@@ -454,8 +573,15 @@ fn text_has_manual_interruption(text: &str) -> bool {
         || squashed.contains("<turn_aborted>")
 }
 
-fn is_terminal_queued_input_line(line: &str) -> bool {
-    line.contains("Messages to be submitted at end of turn")
+pub(super) fn is_terminal_queued_input_line(line: &str) -> bool {
+    let line = line.trim().trim_start_matches(['•', '●']).trim();
+    line == "Messages to be submitted at end of turn"
+        || line == "Messages to be submitted after next tool call"
+        || line.starts_with("Messages to be submitted after next tool call (press esc to interrupt")
+        || line == "Queued follow-up inputs"
+        || line.starts_with("Queued follow-up inputs:")
+        || line == "Press up to edit queued messages"
+        || (line.starts_with('▸') && line.ends_with("(alt+m to send immediately)"))
 }
 
 #[cfg(test)]
@@ -616,7 +742,9 @@ fn compact_terminal_error_context(text: &str, offset: usize, needle_len: usize) 
 
 fn terminal_tail_lines(text: &str, line_limit: u32) -> String {
     let limit = usize::try_from(line_limit.max(1)).unwrap_or(1);
-    let lines = text.lines().collect::<Vec<_>>();
+    // capture-pane includes the unused rows below a TUI. They must not push
+    // its actual status/footer out of the bounded tail.
+    let lines = text.trim_end().lines().collect::<Vec<_>>();
     let start = lines.len().saturating_sub(limit);
     lines[start..].join("\n")
 }
@@ -647,4 +775,75 @@ pub(in crate::terminal) fn compact_terminal_search_line(line: &str) -> String {
     let mut truncated = compact.chars().take(MAX_CHARS).collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_error_keyword_match_from_snapshot;
+
+    #[test]
+    fn terminal_error_snapshot_does_not_retry_while_agent_is_working() {
+        let keywords = vec!["sending request for url".to_string()];
+        for status in ["Working (9m 20s • esc to interrupt)", "✻ Thinking… (31s)"] {
+            let snapshot = format!(
+                "error sending request for url (https://example.test)\n{status}\n\n› Ask Codex to do anything\n\n \n"
+            );
+            // The status guard uses the same 10-line window as the activity
+            // list even when the configured error window is much larger.
+            assert!(
+                terminal_error_keyword_match_from_snapshot(
+                    snapshot.as_bytes(),
+                    20,
+                    &keywords,
+                    &[],
+                    true,
+                )
+                .is_none(),
+                "active status must suppress retries: {status}"
+            );
+        }
+
+        // Once the active status disappears, a real failure remains eligible.
+        assert!(
+            terminal_error_keyword_match_from_snapshot(
+                b"error sending request for url (https://example.test)\n\n> ",
+                20,
+                &keywords,
+                &[],
+                true,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn terminal_error_snapshot_ignores_unused_pane_rows_and_stale_errors() {
+        let keywords = vec!["last status: 429".to_string()];
+        let padding = "\n \n".repeat(30);
+        let snapshot = format!("last status: 429\n> {padding}");
+        assert!(
+            terminal_error_keyword_match_from_snapshot(
+                snapshot.as_bytes(),
+                12,
+                &keywords,
+                &[],
+                true,
+            )
+            .is_some()
+        );
+
+        for newer_status in ["✔ Worked for 8m 15s", "MCP startup incomplete"] {
+            let snapshot = format!("last status: 429\n{newer_status}\n> {padding}");
+            assert!(
+                terminal_error_keyword_match_from_snapshot(
+                    snapshot.as_bytes(),
+                    12,
+                    &keywords,
+                    &[],
+                    true,
+                )
+                .is_none()
+            );
+        }
+    }
 }

@@ -61,28 +61,25 @@ const runAgentEnd = cliRust.indexOf("\n#[cfg(test)]", runAgentStart);
 const runAgent = cliRust.slice(runAgentStart, runAgentEnd);
 assert.match(
   runAgent,
-  /client\.apply\(kind, &target, Some\(&cwd\)\)\.await[\s\S]*Command::new\(agent\)/,
-  "webclx run should persist the selected preset before launching the agent",
+  /client\.apply\(kind, &target, Some\(&cwd\), true\)\.await[\s\S]*Command::new\(agent\)/,
+  "webclx run should write the target preset to the real config before launching the agent",
 );
 assert.match(
   runAgent,
-  /applied\.codex_model\(\)[\s\S]*codex_history_args_with_model\(agent, args, codex_model\.as_deref\(\)\)[\s\S]*Command::new\(agent\)/,
-  "webclx run should pass the model read back from the applied preset to Codex resume and fork",
+  /read_applied_codex_selection\(agent, &cwd\)[\s\S]*codex_model_provider[\s\S]*prepare_codex_history_args_model_for_current_user\([\s\S]*codex_model_provider[\s\S]*restore_previous_preset\(&client, kind, original\.as_ref\(\), &target, &cwd\)\.await[\s\S]*codex_history_args_with_model\(agent, args, codex_model\)[\s\S]*Command::new\(agent\)/,
+  "webclx run should migrate the current provider and model before Codex resume or fork",
 );
+assert.doesNotMatch(runAgent, /lease|heartbeat|preset-run-leases/);
 assert.match(
   runAgent,
-  /while applied\.deferred[\s\S]*client\.apply\(kind, &target, Some\(&cwd\)\)\.await\?;[\s\S]*Command::new\(agent\)/,
-  "webclx run should wait for a deferred apply before starting the agent",
+  /settle_agent_startup[\s\S]*restore_previous_preset[\s\S]*child[\s\S]*\.wait\(\)/,
+  "webclx run must restore after the startup settle window, before foreground waiting",
 );
+assert.match(runAgent, /client\.apply\(kind, original, Some\(cwd\), true\)/);
 assert.doesNotMatch(
   runAgent,
-  /STARTUP_PRESET_HANDOFF|acquire_preset_run_lease|release_preset_run_lease/,
-  "webclx run must not restore the previous provider after a timing-based startup handoff",
-);
-assert.doesNotMatch(
-  runAgent,
-  /heartbeat_preset_run_lease|global preset gate while agent `[{}\w-]*` was running/,
-  "webclx run must not lock the shared preset for the lifetime of the agent session",
+  /command\.env\([^\n]*(CODEX_HOME|CLAUDE_CONFIG_DIR|WEBCLX_USER_HOME)/,
+  "webclx run must not redirect the agent to an alternate config home",
 );
 assert.doesNotMatch(
   runAgent,
@@ -170,4 +167,14 @@ assert.match(
   codexConversationModelRust,
   /"model"[\s\S]*"collaboration_mode"[\s\S]*"settings"/,
   "the explicit API should rewrite payload.model and collaboration settings model",
+);
+assert.match(
+  codexConversationModelRust,
+  /"session_meta"[\s\S]*"model_provider"[\s\S]*"thread_settings_applied"[\s\S]*"model_provider_id"/,
+  "resume migration must replace historical provider identity with the current config provider",
+);
+assert.match(
+  codexConversationModelRust,
+  /args\.first\(\)\.map\(String::as_str\), Some\("resume"\)\)/,
+  "temporary Codex fork must not rewrite the source rollout before Codex projects it",
 );

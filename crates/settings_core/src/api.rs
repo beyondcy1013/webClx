@@ -29,6 +29,7 @@ pub fn build_settings_response(
         terminal_command_collections: manager.terminal_command_collections(),
         terminal_tool_entries: manager.terminal_tool_entries(),
         terminal_rename_presets: manager.terminal_rename_presets(),
+        terminal_agent_commands: manager.terminal_agent_commands(),
         default_terminal_quick_commands: default_terminal_quick_commands(),
         default_terminal_quick_start_default_key: default_terminal_quick_start_default_key(),
         default_terminal_default_env_vars: default_terminal_default_env_vars(),
@@ -37,10 +38,12 @@ pub fn build_settings_response(
         default_terminal_command_collections: default_terminal_command_collections(),
         default_terminal_tool_entries: default_terminal_tool_entries(),
         default_terminal_rename_presets: default_terminal_rename_presets(),
+        default_terminal_agent_commands: default_terminal_agent_commands(),
         host_name,
         server_listen_addr,
         show_dot_entries: manager.show_dot_entries(),
         show_all_workspace_sessions: manager.show_all_workspace_sessions(),
+        terminal_new_session_behavior: manager.terminal_new_session_behavior(),
         desktop_terminal_soft_keyboard_enabled: manager.desktop_terminal_soft_keyboard_enabled(),
         terminal_soft_keyboard_scale: manager.terminal_soft_keyboard_scale(),
         terminal_floating_button_offset_vh: manager.terminal_floating_button_offset_vh(),
@@ -57,6 +60,7 @@ pub fn build_settings_response(
             .terminal_auto_continue_backoff_max_minutes(),
         terminal_auto_continue_respect_manual_interrupt: manager
             .terminal_auto_continue_respect_manual_interrupt(),
+        terminal_auto_compact_skip_codebuddy: manager.terminal_auto_compact_skip_codebuddy(),
         terminal_auto_continue_time_patterns: manager.terminal_auto_continue_time_patterns(),
         terminal_auto_continue_active_window: manager.terminal_auto_continue_active_window(),
         terminal_scheduled_input_avoid_window: manager.terminal_scheduled_input_avoid_window(),
@@ -180,12 +184,19 @@ pub async fn save_settings(
             .terminal_rename_presets
             .unwrap_or_else(|| manager.terminal_rename_presets()),
     );
+    let terminal_agent_commands = sanitize_terminal_agent_commands(
+        &payload
+            .terminal_agent_commands
+            .unwrap_or_else(|| manager.terminal_agent_commands()),
+    );
     let show_dot_entries = payload
         .show_dot_entries
         .unwrap_or_else(|| manager.show_dot_entries());
     let show_all_workspace_sessions = payload
         .show_all_workspace_sessions
         .unwrap_or_else(|| manager.show_all_workspace_sessions());
+    let terminal_new_session_behavior =
+        sanitize_terminal_new_session_behavior(payload.terminal_new_session_behavior);
     let desktop_terminal_soft_keyboard_enabled = payload
         .desktop_terminal_soft_keyboard_enabled
         .unwrap_or_else(|| manager.desktop_terminal_soft_keyboard_enabled());
@@ -249,6 +260,9 @@ pub async fn save_settings(
     let terminal_auto_continue_respect_manual_interrupt = payload
         .terminal_auto_continue_respect_manual_interrupt
         .unwrap_or_else(|| manager.terminal_auto_continue_respect_manual_interrupt());
+    let terminal_auto_compact_skip_codebuddy = payload
+        .terminal_auto_compact_skip_codebuddy
+        .unwrap_or_else(|| manager.terminal_auto_compact_skip_codebuddy());
     let terminal_auto_continue_time_patterns = sanitize_terminal_auto_continue_time_patterns(
         &payload
             .terminal_auto_continue_time_patterns
@@ -422,8 +436,10 @@ pub async fn save_settings(
         terminal_command_collections: terminal_command_collections.clone(),
         terminal_tool_entries: terminal_tool_entries.clone(),
         terminal_rename_presets: terminal_rename_presets.clone(),
+        terminal_agent_commands: terminal_agent_commands.clone(),
         show_dot_entries,
         show_all_workspace_sessions,
+        terminal_new_session_behavior: Some(terminal_new_session_behavior.clone()),
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -438,6 +454,7 @@ pub async fn save_settings(
         terminal_auto_continue_backoff_factor,
         terminal_auto_continue_backoff_max_minutes,
         terminal_auto_continue_respect_manual_interrupt,
+        terminal_auto_compact_skip_codebuddy,
         terminal_auto_continue_time_patterns: terminal_auto_continue_time_patterns.clone(),
         terminal_auto_continue_active_window: terminal_auto_continue_active_window.clone(),
         terminal_scheduled_input_avoid_window: terminal_scheduled_input_avoid_window.clone(),
@@ -494,8 +511,10 @@ pub async fn save_settings(
         terminal_command_collections.clone(),
         terminal_tool_entries.clone(),
         terminal_rename_presets.clone(),
+        terminal_agent_commands.clone(),
         show_dot_entries,
         show_all_workspace_sessions,
+        terminal_new_session_behavior.clone(),
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -510,6 +529,7 @@ pub async fn save_settings(
         terminal_auto_continue_backoff_factor,
         terminal_auto_continue_backoff_max_minutes,
         terminal_auto_continue_respect_manual_interrupt,
+        terminal_auto_compact_skip_codebuddy,
         terminal_auto_continue_time_patterns.clone(),
         terminal_auto_continue_active_window.clone(),
         terminal_scheduled_input_avoid_window.clone(),
@@ -557,8 +577,10 @@ pub async fn save_settings(
         terminal_command_collections,
         terminal_tool_entries,
         terminal_rename_presets,
+        terminal_agent_commands,
         show_dot_entries,
         show_all_workspace_sessions,
+        terminal_new_session_behavior,
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -573,6 +595,7 @@ pub async fn save_settings(
         terminal_auto_continue_backoff_factor,
         terminal_auto_continue_backoff_max_minutes,
         terminal_auto_continue_respect_manual_interrupt,
+        terminal_auto_compact_skip_codebuddy,
         terminal_auto_continue_time_patterns,
         terminal_auto_continue_active_window,
         terminal_scheduled_input_avoid_window,
@@ -623,6 +646,7 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_error_keywords",
             "terminal_error_keyword_actions",
             "terminal_rename_presets",
+            "terminal_agent_commands",
             "terminal_activity_agent_display",
             "terminal_completion_bell_enabled",
             "server_port_auto_increment",
@@ -633,6 +657,7 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_auto_continue_backoff_factor",
             "terminal_auto_continue_backoff_max_minutes",
             "terminal_auto_continue_respect_manual_interrupt",
+            "terminal_auto_compact_skip_codebuddy",
             "terminal_auto_continue_time_patterns",
         ],
         "appearance" => &[
@@ -684,6 +709,7 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_error_keywords",
             "terminal_error_keyword_actions",
             "terminal_rename_presets",
+            "terminal_agent_commands",
             "terminal_activity_agent_display",
             "terminal_completion_bell_enabled",
             "server_port_auto_increment",
@@ -694,6 +720,7 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_auto_continue_backoff_factor",
             "terminal_auto_continue_backoff_max_minutes",
             "terminal_auto_continue_respect_manual_interrupt",
+            "terminal_auto_compact_skip_codebuddy",
             "terminal_auto_continue_time_patterns",
             "terminal_auto_continue_active_window",
             "terminal_scheduled_input_avoid_window",
@@ -727,6 +754,7 @@ const ALL_MERGE_FIELDS: &[&str] = &[
     "terminal_command_collections",
     "terminal_tool_entries",
     "terminal_rename_presets",
+    "terminal_agent_commands",
     "show_dot_entries",
     "show_all_workspace_sessions",
     "desktop_terminal_soft_keyboard_enabled",
@@ -743,6 +771,7 @@ const ALL_MERGE_FIELDS: &[&str] = &[
     "terminal_auto_continue_backoff_factor",
     "terminal_auto_continue_backoff_max_minutes",
     "terminal_auto_continue_respect_manual_interrupt",
+    "terminal_auto_compact_skip_codebuddy",
     "terminal_auto_continue_time_patterns",
     "terminal_auto_continue_active_window",
     "terminal_scheduled_input_avoid_window",
@@ -813,6 +842,20 @@ fn merge_arrays<T: Clone + std::hash::Hash + Eq>(local: Vec<T>, remote: Vec<T>) 
     let mut merged = Vec::new();
     for item in remote.into_iter().chain(local) {
         if seen.insert(item.clone()) {
+            merged.push(item);
+        }
+    }
+    merged
+}
+
+fn merge_terminal_agent_commands(
+    local: Vec<TerminalAgentCommand>,
+    remote: Vec<TerminalAgentCommand>,
+) -> Vec<TerminalAgentCommand> {
+    let mut seen = HashSet::new();
+    let mut merged = Vec::new();
+    for item in remote.into_iter().chain(local) {
+        if seen.insert(item.key.clone()) {
             merged.push(item);
         }
     }
@@ -1016,6 +1059,11 @@ fn merged_field_response(
             remote.terminal_rename_presets,
         ))
         .unwrap(),
+        "terminal_agent_commands" => serde_json::to_value(merge_terminal_agent_commands(
+            manager.terminal_agent_commands(),
+            remote.terminal_agent_commands,
+        ))
+        .unwrap(),
         "terminal_error_keywords" => serde_json::to_value(merge_arrays(
             manager.terminal_error_keywords(),
             remote.terminal_error_keywords,
@@ -1075,6 +1123,9 @@ fn merged_field_response(
         .unwrap(),
         "show_dot_entries" => serde_json::json!(remote.show_dot_entries),
         "show_all_workspace_sessions" => serde_json::json!(remote.show_all_workspace_sessions),
+        "terminal_new_session_behavior" => {
+            serde_json::json!(remote.terminal_new_session_behavior)
+        }
         "desktop_terminal_soft_keyboard_enabled" => {
             serde_json::json!(remote.desktop_terminal_soft_keyboard_enabled)
         }
@@ -1108,6 +1159,9 @@ fn merged_field_response(
         }
         "terminal_auto_continue_respect_manual_interrupt" => {
             serde_json::json!(remote.terminal_auto_continue_respect_manual_interrupt)
+        }
+        "terminal_auto_compact_skip_codebuddy" => {
+            serde_json::json!(remote.terminal_auto_compact_skip_codebuddy)
         }
         "terminal_auto_continue_time_patterns" => {
             serde_json::json!(remote.terminal_auto_continue_time_patterns)

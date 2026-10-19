@@ -9,7 +9,7 @@
   const SESSION_STORAGE_KEY = "webclx:last-terminal-sessions";
   const GLOBAL_SESSION_PREFERENCE_KEY = "__global_last_opened__";
   const SESSION_EVENT_STORAGE_KEY = "webclx:terminal-session-event";
-  const PASSIVE_SESSION_REFRESH_ACTIONS = Object.freeze(["created", "deleted", "idle", "restored"]);
+  const PASSIVE_SESSION_REFRESH_ACTIONS = Object.freeze(["created", "deleted", "idle", "restored", "group_updated"]);
 
   // 跨页面事件键：首页 app.js 与终端页 terminal.js 共用，集中在此避免双份定义漂移。
   const SETTINGS_EVENT_STORAGE_KEY = "webclx:settings-event";

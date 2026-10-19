@@ -1,7 +1,8 @@
 use std::{convert::Infallible, net::SocketAddr};
 
 use auth_core::{
-    ApiResponsesProxyMode, effective_api_responses_proxy, local_proxy_api_preset_id_from_api_key,
+    ApiResponsesProxyMode, api_preset_model, effective_api_responses_proxy,
+    local_proxy_api_preset_id_from_api_key,
 };
 use axum::{
     Json,
@@ -250,7 +251,7 @@ async fn proxy_anthropic_responses(
 ) -> ApiResult<Response> {
     ensure_addr_allowed(&state, addr, ANTHROPIC_MESSAGES_TO_CHAT_COMPLETIONS_KIND)?;
 
-    let preset = resolve_anthropic_preset(&state, &headers).ok_or_else(|| {
+    let preset = resolve_anthropic_preset(&state, &headers, &payload).ok_or_else(|| {
         AppError::bad_request(gateway_message(
             ANTHROPIC_MESSAGES_TO_CHAT_COMPLETIONS_KIND,
             "尚未应用任何 Anthropic 中转站 Codex_API 预设。",
@@ -315,10 +316,24 @@ async fn proxy_anthropic_responses(
         .header("anthropic-version", "2023-06-01")
         .header("x-api-key", &preset.api_key);
     if let Some(value) = headers.get(header::AUTHORIZATION) {
-        // Forward client-supplied Authorization if the upstream expects a
-        // Bearer token rather than `x-api-key`. Anthropic's spec uses
-        // `x-api-key`, but third-party relays sometimes differ.
-        request = request.header(header::AUTHORIZATION, value.clone());
+        let is_local_placeholder = value
+            .to_str()
+            .ok()
+            .and_then(|value| {
+                value
+                    .strip_prefix("Bearer ")
+                    .or(value.strip_prefix("bearer "))
+            })
+            .map(str::trim)
+            .is_some_and(|token| {
+                local_proxy_api_preset_id_from_api_key(token).is_some()
+                    || token == auth_core::LOCAL_PROXY_API_KEY
+            });
+        request = if is_local_placeholder {
+            request.bearer_auth(&preset.api_key)
+        } else {
+            request.header(header::AUTHORIZATION, value.clone())
+        };
     }
 
     let upstream = request
@@ -340,6 +355,23 @@ async fn proxy_anthropic_responses(
     })?;
 
     if !status.is_success() {
+        if let Some(reset_at) = state.quota_reset_cache.capture_zhipu_quota_response(
+            &preset.id,
+            &preset.base_url,
+            status.as_u16(),
+            &upstream_body,
+        ) {
+            tracing::info!(
+                "{}",
+                gateway_message(
+                    ANTHROPIC_MESSAGES_TO_CHAT_COMPLETIONS_KIND,
+                    format!(
+                        "{} 捕获到智谱额度重置时间 {}，将在重置后由无人值守自动续跑消费。",
+                        preset.provider_name, reset_at
+                    ),
+                )
+            );
+        }
         warn!(
             "{}",
             gateway_message(
@@ -383,21 +415,19 @@ async fn proxy_anthropic_responses(
 fn resolve_anthropic_preset(
     state: &AppState,
     headers: &HeaderMap,
+    payload: &Value,
 ) -> Option<auth_core::StoredApiPreset> {
     let upstream_id_header = HeaderName::from_static("x-webclx-upstream-preset-id");
+    let presets = state.auth_manager.api_presets_snapshot();
     if let Some(value) = headers
         .get(&upstream_id_header)
         .and_then(|value| value.to_str().ok())
     {
         let trimmed = value.trim();
         if !trimmed.is_empty()
-            && let Some(preset) = state
-                .auth_manager
-                .api_presets_snapshot()
-                .into_iter()
-                .find(|preset| preset.id == trimmed)
+            && let Some(preset) = presets.iter().find(|preset| preset.id == trimmed)
         {
-            return Some(preset);
+            return Some(preset.clone());
         }
     }
     if let Some(value) = headers
@@ -410,37 +440,50 @@ fn resolve_anthropic_preset(
         })
         .map(str::trim)
         .and_then(local_proxy_api_preset_id_from_api_key)
-        && let Some(preset) = state
-            .auth_manager
-            .api_presets_snapshot()
-            .into_iter()
-            .find(|preset| preset.id == value)
+        && let Some(preset) = presets.iter().find(|preset| preset.id == value)
     {
-        return Some(preset);
+        return Some(preset.clone());
     }
     if let Some(value) = headers
         .get("x-api-key")
         .and_then(|value| value.to_str().ok())
         .and_then(local_proxy_api_preset_id_from_api_key)
-        && let Some(preset) = state
-            .auth_manager
-            .api_presets_snapshot()
-            .into_iter()
-            .find(|preset| preset.id == value)
+        && let Some(preset) = presets.iter().find(|preset| preset.id == value)
     {
-        return Some(preset);
+        return Some(preset.clone());
     }
+
+    // Older Codex processes may still carry the pre-scoped placeholder token.
+    // A unique model match keeps those sessions pinned to their original
+    // Anthropic conversion preset after the global active preset changes.
+    if let Some(preset) = anthropic_preset_from_request_model(payload, &presets) {
+        return Some(preset.clone());
+    }
+
     let settings = state.auth_manager.upstream_proxy_settings();
     settings
         .active_api_proxy_preset_id
         .as_deref()
-        .and_then(|id| {
-            state
-                .auth_manager
-                .api_presets_snapshot()
-                .into_iter()
-                .find(|preset| preset.id == id)
-        })
+        .and_then(|id| presets.into_iter().find(|preset| preset.id == id))
+}
+
+fn anthropic_preset_from_request_model<'a>(
+    payload: &Value,
+    presets: &'a [auth_core::StoredApiPreset],
+) -> Option<&'a auth_core::StoredApiPreset> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    let mut matches = presets.iter().filter(|preset| {
+        matches!(
+            effective_api_responses_proxy(preset),
+            Some(ApiResponsesProxyMode::AnthropicChat)
+        ) && api_preset_model(preset).is_some_and(|candidate| candidate.eq_ignore_ascii_case(model))
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn join_anthropic_messages_url(base_url: &str) -> String {

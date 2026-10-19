@@ -29,6 +29,44 @@ snapshot-preservation contract and rejects any future reintroduction of forced
 bottom scrolling or terminal focus. Keep this test in the full
 `node --test tests/*.test.mjs` pre-submit baseline.
 
+System IME focus has one authorized entry point: the `系统键盘` checkbox inside
+the `全能` menu. Every other soft key, menu trigger, and menu item must block
+native focus changes and restore xterm's helper textarea to its pre-gesture
+focus state after dispatch: an open system keyboard stays open, while a closed
+one stays closed.
+The command layer must also reject `show_system_keyboard` unless that checkbox
+is the recorded source. `tests/terminal-ime-policy.test.mjs` and
+`tests/terminal-ime-policy.browser.py` lock all three gates, including the
+`项目管理` menu and `visualViewport` height.
+
+Dialogs opened from command buttons follow the same rule. In particular,
+`定时` may reveal the scheduled-paste panel but must initially focus a
+non-editable control; it must not call `focus()` on the paste textarea, delay
+number input, or datetime input.
+
+This is enforced as a page-wide capture gate, not a per-button allowlist. Any
+button-like action blocks editable focus, including focus caused later by
+asynchronous handlers or browser defaults. The block remains until a direct
+user gesture on an editable field; the only action-control exception is the
+`全能 > 系统键盘` checkbox.
+
+The terminal content surface is a direct-input gesture, not an action control.
+`focusTerminalFromTerminalTap()` must clear the action gate before asking xterm
+to focus, so tapping the input area can still open the system keyboard when the
+normal IME policy permits it.
+
+Never restore an xterm helper focus snapshot by calling `focus()` after a
+button action. Android may leave the helper as `activeElement` after the user
+manually dismisses the keyboard; a later `focus()` on that same helper reopens
+the keyboard. Ordinary controls preserve focus only by cancelling their native
+pointer focus before dispatch.
+
+In the Android APK, browser focus and `visualViewport` are not authoritative
+for IME visibility. `MainActivity` tracks the actual obscured window area and
+exposes `WebClxAndroid.isSystemKeyboardVisible()`. Ordinary actions consult
+that native state first: when the IME is closed they synchronously blur stale
+xterm focus; when it is open they leave the focus unchanged.
+
 ## Verification
 
 ```bash

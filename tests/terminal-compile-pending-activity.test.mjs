@@ -41,7 +41,7 @@ assert.match(
 
 assert.match(
   compileWorker,
-  /completed_build_request_id:\$delivery_id/,
+  /completed_build_request_id:\$completed_build_request_id/,
   "the compile callback should identify which outstanding request finished",
 );
 

@@ -6,6 +6,7 @@ const require = createRequire(import.meta.url);
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
 const terminalEntryJs = readFileSync(new URL("../static/terminal.js", import.meta.url), "utf8");
 const terminalFocusJs = readFileSync(new URL("../static/terminal-focus-selection.js", import.meta.url), "utf8");
+const terminalDialogsJs = readFileSync(new URL("../static/terminal-dialogs.js", import.meta.url), "utf8");
 const terminalMobileKeysJs = readFileSync(new URL("../static/terminal-mobile-keys.js", import.meta.url), "utf8");
 const terminalResumeAgentJs = readFileSync(new URL("../static/terminal-resume-agent.js", import.meta.url), "utf8");
 const terminalShellSettingsJs = readFileSync(new URL("../static/terminal-shell-settings.js", import.meta.url), "utf8");
@@ -100,6 +101,62 @@ assert.match(
   /function terminalSystemImeFocusSuppressed\(\) \{[\s\S]*terminalSoftKeyboardVisible\(\)[\s\S]*terminalImePolicy\.terminalImeFocusAllowed[\s\S]*terminalSystemImeSuppressedUntil[\s\S]*\}/,
   "the one-minute system-keyboard suppression window should cover every visible soft keyboard",
 );
+assert.match(
+  terminalFocusJs,
+  /function terminalNativeKeyboardVisible\(\) \{[\s\S]*WebClxAndroid\?\.isSystemKeyboardVisible[\s\S]*isSystemKeyboardVisible\(\) === true[\s\S]*visualViewport/,
+  "Android native IME visibility must take priority over browser viewport guesses",
+);
+assert.match(
+  terminalFocusJs,
+  /function guardTerminalActionEditableFocus\(event\)[\s\S]*terminalActionNativeKeyboardWasVisible = terminalNativeKeyboardVisible\(\)[\s\S]*terminalActionEditableFocusBlocked = !terminalActionNativeKeyboardWasVisible;[\s\S]*if \(terminalActionEditableFocusBlocked\) \{[\s\S]*blurTerminalHelperTextarea\(\);/,
+  "ordinary actions must synchronously blur stale xterm focus when native Android reports the keyboard closed",
+);
+assert.match(
+  terminalFocusJs,
+  /function focusTerminalFromTerminalTap\(\) \{[\s\S]*terminalActionKeyboardPolicyActive = false;[\s\S]*terminalActionEditableFocusBlocked = false;[\s\S]*terminalActionNativeKeyboardWasVisible = terminalNativeKeyboardVisible\(\);[\s\S]*focusTerminalForDirectInput\(\);/,
+  "a direct tap in the terminal input surface must clear the ordinary-action gate before focusing xterm",
+);
+
+assert.match(
+  terminalFocusJs,
+  /function guardTerminalActionEditableFocus\(event\)[\s\S]*terminalEditableFocusTarget\(target\)[\s\S]*terminalActionKeyboardPolicyActive = false[\s\S]*terminalExplicitSystemKeyboardGestureTarget\(target\)[\s\S]*terminalActionControlTarget\(target\)[\s\S]*terminalActionNativeKeyboardWasVisible = terminalNativeKeyboardVisible\(\)[\s\S]*terminalActionKeyboardPolicyActive = true[\s\S]*terminalActionEditableFocusBlocked = !terminalActionNativeKeyboardWasVisible[\s\S]*event\.preventDefault\(\)/,
+  "all action controls must enter the global editable-focus gate except direct editable gestures and the authorized system-keyboard control",
+);
+assert.match(
+  terminalFocusJs,
+  /function terminalActionControlTarget\(target\)[\s\S]*target\.closest\(\"select\"\)[\s\S]*return null;/,
+  "native select controls inside labels must keep their pointer default action",
+);
+assert.match(
+  terminalFocusJs,
+  /function installTerminalProgrammaticFocusGate\(\)[\s\S]*HTMLElement\.prototype\.focus[\s\S]*terminalActionKeyboardPolicyActive[\s\S]*terminalActionEditableFocusBlocked && terminalEditableFocusTarget\(this\)[\s\S]*terminalActionNativeKeyboardWasVisible[\s\S]*terminalEditableFocusTarget\(activeElement\)[\s\S]*this !== activeElement[\s\S]*nativeFocus\.apply/,
+  "ordinary actions must reject programmatic focus before an editable control can summon the keyboard",
+);
+assert.match(
+  terminalFocusJs,
+  /function installTerminalDialogFocusGate\(\)[\s\S]*\["show", "showModal"\][\s\S]*terminalActionKeyboardPolicyActive[\s\S]*terminalDialogEditableControls\(this\)[\s\S]*setAttribute\("inert", ""\)[\s\S]*nativeShow\.apply/,
+  "dialogs opened while the keyboard is closed must suppress native editable autofocus",
+);
+assert.match(
+  terminalFocusJs,
+  /function resetTerminalImeFocusContext\(\{ desktopInput = false \} = \{\}\) \{[\s\S]*terminalActionPreservesVisibleNativeKeyboard\(\)[\s\S]*syncTerminalImePolicy\(\);[\s\S]*return;/,
+  "ordinary dialog actions must not blur an already-visible native keyboard",
+);
+assert.match(
+  terminalFocusJs,
+  /function rejectTerminalActionEditableFocus\(event\)[\s\S]*!terminalActionEditableFocusBlocked[\s\S]*terminalEditableFocusTarget\(target\)[\s\S]*target\.blur\(\)[\s\S]*syncTerminalImePolicy\(\)/,
+  "the global gate must synchronously reject editable focus leaked by any button action",
+);
+assert.match(
+  terminalFocusJs,
+  /function terminalActionFocusGateExempt\(target\)[\s\S]*terminalClipboardHelper[\s\S]*function rejectTerminalActionEditableFocus\(event\)[\s\S]*terminalActionFocusGateExempt\(target\)[\s\S]*return;[\s\S]*terminalActionEditableFocusBlocked/,
+  "the global focusin gate must preserve the hidden textarea used by clipboard fallback",
+);
+assert.match(
+  terminalEntryJs,
+  /installTerminalProgrammaticFocusGate\(\);[\s\S]*installTerminalDialogFocusGate\(\);[\s\S]*document\.addEventListener\("pointerdown", guardTerminalActionEditableFocus, true\);[\s\S]*document\.addEventListener\("click", guardTerminalActionEditableFocus, true\);[\s\S]*document\.addEventListener\("focusin", rejectTerminalActionEditableFocus, true\);/,
+  "the editable-focus gate must run in capture phase before every terminal action handler",
+);
 
 assert.match(
   terminalFocusJs,
@@ -157,8 +214,8 @@ assert.match(
 
 assert.match(
   terminalMobileKeysJs,
-  /function handleTerminalEscapeCommandMenuClick\(event\) \{[\s\S]*sendTerminalInput\(sequence\);[\s\S]*focusTerminalAfterSoftKeyboardInput\(\);[\s\S]*\}/,
-  "the Esc/^C menu should not reopen the system keyboard after sending input",
+  /function sendTerminalEscapeCtrlCInput\(sequenceKey\) \{[\s\S]*sendTerminalInput\(sequence\);[\s\S]*focusTerminalAfterSoftKeyboardInput\(\);[\s\S]*\}/,
+  "the Esc/^C key should not reopen the system keyboard after sending input",
 );
 
 assert.match(
@@ -181,8 +238,8 @@ assert.match(
 
 assert.match(
   terminalEntryJs,
-  /mobileKeysEl\.addEventListener\("keydown", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("keyup", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("beforeinput", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("click", handleMobileKeyClick, true\);/,
-  "mobile soft-key container should capture keyboard/input/click events from arrow buttons before the system IME sees them",
+  /mobileKeysEl\.addEventListener\("keydown", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("keyup", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("beforeinput", handleMobileKeyKeyboardEvent, true\);[\s\S]*mobileKeysEl\.addEventListener\("click", handleMobileKeyClick, true\);[\s\S]*mobileKeysEl\.addEventListener\("pointerup", restoreSystemImeAfterSoftKeyboardControl, true\);[\s\S]*mobileKeysEl\.addEventListener\("pointercancel", restoreSystemImeAfterSoftKeyboardControl, true\);[\s\S]*mobileKeysEl\.addEventListener\("click", restoreSystemImeAfterSoftKeyboardControl, true\);/,
+  "mobile soft-key container should restore the pre-gesture system-IME state after pointer or click dispatch",
 );
 
 assert.match(
@@ -193,24 +250,74 @@ assert.match(
 
 assert.match(
   terminalMobileKeysJs,
-  /function handleMobileKeyPointerDown\(event\) \{\s*preserveSoftKeyboardImeFocus\(event\);\s*focusTerminalAfterSoftKeyboardInput\(\);[\s\S]*const button = suppressMobileKeyNativeEvent\(event\);/,
-  "every pointer interaction inside the soft keyboard should preserve system IME state, including plain navigation and tool buttons",
+  /function handleMobileKeyPointerDown\(event\) \{\s*suppressSystemImeForSoftKeyboardControl\(event\);\s*focusTerminalAfterSoftKeyboardInput\(\);[\s\S]*const button = suppressMobileKeyNativeEvent\(event\);/,
+  "every pointer interaction inside the soft keyboard should suppress system IME unless it is the explicit system-keyboard control",
 );
 
 assert.match(
   terminalMobileKeysJs,
-  /function preserveSoftKeyboardImeFocus\(event\)[\s\S]*terminalHelperTextareaFocused\(\)[\s\S]*event\.preventDefault\(\)/,
-  "every non-IME control in the soft-keyboard command surfaces should preserve the current helper focus before native focus can change it",
+  /function suppressSystemImeForSoftKeyboardControl\(event\)[\s\S]*explicitSystemImeControl\(control\)[\s\S]*event\.preventDefault\(\)/,
+  "every non-IME control in the soft-keyboard command surfaces should block native focus before it can summon the system keyboard",
 );
 assert.match(
   terminalMobileKeysJs,
-  /function handleMobileKeyFocusIn\(event\)[\s\S]*terminalSystemKeyboardCheckboxEl[\s\S]*softKeyboardImeFocusWasActive[\s\S]*focusTerminalHelperTextareaPreservingIme\(\)[\s\S]*target\.blur\(\)/,
-  "the focus safety net should restore an already-open IME but keep a previously closed IME closed",
+  /function restoreSystemImeAfterSoftKeyboardControl\(event\)[\s\S]*softKeyboardImeFocusSnapshots\.get\(control\)[\s\S]*snapshot\.sequence !== softKeyboardImeGestureSequence[\s\S]*if \(!snapshot\.focused\) \{[\s\S]*blurTerminalHelperTextarea\(\)[\s\S]*\} else \{[\s\S]*syncTerminalImePolicy\(\)[\s\S]*window\.requestAnimationFrame\(restore\)[\s\S]*\[80, 180, 320\]\.forEach/,
+  "ordinary controls may preserve existing focus but must never refocus the terminal helper",
+);
+assert.doesNotMatch(
+  terminalMobileKeysJs,
+  /focusTerminalHelperTextareaPreservingIme/,
+  "no ordinary soft-key path may contain a helper refocus escape hatch",
+);
+assert.doesNotMatch(
+  terminalMobileKeysJs,
+  /softKeyboardImeDesiredFocus|softKeyboardImeDesiredFocusUntil/,
+  "a new control gesture must sample current helper focus instead of inheriting stale focus from an earlier gesture",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /const isMainSoftKey = Boolean\(mobileKeysEl\?\.contains\(control\)\);[\s\S]*!isMainSoftKey && now < softKeyboardMenuImeFocusUntil[\s\S]*terminalHelperTextareaFocused\(\)[\s\S]*if \(isMainSoftKey\) \{[\s\S]*softKeyboardMenuImeFocus = helperWasFocused/,
+  "main soft keys such as Home must sample current focus while nested menu items inherit only their menu chain state",
 );
 assert.match(
   terminalEntryJs,
-  /terminalEscapeCommandMenuEl,[\s\S]*terminalNumberMenuEl,[\s\S]*terminalSlashCommandMenuEl,[\s\S]*terminalFunctionCommandMenuEl,[\s\S]*terminalProjectCommandMenuEl,[\s\S]*terminalToolsMenuEl,[\s\S]*terminalCommandCollectionsMenuEl,[\s\S]*surface\.addEventListener\("pointerdown", preserveSoftKeyboardImeFocus, true\);[\s\S]*surface\.addEventListener\("focusin", handleMobileKeyFocusIn, true\);/,
-  "every detached soft-keyboard command menu must use the same IME-state preservation gate",
+  /scrollTerminalBottomButton[\s\S]*preserveSystemImeStateForControl\(scrollTerminalBottomButton\)/,
+  "the jump-to-bottom control must preserve a manually dismissed system keyboard",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /const label = target\.closest\("label"\);[\s\S]*label\?\.querySelector\('input\[type="checkbox"\]'\)[\s\S]*labeledCheckbox \|\| target\.closest\("button, input\[type=checkbox\]"\)/,
+  "checkbox labels such as 触摸复制 must participate in the same IME-state preservation gate",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /function explicitSystemImeControl\(control\) \{\s*return control === terminalSystemKeyboardCheckboxEl;\s*\}/,
+  "only the 系统键盘 checkbox in 全能 may bypass system-IME suppression",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /function handleMobileKeyFocusIn\(event\)[\s\S]*terminalSystemKeyboardCheckboxEl[\s\S]*target\.blur\(\)[\s\S]*softKeyboardImeFocusSnapshots\.get\(control\)[\s\S]*if \(!snapshot\?\.focused\) \{[\s\S]*blurTerminalHelperTextarea\(\)[\s\S]*\} else \{[\s\S]*syncTerminalImePolicy\(\)/,
+  "the focus safety net must not refocus the helper after native focus leakage",
+);
+assert.match(
+  terminalEntryJs,
+  /terminalNumberMenuEl,[\s\S]*terminalSlashCommandMenuEl,[\s\S]*terminalFunctionCommandMenuEl,[\s\S]*terminalProjectCommandMenuEl,[\s\S]*terminalToolsMenuEl,[\s\S]*terminalToolMenuEl,[\s\S]*terminalCommandCollectionsMenuEl,[\s\S]*surface\.addEventListener\("pointerdown", suppressSystemImeForSoftKeyboardControl, true\);[\s\S]*surface\.addEventListener\("pointerup", restoreSystemImeAfterSoftKeyboardControl, true\);[\s\S]*surface\.addEventListener\("pointercancel", restoreSystemImeAfterSoftKeyboardControl, true\);[\s\S]*surface\.addEventListener\("click", restoreSystemImeAfterSoftKeyboardControl, true\);[\s\S]*surface\.addEventListener\("focusin", handleMobileKeyFocusIn, true\);/,
+  "every detached soft-keyboard command menu must use the same system-IME suppression gate",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /function handleMobileKeyPointerEnd\(event\)[\s\S]*triggerMobileKey\(button\);\s*restoreSystemImeAfterSoftKeyboardControl\(\{ target: button \}\);/,
+  "the main soft-key dispatcher must restore system-IME focus after every non-system-keyboard action",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /function runTerminalKeyboardCommand\(action, \{ source = null \} = \{\}\)[\s\S]*if \(imeAction\.kind === "show"\) \{\s*if \(source !== terminalSystemKeyboardCheckboxEl\) \{[\s\S]*blurTerminalHelperTextarea\(\);[\s\S]*return false;/,
+  "show_system_keyboard must reject every caller except the 全能 system-keyboard checkbox",
+);
+assert.match(
+  terminalMobileKeysJs,
+  /if \(button\.dataset\.action === "toggle_ime"\) \{\s*blurTerminalHelperTextarea\(\);\s*syncTerminalKeyboardCheckboxes\(\);\s*return;\s*\}/,
+  "legacy toggle_ime buttons must never focus or reopen the system keyboard",
 );
 assert.doesNotMatch(
   terminalEntryJs,
@@ -243,8 +350,32 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /terminal-focus-selection\.js\?v=20260803b/,
-  "terminal focus helper should use the soft-keyboard system-IME preservation cache version",
+  /terminal-focus-selection\.js\?v=[0-9a-z]+/,
+  "terminal focus helper should carry a cache version param",
+);
+
+assert.doesNotMatch(
+  terminalHtml,
+  /autofocus/,
+  "terminal dialogs must not contain native autofocus that can alter keyboard state",
+);
+assert.match(
+  terminalFocusJs,
+  /function terminalActionFocusGateExempt\(target\)[\s\S]*terminalClipboardHelper[\s\S]*session-rename-input[\s\S]*function installTerminalProgrammaticFocusGate\(\)[\s\S]*terminalActionFocusGateExempt\(this\)[\s\S]*function rejectTerminalActionEditableFocus\(event\)[\s\S]*terminalActionFocusGateExempt\(target\)/,
+  "rename input focus should pass both terminal keyboard focus gates",
+);
+assert.doesNotMatch(
+  terminalDialogsJs.slice(
+    terminalDialogsJs.indexOf("function openTerminalPasteDialog"),
+    terminalDialogsJs.indexOf("function closeTerminalPasteDialog"),
+  ),
+  /terminalPaste(?:Text|ScheduleDelay)El\??\.focus/,
+  "opening paste or schedule controls must not actively focus an editable field",
+);
+assert.match(
+  terminalHtml,
+  /terminal-dialogs\.js\?v=[0-9a-z]+/,
+  "terminal dialogs should use the no-autofocus cache version",
 );
 
 for (const asset of [

@@ -6,37 +6,38 @@ import test from 'node:test';
 const repoRoot = path.resolve(import.meta.dirname, '..');
 
 const expectedRoutes = new Set([
+  '/api/artifacts/update/windows/{project}',
+  '/api/auth/api-presets/{preset_id}/favorite',
+  '/api/auth/codebuddy-accounts',
+  '/api/auth/codebuddy-accounts/oauth/poll',
+  '/api/auth/codebuddy-accounts/oauth/start',
+  '/api/auth/codebuddy-accounts/{account_id}',
+  '/api/auth/codebuddy-accounts/{account_id}/checkin',
+  '/api/auth/codebuddy-accounts/{account_id}/credits',
+  '/api/auth/codebuddy-accounts/{account_id}/switch',
+  '/api/auth/codebuddy-accounts/{account_id}/travel',
+  '/api/auth/codebuddy-auto',
+  '/api/auth/codebuddy-options',
+  '/api/auth/codex-accounts',
+  '/api/auth/codex-accounts/{kind}/{preset_id}/apply',
+  '/api/auth/cross-instance-login',
+  '/api/auth/cross-instance-ticket',
+  '/api/auth/current/preset',
+  '/api/auth/model-catalog-policy',
+  '/api/auth/password',
+  '/api/auth/zcode-migration',
+  '/api/cymusic/diagnostics',
+  '/api/terminal/sessions/{session_id}/group',
+  '/api/terminal/workspace-restores',
   '/',
   '/agent',
+  '/agent/profiles',
+  '/agent/runtime',
   '/api/agent/api-presets',
-  '/api/agent/config',
   '/api/agent/exec-with-preset',
-  '/api/agent/models',
-  '/api/agent/sessions',
-  '/api/agent/sessions/{session_id}',
-  '/api/agent/sessions/{session_id}/approvals',
-  '/api/agent/sessions/{session_id}/approvals/allow-all',
-  '/api/agent/sessions/{session_id}/approvals/{approval_id}/allow',
-  '/api/agent/sessions/{session_id}/approvals/{approval_id}/deny',
-  '/api/agent/sessions/{session_id}/chat',
-  '/api/agent/sessions/{session_id}/chat/stop',
-  '/api/agent/sessions/{session_id}/checkpoints',
-  '/api/agent/sessions/{session_id}/checkpoints/{checkpoint_id}/restore',
-  '/api/agent/sessions/{session_id}/clear',
-  '/api/agent/sessions/{session_id}/commands',
-  '/api/agent/sessions/{session_id}/commands/{command_id}',
-  '/api/agent/sessions/{session_id}/commands/{command_id}/stdin',
-  '/api/agent/sessions/{session_id}/commands/{command_id}/terminate',
-  '/api/agent/sessions/{session_id}/compact',
-  '/api/agent/sessions/{session_id}/context',
-  '/api/agent/sessions/{session_id}/run',
-  '/api/agent/sessions/{session_id}/summary',
-  '/api/agent/skill-dirs',
   '/api/agent/skills',
-  '/api/agent/skills/toggle',
   '/api/agent/terminal-profiles',
   '/api/agent/terminal-profiles/{profile_id}',
-  '/api/agent/tools',
   '/api/artifacts',
   '/api/artifacts/download/{artifact_id}/{file_name}',
   '/api/artifacts/publish',
@@ -50,6 +51,8 @@ const expectedRoutes = new Set([
   '/api/auth/api-presets/{preset_id}/apply',
   '/api/auth/api-presets/{preset_id}/test',
   '/api/auth/api-presets/{preset_id}/verify',
+  '/api/auth/preset-run-leases/{lease_id}',
+  '/api/auth/preset-run-leases/{lease_id}/heartbeat',
   '/api/auth/claude-presets',
   '/api/auth/claude-presets/reorder',
   '/api/auth/claude-presets/test-all',
@@ -60,6 +63,9 @@ const expectedRoutes = new Set([
   '/api/auth/current',
   '/api/auth/login',
   '/api/auth/logout',
+  '/api/auth/proxy-check',
+  '/api/auth/oauth/codex/browser/exchange',
+  '/api/auth/oauth/codex/browser/start',
   '/api/auth/oauth/codex/sessions/{session_id}',
   '/api/auth/oauth/codex/start',
   '/api/auth/preset-test-schedules',
@@ -73,13 +79,17 @@ const expectedRoutes = new Set([
   '/api/auth/presets/{preset_id}/apply',
   '/api/auth/presets/{preset_id}/refresh-quota',
   '/api/auth/presets/{preset_id}/test',
-  '/api/auth/preset-run-leases',
-  '/api/auth/preset-run-leases/{lease_id}',
-  '/api/auth/preset-run-leases/{lease_id}/heartbeat',
   '/api/auth/session',
+  '/api/auth/sub2api/auto-activate',
+  '/api/auth/sub2api/pelican',
+  '/api/auth/sub2api/recycle',
+  '/api/auth/sub2api/restore',
+  '/api/auth/sub2api/sync',
+  '/api/auth/sub2api/usage',
   '/api/auth/upstream-proxy-settings',
   '/api/build/compile',
   '/api/build/compile/complete',
+  '/api/build/compile/history',
   '/api/build/compile/notify',
   '/api/build/compile/status',
   '/api/build/deploy',
@@ -163,11 +173,13 @@ const expectedRoutes = new Set([
   '/api/terminal/sessions/{session_id}/auto-continue',
   '/api/terminal/sessions/{session_id}/continue',
   '/api/terminal/sessions/{session_id}/current-directory',
+  '/api/terminal/sessions/{session_id}/enter',
   '/api/terminal/sessions/{session_id}/extract-preset',
   '/api/terminal/sessions/{session_id}/idle',
   '/api/terminal/sessions/{session_id}/input',
   '/api/terminal/sessions/{session_id}/input-history',
   '/api/terminal/sessions/{session_id}/interrupt-and-resume',
+  '/api/terminal/sessions/{session_id}/message-delivery',
   '/api/terminal/sessions/{session_id}/paste-assets',
   '/api/terminal/sessions/{session_id}/restore',
   '/api/terminal/ws',
@@ -227,9 +239,27 @@ test('route registration is composed by domain without changing the route set', 
     (match) => match[1],
   );
 
-  assert.equal(registrations.length, 180);
+  assert.equal(registrations.length, 192);
   assert.deepEqual(new Set(registrations), expectedRoutes);
   assert.doesNotMatch(read('src/main.rs'), /\.route\(/);
+});
+
+test('provider proxy routes lift the JSON body limit to the upstream proxy cap', () => {
+  const gatewaySource = read('src/routes/gateway.rs');
+
+  assert.match(
+    gatewaySource,
+    /const MAX_PROXY_REQUEST_BODY_BYTES: usize = 32 \* 1024 \* 1024;/,
+  );
+  assert.match(
+    gatewaySource,
+    /\.layer\(DefaultBodyLimit::max\(MAX_PROXY_REQUEST_BODY_BYTES\)\)/,
+  );
+  assert.equal(
+    gatewaySource.match(/\.layer\(DefaultBodyLimit::max\(MAX_PROXY_REQUEST_BODY_BYTES\)\)/g)
+      ?.length,
+    1,
+  );
 });
 
 test('upstream protocol transforms live behind a private child module', () => {

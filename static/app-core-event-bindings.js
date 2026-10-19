@@ -4,6 +4,7 @@
 function bindCoreEventHandlers() {
   bindWorkspaceHistoryPresetForkDialog();
   bindWorkspaceDesignatePresetDialog();
+  bindTerminalSpecifiedTaskDialog();
 
   editorEl.addEventListener("input", () => {
     if (!state.currentFileEditable) {
@@ -88,6 +89,10 @@ function bindCoreEventHandlers() {
     });
   }
 
+  workspaceHistoryPathCopyButton?.addEventListener("click", () => {
+    copyWorkspaceHistoryPath(workspaceHistoryPathCopyButton);
+  });
+
   if (workspaceHistoryTerminalButton) {
     workspaceHistoryTerminalButton.addEventListener("click", () => {
       const selectedPath = workspaceHistorySelectedPath();
@@ -108,9 +113,11 @@ function bindCoreEventHandlers() {
   }
 
   if (workspaceHistorySearchFormEl) {
+    renderWorkspaceHistorySearchHistory();
     workspaceHistorySearchFormEl.addEventListener("submit", (event) => {
       event.preventDefault();
       const value = workspaceHistorySearchInputEl ? workspaceHistorySearchInputEl.value : "";
+      rememberWorkspaceHistorySearch(value);
       scheduleWorkspaceHistorySearch(value, true);
     });
   }
@@ -133,7 +140,7 @@ function bindCoreEventHandlers() {
   if (workspaceHistoryRecentOnlyEl) {
     workspaceHistoryRecentOnlyEl.addEventListener("change", (event) => {
       state.workspaceHistoryRecentOnly = Boolean(event.target.checked);
-      renderWorkspaceHistory();
+      refreshWorkspaceHistoryConversations();
     });
   }
 
@@ -177,17 +184,15 @@ function bindCoreEventHandlers() {
     });
   }
 
-  if (sessionRenameDialogEl) {
-    sessionRenameDialogEl.addEventListener("cancel", (event) => {
-      event.preventDefault();
-      closeTerminalRenameDialog();
-    });
-    sessionRenameDialogEl.addEventListener("click", (event) => {
-      if (event.target === sessionRenameDialogEl) {
-        closeTerminalRenameDialog();
-      }
-    });
-  }
+if (sessionRenameDialogEl) {
+  sessionRenameDialogEl.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeTerminalRenameDialog();
+  });
+  sessionRenameDialogEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+  }, true);
+}
 
   if (sessionRenameCancelButton) {
     sessionRenameCancelButton.addEventListener("click", () => {

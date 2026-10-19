@@ -103,18 +103,90 @@ async def main():
                 && terminalHelperTextarea()"""
         )
 
+        await page.evaluate(
+            """() => {
+              window.__originalTerminalNativeKeyboardVisible = terminalNativeKeyboardVisible;
+              window.__setTerminalNativeKeyboardVisible = (visible) => {
+                terminalNativeKeyboardVisible = () => visible;
+              };
+            }"""
+        )
+
+        global_gate_state = await page.evaluate(
+            """() => {
+              const input = document.createElement('input');
+              const button = document.createElement('button');
+              button.type = 'button';
+              button.addEventListener('click', () => input.focus());
+              document.body.append(input, button);
+              button.click();
+              const blocked = document.activeElement !== input;
+              input.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+              input.focus();
+              const directEditableAllowed = document.activeElement === input;
+              input.remove();
+              button.remove();
+              return { blocked, directEditableAllowed };
+            }"""
+        )
+        assert global_gate_state == {
+            "blocked": True,
+            "directEditableAllowed": True,
+        }, global_gate_state
+
+        terminal_tap_state = await page.evaluate(
+            """() => {
+              terminalActionKeyboardPolicyActive = true;
+              terminalActionEditableFocusBlocked = true;
+              window.__setTerminalNativeKeyboardVisible(false);
+              terminalHelperTextarea().blur();
+              document.getElementById('terminal-host').click();
+              return {
+                policyActive: terminalActionKeyboardPolicyActive,
+                focusBlocked: terminalActionEditableFocusBlocked,
+                systemImeEnabled: terminalSystemImeEnabled,
+                helperFocused: document.activeElement === terminalHelperTextarea(),
+              };
+            }"""
+        )
+        assert terminal_tap_state == {
+            "policyActive": False,
+            "focusBlocked": False,
+            "systemImeEnabled": True,
+            "helperFocused": True,
+        }, terminal_tap_state
+
+        await page.evaluate(
+            """() => {
+              window.__imePolicyEditableFocusCalls = 0;
+              window.__imePolicyHelperFocusCalls = 0;
+              for (const prototype of [HTMLTextAreaElement.prototype, HTMLInputElement.prototype]) {
+                const originalFocus = prototype.focus;
+                prototype.focus = function (...args) {
+                  window.__imePolicyEditableFocusCalls += 1;
+                  if (this === terminalHelperTextarea()) {
+                    window.__imePolicyHelperFocusCalls += 1;
+                  }
+                  return originalFocus.apply(this, args);
+                };
+              }
+            }"""
+        )
+
         detached_soft_key_menus = [
-            ("#terminal-escape-command-button", "#terminal-escape-command-menu", "button"),
-            ("#terminal-number-button", "#terminal-number-menu", "button"),
-            ("#terminal-slash-command-button", "#terminal-slash-command-menu", "button"),
-            ("#terminal-function-command-button", "#terminal-function-command-menu", "button"),
-            ("#terminal-project-command-button", "#terminal-project-command-menu", "button"),
-            ("#terminal-tools-button", "#terminal-tools-menu", "button"),
+            ("#terminal-number-button", "#terminal-number-menu", "button:not([hidden])"),
+            ("#terminal-slash-command-button", "#terminal-slash-command-menu", "button:not([hidden])"),
+            ("#terminal-function-command-button", "#terminal-function-command-menu", "button:not([hidden])"),
+            ("#terminal-project-command-button", "#terminal-project-command-menu", "button:not([hidden])"),
+            ("#terminal-tools-button", "#terminal-tools-menu", "button:not([hidden])"),
         ]
 
         async def assert_detached_menu_preserves_ime(enabled):
             await page.evaluate(
                 """(enabled) => {
+                  terminalActionKeyboardPolicyActive = false;
+                  terminalActionEditableFocusBlocked = false;
+                  window.__setTerminalNativeKeyboardVisible(enabled);
                   setTerminalSystemImeEnabled(enabled);
                   if (enabled) {
                     terminalHelperTextarea().focus({ preventScroll: true });
@@ -137,6 +209,7 @@ async def main():
                     }"""
                 )
                 await menu.locator(item_selector).first.click()
+                await page.wait_for_timeout(380)
                 state = await page.evaluate(
                     """() => ({
                       systemImeEnabled: terminalSystemImeEnabled,
@@ -159,6 +232,59 @@ async def main():
         detached_menu_count = await assert_detached_menu_preserves_ime(True)
         assert await assert_detached_menu_preserves_ime(False) == detached_menu_count
 
+        await page.evaluate(
+            """() => {
+              terminalActionKeyboardPolicyActive = false;
+              terminalActionEditableFocusBlocked = false;
+              window.__setTerminalNativeKeyboardVisible(true);
+              setTerminalSystemImeEnabled(true);
+              terminalHelperTextarea().focus({ preventScroll: true });
+            }"""
+        )
+        await page.locator("#terminal-project-command-button").click()
+        await page.wait_for_timeout(380)
+        project_menu_state = await page.evaluate(
+            """() => ({
+              expanded: document.getElementById('terminal-project-command-button').getAttribute('aria-expanded'),
+              menuHidden: document.getElementById('terminal-project-command-menu').hidden,
+              helperFocused: document.activeElement === terminalHelperTextarea(),
+              visualHeight: window.visualViewport?.height || window.innerHeight,
+              layoutHeight: window.innerHeight,
+            })"""
+        )
+        assert project_menu_state["expanded"] == "true", project_menu_state
+        assert not project_menu_state["menuHidden"], project_menu_state
+        assert project_menu_state["helperFocused"], project_menu_state
+        await page.locator("#terminal-project-command-button").click()
+
+        await page.evaluate(
+            """() => {
+              terminalActionKeyboardPolicyActive = false;
+              terminalActionEditableFocusBlocked = false;
+              window.__setTerminalNativeKeyboardVisible(false);
+              window.__imePolicyEditableFocusCalls = 0;
+              terminalHelperTextarea().blur();
+            }"""
+        )
+        await page.locator("#terminal-schedule-button").click()
+        await page.wait_for_timeout(380)
+        schedule_state = await page.evaluate(
+            """() => ({
+              dialogOpen: document.getElementById('terminal-scheduled-tasks-dialog').open,
+              activeId: document.activeElement?.id || '',
+              activeEditable: document.activeElement instanceof HTMLTextAreaElement
+                || document.activeElement instanceof HTMLInputElement,
+            })"""
+        )
+        assert schedule_state["dialogOpen"] is True
+        assert schedule_state["activeEditable"] is False
+        await page.evaluate("document.getElementById('terminal-scheduled-tasks-dialog').close()")
+        await page.wait_for_timeout(380)
+        assert await page.evaluate("""() => hasPrimaryTouchInput()
+            ? !(document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement)
+            : terminalHelperTextareaFocused() && terminalHelperTextarea().getAttribute('inputmode') === 'text'
+        """)
+
         async def assert_direct_soft_keys_preserve_ime(enabled):
             original_trigger_saved = await page.evaluate(
                 """() => {
@@ -176,12 +302,16 @@ async def main():
                 for index in range(button_count):
                     await page.evaluate(
                         """(enabled) => {
+                          terminalActionKeyboardPolicyActive = false;
+                          terminalActionEditableFocusBlocked = false;
+                          window.__setTerminalNativeKeyboardVisible(enabled);
                           setTerminalSystemImeEnabled(enabled);
                           if (enabled) {
                             terminalHelperTextarea().focus({ preventScroll: true });
                           } else {
                             terminalHelperTextarea().blur();
                           }
+                          window.__imePolicyHelperFocusCalls = 0;
                           document.addEventListener('click', (event) => {
                             event.preventDefault();
                             event.stopImmediatePropagation();
@@ -192,14 +322,16 @@ async def main():
                     button = buttons.nth(index)
                     label = (await button.get_attribute("aria-label")) or (await button.inner_text())
                     await button.click()
+                    await page.wait_for_timeout(380)
                     state = await page.evaluate(
                         """() => ({
                           systemImeEnabled: terminalSystemImeEnabled,
                           helperFocused: document.activeElement === terminalHelperTextarea(),
+                          helperFocusCalls: window.__imePolicyHelperFocusCalls,
                         })"""
                     )
                     assert state["systemImeEnabled"] is enabled, (label, state)
-                    assert state["helperFocused"] is enabled, (label, state)
+                    assert state["helperFocusCalls"] == 0, (label, state)
             finally:
                 await page.evaluate(
                     """() => {
@@ -212,40 +344,110 @@ async def main():
         direct_soft_key_count = await assert_direct_soft_keys_preserve_ime(True)
         assert await assert_direct_soft_keys_preserve_ime(False) == direct_soft_key_count
 
+        end_button = page.locator('#terminal-mobile-keys [data-sequence="end"]')
+        assert await end_button.count() == 1
+        for enabled in (True, False):
+            await page.evaluate(
+                """(enabled) => {
+                  terminalActionKeyboardPolicyActive = false;
+                  terminalActionEditableFocusBlocked = false;
+                  window.__setTerminalNativeKeyboardVisible(enabled);
+                  setTerminalSystemImeEnabled(enabled);
+                  if (enabled) terminalHelperTextarea().focus({ preventScroll: true });
+                  else terminalHelperTextarea().blur();
+                }""",
+                enabled,
+            )
+            await end_button.click()
+            await page.wait_for_timeout(380)
+            end_state = await page.evaluate(
+                """() => ({
+                  enabled: terminalSystemImeEnabled,
+                  focused: document.activeElement === terminalHelperTextarea(),
+                })"""
+            )
+            assert end_state == {"enabled": enabled, "focused": enabled}, end_state
+
+        for selector in (
+            '#terminal-mobile-keys [data-sequence="home"]',
+            '#scroll-terminal-bottom',
+        ):
+            await page.evaluate(
+                """() => {
+                  terminalActionKeyboardPolicyActive = false;
+                  terminalActionEditableFocusBlocked = false;
+                  window.__setTerminalNativeKeyboardVisible(false);
+                  setTerminalSystemImeEnabled(true);
+                  terminalHelperTextarea().blur();
+                  window.__imePolicyHelperFocusCalls = 0;
+                }"""
+            )
+            if selector == '#scroll-terminal-bottom':
+                await page.evaluate(
+                    """async () => {
+                      await new Promise((resolve) => {
+                        term.write(
+                          Array.from({ length: 120 }, (_, index) => `bottom-test-${index}\\r\\n`).join(''),
+                          resolve,
+                        );
+                      });
+                      scrollTerminalToTop();
+                      updateTerminalScrollBottomButton();
+                    }"""
+                )
+                assert not await page.locator(selector).is_disabled()
+            await page.locator(selector).click()
+            await page.wait_for_timeout(380)
+            dismissed_keyboard_state = await page.evaluate(
+                """() => ({
+                  enabled: terminalSystemImeEnabled,
+                  focused: document.activeElement === terminalHelperTextarea(),
+                  helperFocusCalls: window.__imePolicyHelperFocusCalls,
+                })"""
+            )
+            assert dismissed_keyboard_state == {
+                "enabled": True,
+                "focused": False,
+                "helperFocusCalls": 0,
+            }, (selector, dismissed_keyboard_state)
+
         await page.evaluate(
             """() => {
+              terminalActionKeyboardPolicyActive = false;
+              terminalActionEditableFocusBlocked = false;
+              window.__setTerminalNativeKeyboardVisible(true);
               setTerminalSystemImeEnabled(true);
               terminalHelperTextarea().focus({ preventScroll: true });
             }"""
         )
         await page.click("#terminal-function-command-button")
         assert await page.locator("#terminal-function-command-menu").is_visible()
+        await page.evaluate("window.__imePolicyHelperFocusCalls = 0")
         await page.locator('#terminal-mobile-keys [data-sequence="tab"]').click()
         assert await page.locator("#terminal-function-command-menu").is_hidden()
-        assert await page.evaluate(
-            "terminalSystemImeEnabled && document.activeElement === terminalHelperTextarea()"
-        )
+        assert await page.evaluate("window.__imePolicyHelperFocusCalls === 0")
 
         await page.click("#terminal-function-command-button")
         assert await page.locator("#terminal-function-command-menu").is_visible()
         await page.evaluate("window.dispatchEvent(new Event('blur'))")
         assert await page.locator("#terminal-function-command-menu").is_hidden()
-        assert await page.evaluate(
-            "terminalSystemImeEnabled && document.activeElement === terminalHelperTextarea()"
-        )
+        assert await page.evaluate("window.__imePolicyHelperFocusCalls === 0")
 
         await page.click("#terminal-function-command-button")
         assert await page.locator("#terminal-function-command-menu").is_visible()
-        assert await page.evaluate("document.activeElement === terminalHelperTextarea()")
 
+        await page.evaluate("window.__imePolicyHelperFocusCalls = 0")
         await page.locator('label:has-text("触摸复制")').click()
-        assert await page.evaluate("document.activeElement === terminalHelperTextarea()")
+        assert await page.evaluate("window.__imePolicyHelperFocusCalls === 0")
         await page.keyboard.press("Escape")
         assert await page.locator("#terminal-function-command-menu").is_hidden()
-        assert await page.evaluate("document.activeElement === terminalHelperTextarea()")
+        assert await page.evaluate("window.__imePolicyHelperFocusCalls === 0")
 
         await page.evaluate(
             """() => {
+              terminalActionKeyboardPolicyActive = false;
+              terminalActionEditableFocusBlocked = false;
+              window.__setTerminalNativeKeyboardVisible(false);
               setTerminalSystemImeEnabled(false);
               terminalHelperTextarea().blur();
             }"""
@@ -255,10 +457,34 @@ async def main():
         await page.locator('label:has-text("触摸复制")').click()
         assert not await page.evaluate("document.activeElement === terminalHelperTextarea()")
 
-        await page.locator('label:has-text("系统键盘")').click()
-        assert await page.evaluate(
-            "terminalSystemImeEnabled && document.activeElement === terminalHelperTextarea()"
+        unauthorized_show_result = await page.evaluate(
+            """() => ({
+              accepted: runTerminalKeyboardCommand('show_system_keyboard'),
+              helperFocused: document.activeElement === terminalHelperTextarea(),
+            })"""
         )
+        assert unauthorized_show_result == {
+            "accepted": False,
+            "helperFocused": False,
+        }, unauthorized_show_result
+
+        await page.locator('label:has-text("系统键盘")').click()
+        authorized_keyboard_state = await page.evaluate(
+            """() => ({
+              enabled: terminalSystemImeEnabled,
+              helperFocused: document.activeElement === terminalHelperTextarea(),
+              activeId: document.activeElement?.id || '',
+              policyActive: terminalActionKeyboardPolicyActive,
+              focusBlocked: terminalActionEditableFocusBlocked,
+            })"""
+        )
+        assert authorized_keyboard_state == {
+            "enabled": True,
+            "helperFocused": True,
+            "activeId": "",
+            "policyActive": False,
+            "focusBlocked": False,
+        }, authorized_keyboard_state
 
         result = await page.evaluate(
             """() => ({

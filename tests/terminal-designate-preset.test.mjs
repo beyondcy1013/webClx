@@ -20,7 +20,7 @@ const sharedSpecifiedPresetSource = readFileSync(
 test("project commands expose designated preset fork and terminal launches", () => {
   assert.match(
     terminalHtml,
-    /id="terminal-project-command-select"[\s\S]*?<option value="designate_preset_fork">指定预设\+fork（持久切换）<\/option>[\s\S]*?<option value="designate_preset_terminal">指定预设终端<\/option>/,
+    /id="terminal-project-command-select"[\s\S]*?<option value="designate_preset_fork">临时\/新终端\/fork<\/option>[\s\S]*?<option value="designate_preset_terminal">临时\/新终端\/新对话<\/option>/,
   );
   assert.match(terminalHtml, /id="terminal-specified-task-dialog"/);
   assert.match(terminalHtml, /id="terminal-specified-task-session-id"/);
@@ -31,13 +31,9 @@ test("project commands expose designated preset fork and terminal launches", () 
   );
 });
 
-test("fork designation waits for the resume Session to render before opening the dialog", async () => {
+test("fork designation reads the active Session without mutating the source terminal", async () => {
   const calls = [];
   const sourceContext = { sessionId: "terminal-source", term: {} };
-  let resolveRenderedCommand;
-  const renderedCommand = new Promise((resolve) => {
-    resolveRenderedCommand = resolve;
-  });
   const detected = [{
     resumeId: "019d1ba6-f772-7452-a391-6553ccbc0a50",
     command: "codex resume 019d1ba6-f772-7452-a391-6553ccbc0a50",
@@ -58,17 +54,6 @@ test("fork designation waits for the resume Session to render before opening the
     },
     async waitForTerminalToolSessionReady(sessionId) {
       calls.push({ kind: "ready", sessionId });
-    },
-    readTerminalBufferTailTextFrom() {
-      return "terminal buffer before /fork";
-    },
-    async waitForTerminalToolResumeCommand(context, baselineCommand, timeoutMs, options) {
-      calls.push({ kind: "render-wait", context, baselineCommand, timeoutMs, options });
-      return renderedCommand;
-    },
-    parseResumeInputInfo(command) {
-      const resumeId = String(command).split(" ").at(-1);
-      return { id: resumeId, command: `codex resume ${resumeId}`, program: "codex" };
     },
     specifiedPresetAgent: (program) => program === "claude" ? "claude" : "codex",
     shortResumeId: (resumeId) => String(resumeId).slice(0, 8),
@@ -96,41 +81,15 @@ test("fork designation waits for the resume Session to render before opening the
   };
   vm.createContext(sandbox);
   vm.runInContext(designateSource, sandbox);
-  const opening = sandbox.openTerminalDesignatePresetForkDialog();
-
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(
-    calls.filter((call) => call.kind === "dialog").length,
-    0,
-    "the dialog must remain closed while only process-fd detection has changed",
-  );
-
-  resolveRenderedCommand("codex resume 019d1ba6-f772-7452-a391-6553ccbc0a50");
-  await opening;
+  await sandbox.openTerminalDesignatePresetForkDialog();
 
   assert.deepEqual(
     JSON.parse(JSON.stringify(
-      calls.filter((call) => ["ready", "detect", "shortcut", "render-wait", "dialog"].includes(call.kind)),
+      calls.filter((call) => ["ready", "detect", "shortcut", "dialog"].includes(call.kind)),
     )),
     [
       { kind: "ready", sessionId: "terminal-source" },
       { kind: "detect", sessionId: "terminal-source" },
-      {
-        kind: "shortcut",
-        key: "fork",
-        options: { sessionId: "terminal-source" },
-      },
-      {
-        kind: "render-wait",
-        context: sourceContext,
-        baselineCommand: "codex resume 019d1ba6-f772-7452-a391-6553ccbc0a50",
-        timeoutMs: 20000,
-        options: {
-          allowBaseline: true,
-          initialBufferText: "terminal buffer before /fork",
-          maxLines: 20,
-        },
-      },
       {
         kind: "dialog",
         trigger: null,
@@ -139,28 +98,23 @@ test("fork designation waits for the resume Session to render before opening the
           lockAgent: true,
           mode: "fixed",
           resetTask: true,
-          sessionAction: "resume",
+          sessionAction: "fork",
           sessionId: "019d1ba6-f772-7452-a391-6553ccbc0a50",
           showSessionField: true,
           sourcePath: "webClx",
           sourceTerminalName: "webClx_7",
           namingAction: "fork",
-          title: "指定预设+fork（持久切换）",
+          temporary: true,
+          title: "指定预设+fork",
         },
       },
     ],
   );
+  assert.doesNotMatch(designateSource, /runTerminalSlashCommandByKey\("fork"/);
+  assert.doesNotMatch(designateSource, /waitForTerminalDesignateForkSession/);
   assert.match(
     designateSource,
-    /runTerminalSlashCommandByKey\("fork", \{ sessionId: sourceSessionId \}\)[\s\S]*?waitForTerminalDesignateForkSession\([\s\S]*?sourceContext[\s\S]*?baseline[\s\S]*?openTerminalDesignatePresetDialog\(\{[\s\S]*?sessionId: forked\.resumeId/,
-  );
-  assert.match(
-    designateSource,
-    /waitForTerminalToolResumeCommand\([\s\S]*?sourceContext[\s\S]*?baselineCommand[\s\S]*?parseResumeInputInfo\(renderedCommand\)/,
-  );
-  assert.match(
-    designateSource,
-    /sourceTerminalName,[\s\S]*?namingAction: "fork"/,
+    /sessionId: baseline\.resumeId,[\s\S]*?sourceTerminalName,[\s\S]*?namingAction: "fork"/,
   );
 });
 
@@ -190,6 +144,7 @@ test("designated preset terminal lets the dialog derive the current terminal nam
           sessionId: "",
           showSessionField: true,
           sourcePath: "webClx",
+          temporary: true,
           title: "指定预设终端",
       },
     },
@@ -203,14 +158,14 @@ test("the shared launch helper waits for terminal startup before returning", () 
   );
   assert.match(
     designateSource,
-    /const dialogOptions = \{[\s\S]*?sessionAction: normalizedSessionId \? "resume" : "new"[\s\S]*?sessionId: normalizedSessionId[\s\S]*?showSessionField: true[\s\S]*?openTerminalSpecifiedTaskDialog\(trigger, dialogOptions\)/,
+    /const resolvedNamingAction = [\s\S]*?\["new", "resume", "fork"\][\s\S]*?const dialogOptions = \{[\s\S]*?sessionAction: resolvedNamingAction[\s\S]*?sessionId: normalizedSessionId[\s\S]*?showSessionField: true[\s\S]*?openTerminalSpecifiedTaskDialog\(trigger, dialogOptions\)/,
   );
 });
 
 test("project commands expose the designated preset resume option", () => {
   assert.match(
     terminalHtml,
-    /<option value="designate_preset_fork">指定预设\+fork（持久切换）<\/option>[\s\S]*?<option value="designate_preset_resume">指定预设\+resume（持久切换）<\/option>[\s\S]*?<option value="designate_preset_terminal">指定预设终端<\/option>/,
+    /<option value="designate_preset_fork">临时\/新终端\/fork<\/option>[\s\S]*?<option value="designate_preset_resume">临时\/新终端\/resume<\/option>[\s\S]*?<option value="designate_preset_terminal">临时\/新终端\/新对话<\/option>/,
   );
   assert.match(
     mobileKeysSource,
@@ -302,7 +257,8 @@ test("designated preset resume waits for the shared complete Session detector", 
           sourcePath: "webClx",
           sourceTerminalName: "webClx_9",
           namingAction: "resume",
-          title: "指定预设+resume（持久切换）",
+          temporary: true,
+          title: "指定预设+resume",
         },
       },
     ],

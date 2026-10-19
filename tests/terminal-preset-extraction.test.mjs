@@ -37,10 +37,10 @@ test("terminal tools menu starts with batch preset update and ends with single e
 test("terminal tools menu uses all available viewport height before scrolling", () => {
   assert.match(
     terminalStyles,
-    /\.terminal-tools-menu-with-tools \{[\s\S]*?max-height: calc\(100vh - 16px\);[\s\S]*?max-height: calc\(100dvh - 16px\);[\s\S]*?overflow-y: auto;/,
+    /\.terminal-tools-menu-with-tools \{[\s\S]*?max-height: min\(calc\(100vh - 16px\),\s*calc\(100dvh - 16px\)\);[\s\S]*?overflow-y: auto;/,
   );
   assert.doesNotMatch(terminalStyles, /max-height: min\(76vh, 600px\)/);
-  assert.match(terminalHtml, /styles-terminal\.css\?v=20260804b/);
+  assert.match(terminalHtml, /styles-terminal\.css\?v=20260912c/);
 });
 
 test("single extraction updates the matching session from the status provider", async () => {

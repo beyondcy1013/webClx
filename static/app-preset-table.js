@@ -61,6 +61,7 @@ function renderPresetTable({
   emptyColspan = 1,
   tableKey = "",
   sortColumns = [],
+  favoriteFirst = false,
   group = null,
   order = null,
   selection = null,
@@ -85,7 +86,12 @@ function renderPresetTable({
   }
 
   const visibleRows = buildPresetTableVisibleRows(
-    sortPresetTableRows(presets, tableKey, sortColumns),
+    sortPresetTableRows(
+      presets,
+      tableKey,
+      sortColumns,
+      favoriteFirst ? (preset) => preset?.favorite === true : null,
+    ),
     group,
   );
   visibleRows.forEach((rowContext) => {
@@ -116,6 +122,135 @@ function renderPresetTable({
     if (typeof decorateRow === "function") {
       decorateRow(row, preset);
     }
+    listEl.appendChild(row);
+  });
+}
+
+function appendPresetCompactDetail(list, label, value, { mono = false } = {}) {
+  const term = document.createElement("dt");
+  term.textContent = label;
+  const detail = document.createElement("dd");
+  if (mono) detail.classList.add("mono-text");
+  if (value instanceof Node) {
+    detail.appendChild(value);
+  } else {
+    detail.textContent = String(value || "—");
+  }
+  list.append(term, detail);
+}
+
+function renderPresetCompactList({
+  listEl,
+  presets = [],
+  expandedIds = new Set(),
+  selectedIds = new Set(),
+  selectionMode = false,
+  emptyText = "还没有保存任何预设。",
+  getGroupKey = () => "",
+  getGroupLabel = () => "",
+  getName = (preset) => preset?.name || "未命名预设",
+  getMeta = () => "",
+  createStatus = null,
+  createDetails = null,
+  primaryLabel = "切换",
+  onPrimary = null,
+  getActions = () => [],
+  onSelectionChange = null,
+  legacyApiClasses = false,
+  idPrefix = "provider",
+} = {}) {
+  if (!listEl) return;
+  listEl.replaceChildren();
+  if (!presets.length) {
+    const empty = document.createElement("p");
+    empty.className = "meta-text provider-preset-mobile-empty";
+    if (legacyApiClasses) empty.classList.add("api-mobile-preset-empty");
+    empty.textContent = emptyText;
+    listEl.appendChild(empty);
+    return;
+  }
+
+  let previousGroupKey = null;
+  presets.forEach((preset, index) => {
+    const groupKey = String(getGroupKey(preset, index) || "");
+    if (groupKey !== previousGroupKey) {
+      const groupLabel = document.createElement("div");
+      groupLabel.className = "provider-preset-mobile-group-label";
+      if (legacyApiClasses) groupLabel.classList.add("api-mobile-preset-group-label");
+      groupLabel.textContent = getGroupLabel(preset, index) || "未分组";
+      listEl.appendChild(groupLabel);
+      previousGroupKey = groupKey;
+    }
+
+    const row = document.createElement("div");
+    row.className = "provider-preset-mobile-row";
+    if (legacyApiClasses) row.classList.add("api-mobile-preset-row");
+    row.setAttribute("role", "listitem");
+    if (preset.active) row.classList.add("active-auth-row");
+    if (selectedIds.has(preset.id)) row.classList.add("is-selected");
+
+    const summary = document.createElement("div");
+    summary.className = "provider-preset-mobile-summary";
+    if (legacyApiClasses) summary.classList.add("api-mobile-preset-summary");
+    if (selectionMode) {
+      summary.classList.add("has-selection");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "provider-preset-mobile-checkbox";
+      if (legacyApiClasses) checkbox.classList.add("api-mobile-preset-checkbox");
+      checkbox.checked = selectedIds.has(preset.id);
+      checkbox.setAttribute("aria-label", `选择 ${getName(preset)}`);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) selectedIds.add(preset.id);
+        else selectedIds.delete(preset.id);
+        onSelectionChange?.();
+      });
+      summary.appendChild(checkbox);
+    }
+
+    const detailsId = `${idPrefix}-mobile-preset-${String(preset.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+    const identityButton = document.createElement("button");
+    identityButton.type = "button";
+    identityButton.className = "provider-preset-mobile-identity";
+    if (legacyApiClasses) identityButton.classList.add("api-mobile-preset-identity");
+    identityButton.setAttribute("aria-controls", detailsId);
+    identityButton.setAttribute("aria-expanded", expandedIds.has(preset.id) ? "true" : "false");
+    const name = document.createElement("strong");
+    name.className = "provider-preset-mobile-name";
+    if (legacyApiClasses) name.classList.add("api-mobile-preset-name");
+    name.textContent = getName(preset);
+    const meta = document.createElement("span");
+    meta.className = "provider-preset-mobile-meta mono-text";
+    if (legacyApiClasses) meta.classList.add("api-mobile-preset-meta");
+    meta.textContent = getMeta(preset);
+    identityButton.append(name, meta);
+    const status = createStatus?.(preset);
+    if (status) identityButton.appendChild(status);
+
+    const primaryButton = createActionButton(
+      primaryLabel,
+      () => onPrimary?.(preset),
+      "mini-button accent provider-preset-mobile-primary",
+    );
+    if (legacyApiClasses) primaryButton.classList.add("api-mobile-preset-primary");
+    const menuButton = createPresetActionMenu(getActions(preset), {
+      label: `${getName(preset)} 的更多操作`,
+    });
+    summary.append(identityButton, primaryButton, menuButton);
+
+    const details = createDetails?.(preset, detailsId) || document.createElement("div");
+    details.id = detailsId;
+    details.classList.add("provider-preset-mobile-details");
+    if (legacyApiClasses) details.classList.add("api-mobile-preset-details");
+    details.hidden = !expandedIds.has(preset.id);
+    identityButton.addEventListener("click", () => {
+      const expanded = !expandedIds.has(preset.id);
+      if (expanded) expandedIds.add(preset.id);
+      else expandedIds.delete(preset.id);
+      identityButton.setAttribute("aria-expanded", expanded ? "true" : "false");
+      details.hidden = !expanded;
+    });
+    row.append(summary, details);
     listEl.appendChild(row);
   });
 }
@@ -355,27 +490,32 @@ function comparePresetSortValues(left, right, type = "text") {
   return presetSortCollator.compare(left.value, right.value);
 }
 
-function sortPresetTableRows(presets, tableKey, sortColumns) {
-  const rows = Array.isArray(presets) ? presets : [];
+function sortPresetTableRows(presets, tableKey, sortColumns, partitionBy = null) {
+  const rows = (Array.isArray(presets) ? presets : [])
+    .map((preset, index) => ({ preset, index }));
   const sortState = getPresetTableSortState(tableKey);
   const sortColumn = findPresetSortColumn(sortColumns, sortState?.key);
   if (!sortState || !sortColumn || typeof sortColumn.getValue !== "function") {
-    return rows;
+    return rows.map((row) => row.preset);
   }
 
   const direction = sortState.direction === "desc" ? -1 : 1;
-  return rows
-    .map((preset, index) => ({ preset, index }))
-    .sort((left, right) => {
-      const leftValue = normalizePresetSortValue(sortColumn.getValue(left.preset), sortColumn.type);
-      const rightValue = normalizePresetSortValue(sortColumn.getValue(right.preset), sortColumn.type);
-      const valueOrder = comparePresetSortValues(leftValue, rightValue, sortColumn.type);
-      if (valueOrder !== 0) {
-        return valueOrder * direction;
-      }
-      return left.index - right.index;
-    })
-    .map((row) => row.preset);
+  const compareRows = (left, right) => {
+    const leftValue = normalizePresetSortValue(sortColumn.getValue(left.preset), sortColumn.type);
+    const rightValue = normalizePresetSortValue(sortColumn.getValue(right.preset), sortColumn.type);
+    const valueOrder = comparePresetSortValues(leftValue, rightValue, sortColumn.type);
+    if (valueOrder !== 0) {
+      return valueOrder * direction;
+    }
+    return left.index - right.index;
+  };
+  const sortedRows = typeof partitionBy === "function"
+    ? [
+      ...rows.filter((row) => partitionBy(row.preset) === true).sort(compareRows),
+      ...rows.filter((row) => partitionBy(row.preset) !== true).sort(compareRows),
+    ]
+    : rows.sort(compareRows);
+  return sortedRows.map((row) => row.preset);
 }
 
 function createPresetConfigSortColumns(configKeys, titlePrefix = "config: ") {
@@ -406,7 +546,70 @@ function createPresetNameCell(name) {
   return cell;
 }
 
-function createCurrentIndicatorCell(active, { testResult = null, testKind = null, testing = false } = {}) {
+function createEditablePresetNameCell({ name, onRename } = {}) {
+  const cell = document.createElement("td");
+  const nameWrap = document.createElement("div");
+  nameWrap.className = "auth-preset-name editable-preset-name";
+  nameWrap.textContent = name;
+
+  function finishEditing(save) {
+    const input = nameWrap.querySelector("input");
+    if (!input) return;
+    if (finishEditing.inProgress) return;
+    finishEditing.inProgress = true;
+    const nextName = input.value.trim();
+    if (save && nextName && nextName !== String(name || "")) {
+      onRename?.(nextName);
+    }
+    nameWrap.textContent = String(name || "");
+    finishEditing.inProgress = false;
+  }
+
+  function startEditing() {
+    if (nameWrap.querySelector("input")) return;
+    const input = document.createElement("input");
+    input.className = "text-input preset-name-input";
+    input.type = "text";
+    input.value = name || "";
+    input.setAttribute("aria-label", "修改预设名称");
+    nameWrap.textContent = "";
+    nameWrap.appendChild(input);
+    input.focus();
+    input.select();
+    input.addEventListener("blur", () => finishEditing(true));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finishEditing(true);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        finishEditing(false);
+      }
+    });
+  }
+
+  nameWrap.tabIndex = 0;
+  nameWrap.setAttribute("role", "button");
+  nameWrap.setAttribute("aria-label", "预设名称，双击或按 Enter 修改");
+  nameWrap.title = "双击或按 Enter 修改名称";
+  nameWrap.addEventListener("click", startEditing);
+  nameWrap.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      startEditing();
+    }
+  });
+
+  cell.appendChild(nameWrap);
+  return cell;
+}
+
+function createCurrentIndicatorCell(active, {
+  testResult = null,
+  testKind = null,
+  testing = false,
+  showUntested = false,
+} = {}) {
   const cell = document.createElement("td");
   cell.className = "current-indicator-cell";
 
@@ -464,6 +667,13 @@ function createCurrentIndicatorCell(active, { testResult = null, testKind = null
     );
 
     cell.appendChild(summary);
+    cell.classList.add("has-test-result");
+  } else if (showUntested) {
+    const untested = document.createElement("span");
+    untested.className = "preset-test-summary is-untested";
+    untested.textContent = "\u672a\u6d4b\u8bd5";
+    untested.setAttribute("aria-label", "\u5c1a\u672a\u6d4b\u8bd5");
+    cell.appendChild(untested);
     cell.classList.add("has-test-result");
   }
 

@@ -6,6 +6,7 @@ pub(crate) const EMPTY_TEXTS: &[&str] = &[];
 pub(crate) const GET_ONLY: &[&str] = &["GET"];
 pub(crate) const POST_ONLY: &[&str] = &["POST"];
 pub(crate) const PUT_ONLY: &[&str] = &["PUT"];
+pub(crate) const DELETE_ONLY: &[&str] = &["DELETE"];
 pub(crate) const GET_POST: &[&str] = &["GET", "POST"];
 pub(crate) const PUT_DELETE: &[&str] = &["PUT", "DELETE"];
 pub(crate) const GET_PUT: &[&str] = &["GET", "PUT"];

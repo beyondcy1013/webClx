@@ -74,7 +74,7 @@ function resolveTerminalAgentPreset(presets, profile) {
 function profileAgentType(profile) {
   const agentType = String(profile?.agent_type || "codex").trim().toLowerCase();
   if (agentType === "native") {
-    throw new Error("原生智能体应从 Agent 页面直接打开，不能作为终端启动。");
+    throw new Error("webClx 原生智能体已由 DeepSeek Harness 接管，请打开 DeepSeek Harness。");
   }
   return agentType === "claude" ? "claude" : "codex";
 }

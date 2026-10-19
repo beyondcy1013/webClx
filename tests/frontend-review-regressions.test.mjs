@@ -7,7 +7,7 @@ const readStatic = (name) =>
   readFileSync(new URL(`../static/${name}`, import.meta.url), "utf8");
 
 const pageHtml = new Map(
-  ["index.html", "terminal.html", "agent.html", "login.html"].map((name) => [
+  ["index.html", "terminal.html", "agent-profiles.html", "login.html"].map((name) => [
     name,
     readStatic(name),
   ]),
@@ -77,13 +77,46 @@ test("workspace current path control copies the full path", () => {
   );
   assert.match(
     appJs,
-    /async function copyCurrentPath\(button\)[\s\S]*normalizeAbsolutePath\(state\.currentDirectory\?\.display_path[\s\S]*navigator\.clipboard\?\.writeText/,
+    /async function copyDirectoryPath\(path, button[\s\S]*normalizeAbsolutePath\(path[\s\S]*navigator\.clipboard\?\.writeText/,
+    "directory path copy should write the full normalized path",
+  );
+  assert.match(
+    appJs,
+    /async function copyCurrentPath\(button\)[\s\S]*state\.currentDirectory\?\.display_path[\s\S]*copyDirectoryPath\(path, button/,
     "current path copy should write the full normalized directory path",
   );
   assert.match(
     coreBindingsJs,
     /currentPathCopyButton\?\.addEventListener\("click", \(\) => \{[\s\S]*copyCurrentPath\(currentPathCopyButton\);/,
     "the current path label should trigger the copy action on click",
+  );
+});
+
+test("workspace history current path control copies the selected directory", () => {
+  const appHtml = pageHtml.get("index.html");
+  const appJs = readStatic("app.js");
+  const coreBindingsJs = readStatic("app-core-event-bindings.js");
+  const workspaceHistoryJs = readStatic("app-workspace-history.js");
+
+  assert.match(
+    appHtml,
+    /id="copy-workspace-history-path"[^>]*>\s*当前目录：\s*<\/button>[\s\S]*id="workspace-history-path-select"/,
+    "workspace history should show a current-directory copy control before its path select",
+  );
+  assert.match(
+    appJs,
+    /async function copyWorkspaceHistoryPath\(button\)[\s\S]*workspaceHistorySelectedPath\(\)[\s\S]*copyDirectoryPath\(path, button/,
+    "workspace history copy should use the currently selected history directory",
+  );
+  assert.match(
+    coreBindingsJs,
+    /workspaceHistoryPathCopyButton\?\.addEventListener\("click", \(\) => \{[\s\S]*copyWorkspaceHistoryPath\(workspaceHistoryPathCopyButton\);/,
+    "the workspace history current-directory label should trigger copying",
+  );
+  assert.match(
+    workspaceHistoryJs,
+    /\[workspaceHistoryPathCopyButton, workspaceHistoryTerminalButton, workspaceHistoryDeleteButton\]/,
+    "the copy control should be disabled with the other path-dependent history actions",
   );
 });
 
@@ -108,17 +141,66 @@ test("quota rendering escapes service-controlled text", async () => {
           type: '<img src=x onerror="globalThis.xss=true">',
           percentage: '<svg onload="globalThis.xss=true">',
         },
+        {
+          type: 'TOKENS_LIMIT',
+          percentage: 12,
+          nextResetTime: Date.now() + ((3 * 3600 + 49 * 60) * 1000),
+        },
       ],
     },
   };
   vm.runInContext("renderQuotaReport(payload)", context);
   assert.doesNotMatch(quotaBody.innerHTML, /<(?:img|svg)\b/i);
   assert.match(quotaBody.innerHTML, /&lt;img/);
+  assert.match(quotaBody.innerHTML, /<td>重置: \d{2}-\d{2} \d{2}:\d{2}; 还差: 3小时49分钟/);
 
   await vm.runInContext("refreshTerminalQuota()", context);
   assert.doesNotMatch(quotaBody.innerHTML, /<img\b/i);
   assert.match(quotaBody.innerHTML, /&lt;img/);
   assert.equal(context.xss, undefined);
+});
+
+test("GLM 5.3 zcode presets remain available to the Zhipu quota dialog", () => {
+  const context = vm.createContext({
+    URLSearchParams,
+    console,
+    window: { clearTimeout, setTimeout },
+  });
+  vm.runInContext(readStatic("terminal-quota.js"), context);
+
+  context.preset = {
+    api_key: "test-key",
+    base_url: "https://zcode.z.ai/api/v1/ultra/anthropic",
+  };
+  assert.equal(vm.runInContext("quotaIsQuotaPreset(preset)", context), true);
+  assert.equal(vm.runInContext("quotaDetectPlatform(preset.base_url)", context), "ZHIPU");
+});
+
+test("quota dialog surfaces Zhipu business errors instead of rendering zero totals", () => {
+  const quotaBody = { innerHTML: "" };
+  const context = vm.createContext({
+    URLSearchParams,
+    console,
+    requestJson: async () => {
+      throw new Error("unexpected request");
+    },
+    terminalQuotaBodyEl: quotaBody,
+    window: { clearTimeout, setTimeout },
+  });
+  vm.runInContext(readStatic("terminal-quota.js"), context);
+
+  context.payload = {
+    platform: "ZHIPU",
+    model_usage: { code: 1000, msg: "Authentication Failed", success: false },
+    tool_usage: { code: 1000, msg: "Authentication Failed", success: false },
+    quota_limit: { code: 1000, msg: "Authentication Failed", success: false },
+  };
+  vm.runInContext("renderQuotaReport(payload)", context);
+
+  assert.match(quotaBody.innerHTML, /上游查询失败/);
+  assert.match(quotaBody.innerHTML, /Authentication Failed/);
+  assert.doesNotMatch(quotaBody.innerHTML, /窗口调用次数: 0/);
+  assert.doesNotMatch(quotaBody.innerHTML, /窗口 Token 总量: 0/);
 });
 
 test("compressible web responses enable Brotli and gzip compression", () => {

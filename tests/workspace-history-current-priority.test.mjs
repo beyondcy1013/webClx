@@ -94,7 +94,7 @@ test("workspace history search preserves the text being edited", () => {
 });
 
 test("history tab click moves the global current directory option to the top", () => {
-  const currentPath = "/home/codes/webClx";
+  const currentPath = "/home/codes/tools/webClx";
   const pathSelect = createSelect([
     "/home/codes/other",
     currentPath,
@@ -124,7 +124,7 @@ test("history tab click moves the global current directory option to the top", (
 });
 
 test("ordinary history grouping keeps activity order instead of globally prioritizing current", () => {
-  const currentPath = "/home/codes/webClx";
+  const currentPath = "/home/codes/tools/webClx";
   const state = {
     currentWorkspaceDirectoryPath: currentPath,
     workspaceHistory: [
@@ -186,8 +186,8 @@ test("returning from a terminal refreshes the global directory from its live cwd
   const state = {
     activeTab: "workspace-history",
     returnTerminalSessionId: "session-A",
-    currentWorkspaceDirectoryPath: "/home/codes/webClx",
-    workspaceHistorySelectedPath: "/home/codes/webClx",
+    currentWorkspaceDirectoryPath: "/home/codes/tools/webClx",
+    workspaceHistorySelectedPath: "/home/codes/tools/webClx",
     workspaceHistorySettingsReady: true,
   };
   const context = vm.createContext({
@@ -225,9 +225,47 @@ test("returning from a terminal refreshes the global directory from its live cwd
   ]);
 });
 
+test("opening the workspace without a path restores the current terminal live cwd", async () => {
+  const state = {
+    activeTab: "workspace",
+    initialWorkspacePathProvided: false,
+    initialReturnTerminalSessionId: "",
+    returnTerminalSessionId: "root-session-selected-by-early-refresh",
+    currentPath: "",
+    currentWorkspaceDirectoryPath: "/home/codes",
+    workspaceDir: "/home/codes",
+    workspaceHistorySelectedPath: "",
+    workspaceHistorySettingsReady: true,
+  };
+  const context = vm.createContext({
+    state,
+    getStoredGlobalSessionId: () => "session-A",
+    normalizeAbsolutePath: (path) => String(path || "").replace(/\/$/, "") || "/",
+    async requestJson(url) {
+      assert.equal(url, "/api/terminal/sessions/session-A/current-directory");
+      return { path: "deepseekHarness", display_path: "/home/codes/ai/DSH" };
+    },
+    renderWorkspaceHistory() {},
+    prioritizeWorkspaceHistoryCurrentDirectory() {},
+    async refreshWorkspaceHistoryConversations() {},
+  });
+  vm.runInContext(
+    functionSource(historySource, "refreshCurrentWorkspaceDirectoryFromTerminal"),
+    context,
+  );
+
+  assert.equal(
+    await context.refreshCurrentWorkspaceDirectoryFromTerminal({ restoreWorkspacePath: true }),
+    true,
+  );
+  assert.equal(state.returnTerminalSessionId, "session-A");
+  assert.equal(state.currentPath, "deepseekHarness");
+  assert.equal(state.currentWorkspaceDirectoryPath, "/home/codes/ai/DSH");
+});
+
 test("entering history uses the global directory and invokes dropdown prioritization", () => {
   const events = [];
-  const currentPath = "/home/codes/webClx";
+  const currentPath = "/home/codes/tools/webClx";
   const state = {
     activeTab: "workspace",
     activeSettingsTab: "system",
@@ -286,10 +324,10 @@ test("successful directory loading updates the global current directory", () => 
   );
 });
 
-test("workspace startup refreshes the global directory after loading the browser directory", () => {
+test("workspace startup restores the terminal directory before loading the browser directory", () => {
   assert.match(
     functionSource(appSource, "init"),
-    /await loadDirectory\(\);\s*await refreshCurrentWorkspaceDirectoryFromTerminal\(\);/,
+    /await refreshCurrentWorkspaceDirectoryFromTerminal\(\{ restoreWorkspacePath: true \}\);\s*await loadDirectory\(\);/,
   );
 });
 

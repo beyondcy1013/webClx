@@ -106,7 +106,15 @@ function renderTerminalToolEntriesTable() {
   for (const { entry, depth } of flattenTerminalToolEntries(entries)) {
     const row = document.createElement("tr");
     row.dataset.terminalToolId = entry.id;
-    row.append(makeTerminalToolTableCell(entry.kind === "folder" ? "目录" : "工作流"));
+    let typeLabel = "目录";
+    if (entry.kind !== "folder") {
+      try {
+        typeLabel = WebClxTerminalSettings.inspectTerminalWorkflow(entry, entries).label;
+      } catch {
+        typeLabel = "待修复流程";
+      }
+    }
+    row.append(makeTerminalToolTableCell(typeLabel));
     const labelCell = makeTerminalToolTableCell(entry.label, "terminal-tool-label-cell");
     labelCell.style.setProperty("--terminal-tool-depth", String(depth));
     row.append(labelCell);
@@ -132,7 +140,14 @@ function renderTerminalToolEntriesTable() {
     deleteButton.className = "mini-button danger";
     deleteButton.dataset.terminalToolDelete = entry.id;
     deleteButton.textContent = "删除";
-    actionsCell.append(editButton, copyButton, deleteButton);
+    const referenceButton = document.createElement("button");
+    referenceButton.type = "button";
+    referenceButton.className = "mini-button";
+    referenceButton.dataset.terminalToolReference = entry.id;
+    referenceButton.textContent = "创建引用";
+    referenceButton.title = "新入口引用此流程，不复制动作";
+    referenceButton.hidden = entry.kind !== "action";
+    actionsCell.append(editButton, referenceButton, copyButton, deleteButton);
     row.append(actionsCell);
     body.append(row);
   }
@@ -299,7 +314,7 @@ function createTerminalToolActionParameter(action, index) {
 
 function createTerminalToolFunctionCommandField(action, index) {
   const wrapper = document.createElement("div");
-  wrapper.className = "terminal-tool-function-command-field";
+  wrapper.className = "terminal-tool-function-command-field terminal-tool-action-parameter";
   const allCommands = [
     ...(Array.isArray(state.terminalFunctionCommands) ? state.terminalFunctionCommands : []),
     ...(Array.isArray(state.terminalSlashCommands) ? state.terminalSlashCommands : []),
@@ -336,7 +351,7 @@ function createTerminalToolFunctionCommandField(action, index) {
 
 function createTerminalToolRunWorkflowField(action, index) {
   const wrapper = document.createElement("div");
-  wrapper.className = "terminal-tool-run-workflow-field";
+  wrapper.className = "terminal-tool-run-workflow-field terminal-tool-action-parameter";
   const actionableEntries = (Array.isArray(state.terminalToolEntries) ? state.terminalToolEntries : [])
     .filter((entry) => entry.kind === "action");
   const label = document.createElement("span");
@@ -371,7 +386,7 @@ function createTerminalToolRunWorkflowField(action, index) {
 
 function createTerminalToolCodexLaunchFields(action, index) {
   const wrapper = document.createElement("div");
-  wrapper.className = "terminal-tool-codex-launch-fields";
+  wrapper.className = "terminal-tool-codex-launch-fields terminal-tool-action-parameter";
 
   const presetMatchField = document.createElement("label");
   presetMatchField.className = "field terminal-tool-launch-field";
@@ -479,13 +494,13 @@ function createTerminalToolCodexLaunchFields(action, index) {
   taskField.className = "field terminal-tool-launch-field terminal-tool-launch-task";
   const taskLabel = document.createElement("span");
   taskLabel.className = "field-label";
-  taskLabel.textContent = "初始任务";
+  taskLabel.textContent = "环境说明 / 初始技能（加载后待命）";
   const taskTextarea = document.createElement("textarea");
   taskTextarea.className = "text-input";
   taskTextarea.rows = 3;
   taskTextarea.maxLength = 4096;
   taskTextarea.value = action.value || "";
-  taskTextarea.placeholder = "$skill-name 任务描述";
+  taskTextarea.placeholder = "$skill-name 环境准备说明，不在此处配置立即执行的任务";
   taskTextarea.addEventListener("input", () => {
     terminalToolActionDraft[index].value = taskTextarea.value;
   });
@@ -656,9 +671,17 @@ function applyTerminalToolEditor() {
     setTerminalToolEditorStatus("请检查名称、目录、排序和动作参数。", "warn");
     return false;
   }
+  try {
+    for (const item of normalized.filter((item) => item.kind === "action")) {
+      WebClxTerminalSettings.inspectTerminalWorkflow(item, normalized);
+    }
+  } catch (error) {
+    setTerminalToolEditorStatus(error.message, "warn");
+    return false;
+  }
   state.terminalToolEntries = normalized;
   renderTerminalToolEntriesTable();
-  updateStatus(settingsStatusEl, "利器条目已更新，点击“保存设置”后生效。", "info");
+  updateStatus(settingsStatusEl, "工作流条目已更新，点击“保存设置”后生效。", "info");
   closeTerminalToolEditor();
   return true;
 }
@@ -693,6 +716,13 @@ function deleteTerminalToolEntry(entryId) {
     return;
   }
   const descendants = terminalToolDescendantIds(entryId);
+  const removedIds = new Set([entryId, ...descendants]);
+  const dependents = state.terminalToolEntries.filter((item) => !removedIds.has(item.id)
+    && item.actions.some((action) => action.kind === "run_workflow" && removedIds.has(action.target_entry_id || action.value)));
+  if (dependents.length) {
+    updateStatus(settingsStatusEl, `请先修改引用此流程的入口：${dependents.map((item) => item.label).join("、")}`, "warn");
+    return;
+  }
   const message = descendants.size
     ? `删除“${entry.label}”会同时删除 ${descendants.size} 个子条目，确定继续吗？`
     : `确定删除“${entry.label}”吗？`;
@@ -705,11 +735,15 @@ function deleteTerminalToolEntry(entryId) {
   updateStatus(settingsStatusEl, "利器条目已删除，点击“保存设置”后生效。", "info");
 }
 
-function exportTerminalToolEntries() {
-  const data = {
+function getTerminalToolExportPayload() {
+  return {
     version: 1,
     terminal_tool_entries: normalizeTerminalToolEntries(state.terminalToolEntries),
   };
+}
+
+function exportTerminalToolEntries() {
+  const data = getTerminalToolExportPayload();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -721,6 +755,33 @@ function exportTerminalToolEntries() {
   URL.revokeObjectURL(url);
 }
 
+async function exportTerminalToolEntriesToClipboard() {
+  const data = getTerminalToolExportPayload();
+  const text = `${JSON.stringify(data, null, 2)}\n`;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      updateStatus(settingsStatusEl, "已复制工作流配置到剪贴板。", "ok");
+      return;
+    }
+  } catch { /* use textarea fallback */ }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.cssText = "position:fixed;left:-9999px;top:0";
+  document.body.appendChild(area);
+  area.focus();
+  area.select();
+  try {
+    if (document.execCommand?.("copy")) {
+      updateStatus(settingsStatusEl, "已复制工作流配置到剪贴板。", "ok");
+    } else {
+      updateStatus(settingsStatusEl, "无法写入剪贴板，请检查浏览器权限。", "warn");
+    }
+  } finally {
+    area.remove();
+  }
+}
+
 function importTerminalToolEntries() {
   const input = document.getElementById("terminal-tool-import-file");
   if (!input) {
@@ -728,6 +789,32 @@ function importTerminalToolEntries() {
   }
   input.value = "";
   input.click();
+}
+
+function importTerminalToolData(data, sourceLabel = "文件") {
+  if (!data || data.version !== 1 || !Array.isArray(data.terminal_tool_entries)) {
+    updateStatus(settingsStatusEl, "导入失败：格式无效或版本不受支持。", "warn");
+    return false;
+  }
+  const normalized = normalizeTerminalToolEntries(data.terminal_tool_entries);
+  if (normalized.length === 0 && data.terminal_tool_entries.length > 0) {
+    updateStatus(settingsStatusEl, "导入失败：条目校验未通过，当前配置未改变。", "warn");
+    return false;
+  }
+  if (normalized.length !== data.terminal_tool_entries.length) {
+    throw new Error("部分条目校验失败。");
+  }
+  for (const entry of normalized.filter((item) => item.kind === "action")) {
+    WebClxTerminalSettings.inspectTerminalWorkflow(entry, normalized);
+  }
+  const count = normalized.length;
+  if (!window.confirm(`从${sourceLabel}导入 ${count} 个工作流条目，将替换当前列表，确定继续吗？`)) {
+    return false;
+  }
+  state.terminalToolEntries = normalized;
+  renderTerminalToolEntriesTable();
+  updateStatus(settingsStatusEl, `已从${sourceLabel}导入 ${count} 个工作流条目，点击"保存设置"后生效。`, "info");
+  return true;
 }
 
 function handleTerminalToolImportFile(event) {
@@ -739,27 +826,33 @@ function handleTerminalToolImportFile(event) {
   reader.onload = () => {
     try {
       const data = JSON.parse(String(reader.result || ""));
-      if (!data || data.version !== 1 || !Array.isArray(data.terminal_tool_entries)) {
-        updateStatus(settingsStatusEl, "导入失败：文件格式无效或版本不受支持。", "warn");
-        return;
-      }
-      const normalized = normalizeTerminalToolEntries(data.terminal_tool_entries);
-      if (normalized.length === 0 && data.terminal_tool_entries.length > 0) {
-        updateStatus(settingsStatusEl, "导入失败：条目校验未通过，当前配置未改变。", "warn");
-        return;
-      }
-      const count = normalized.length;
-      if (!window.confirm(`导入 ${count} 个工作流条目，将替换当前列表，确定继续吗？`)) {
-        return;
-      }
-      state.terminalToolEntries = normalized;
-      renderTerminalToolEntriesTable();
-      updateStatus(settingsStatusEl, `已导入 ${count} 个工作流条目，点击"保存设置"后生效。`, "info");
+      importTerminalToolData(data, "文件");
     } catch (error) {
       updateStatus(settingsStatusEl, `导入失败：${error?.message || error}`, "warn");
     }
   };
   reader.readAsText(file);
+}
+
+async function importTerminalToolEntriesFromClipboard() {
+  try {
+    let rawText = "";
+    if (navigator.clipboard?.readText) {
+      try {
+        rawText = await navigator.clipboard.readText();
+      } catch { /* use prompt fallback */ }
+    }
+    if (!rawText && window.prompt) {
+      rawText = window.prompt("粘贴工作流 JSON") || "";
+    }
+    if (!rawText) {
+      throw new Error("无法读取剪贴板，请手动粘贴工作流 JSON。");
+    }
+    const data = JSON.parse(rawText);
+    importTerminalToolData(data, "剪贴板");
+  } catch (error) {
+    updateStatus(settingsStatusEl, `剪贴板导入失败：${error?.message || error}`, "warn");
+  }
 }
 
 function bindTerminalToolSettings() {
@@ -773,13 +866,40 @@ function bindTerminalToolSettings() {
   document.getElementById("terminal-tool-export")?.addEventListener("click", () => {
     exportTerminalToolEntries();
   });
+  document.getElementById("terminal-tool-export-clipboard")?.addEventListener("click", () => {
+    exportTerminalToolEntriesToClipboard();
+  });
   document.getElementById("terminal-tool-import")?.addEventListener("click", () => {
     importTerminalToolEntries();
+  });
+  document.getElementById("terminal-tool-import-clipboard")?.addEventListener("click", () => {
+    importTerminalToolEntriesFromClipboard();
   });
   document.getElementById("terminal-tool-import-file")?.addEventListener("change", (event) => {
     handleTerminalToolImportFile(event);
   });
+  document.getElementById("terminal-tool-template")?.addEventListener("change", (event) => {
+    const template = event.target.value;
+    event.target.value = "";
+    if (!template) return;
+    if (terminalToolActionDraft.length && !window.confirm("用模板替换当前编辑中的动作？尚未保存的动作将被替换。")) return;
+    terminalToolActionDraft = WebClxTerminalSettings.createTerminalWorkflowTemplate(template, state.currentPath || "");
+    renderTerminalToolActionDraft();
+    setTerminalToolEditorStatus("请补齐预设、目录或任务等参数；应用到列表后仍需保存设置。", "info");
+  });
   dom.body?.addEventListener("click", (event) => {
+    const referenceButton = event.target.closest("[data-terminal-tool-reference]");
+    if (referenceButton) {
+      const target = state.terminalToolEntries.find((item) => item.id === referenceButton.dataset.terminalToolReference);
+      if (target?.kind === "action") {
+        openTerminalToolEditor("action", {
+          root_key: target.root_key, parent_id: target.parent_id, kind: "action",
+          label: `${target.label} 入口`.slice(0, 64), sort_order: target.sort_order,
+          actions: [{ kind: "run_workflow", value: target.id, target_entry_id: target.id, seconds: 0 }],
+        });
+      }
+      return;
+    }
     const editButton = event.target.closest("[data-terminal-tool-edit]");
     if (editButton) {
       const entry = state.terminalToolEntries.find((candidate) => candidate.id === editButton.dataset.terminalToolEdit);

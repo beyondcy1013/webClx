@@ -187,7 +187,7 @@ payload=$(jq -nc \
     source_terminal_name: $source_terminal_name,
     project: "webClx",
     project_name: "webClx",
-    project_dir: "/home/codes/webClx",
+    project_dir: "/home/codes/tools/webClx",
     project_path: $project_path,
     note: $note,
     command: ["cargo", "build", "--release"],

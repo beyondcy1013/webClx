@@ -20,7 +20,7 @@ webClx 的设置路径迁移要同时检查运行副本和仓库副本：
 - 保留迁移前备份：
   - `/home/bin/webclx/webclx-settings.json.bak-20260527-cycodes`
   - `/home/codes/webClx/webclx-settings.json.bak-20260527-cycodes`
-- 确认 `/home/cycodes` 当前由 `//192.168.3.38/codes` 挂载。
+- 确认 `/home/cycodes` 当前由 `//HOST/codes` 挂载。
 
 ## 验证
 

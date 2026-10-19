@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>webClx</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
     <script>
@@ -29,63 +29,86 @@
           d.getAttribute("aria-pressed") === "true" ? "false" : "true",
         );
       });
+      document.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const d = e.target.closest(".card-desc");
+        if (!d) return;
+        e.preventDefault();
+        d.setAttribute(
+          "aria-pressed",
+          d.getAttribute("aria-pressed") === "true" ? "false" : "true",
+        );
+      });
     </script>
     <link rel="stylesheet" href="/assets/vendor/xterm.css?v=20260408d" />
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20260727b" />
-    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260724b" />
-    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260715a" />
-    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260812c" />
-    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260727b" />
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20261014-group-row" />
+    <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260926-workflow-history" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260923scroll1" />
     <style>
       body.terminal-embedded-agent .terminal-page-nav { display: none; }
       body.terminal-embedded-agent .terminal-page { min-height: 100dvh; }
     </style>
-    <script defer src="/assets/i18n.js?v=20260814a"></script>
-    <script defer src="/assets/vendor/xterm.js?v=20260408d"></script>
+    <script defer src="/assets/abort-signal-compat.js?v=20260817a"></script>
+    <script defer src="/assets/dialog-backdrop-guard.js?v=20260916c"></script>
+    <script defer src="/assets/i18n.js?v=20260918message"></script>
+    <script defer src="/assets/vendor/xterm.js?v=20260923scroll1"></script>
     <script defer src="/assets/vendor/xterm-addon-fit.js?v=20260408d"></script>
     <script defer src="/assets/terminal-selection-geometry.js?v=20260509b"></script>
     <script defer src="/assets/terminal-cursor-guard.js?v=20260627a"></script>
     <script defer src="/assets/terminal-ime-policy.js?v=20260516c"></script>
     <script defer src="/assets/terminal-touch-selection-policy.js?v=20260803c"></script>
-    <script defer src="/assets/terminal-resume-extract.js?v=20260726a"></script>
-    <script defer src="/assets/terminal-settings.js?v=20260812c"></script>
-    <script defer src="/assets/terminal-session-activity.js?v=20260726a"></script>
-    <script defer src="/assets/terminal-session-storage.js?v=20260618a"></script>
-    <script defer src="/assets/workspace-project-icons.js?v=20260729a"></script>
-    <script defer src="/assets/terminal-common.js?v=20260813b"></script>
-    <script defer src="/assets/specified-preset-actions.js?v=20260812d"></script>
-    <script defer src="/assets/terminal-session-cache.js?v=20260718a"></script>
-    <script defer src="/assets/terminal-shell-settings.js?v=20260803b"></script>
-    <script defer src="/assets/terminal-paste.js?v=20260810a"></script>
-    <script defer src="/assets/terminal-dialogs.js?v=20260813a"></script>
-    <script defer src="/assets/terminal-focus-selection.js?v=20260813h"></script>
-    <script defer src="/assets/terminal-resume-agent.js?v=20260813b"></script>
-    <script defer src="/assets/terminal-input-transport.js?v=20260801a"></script>
+    <script defer src="/assets/terminal-resume-extract.js?v=20261007-devin"></script>
+    <script defer src="/assets/terminal-settings.js?v=20260928-cline-opencode"></script>
+    <script defer src="/assets/terminal-session-activity.js?v=20260918groupcolor7nobubblewhite"></script>
+    <script defer src="/assets/terminal-session-storage.js?v=20260916groups3"></script>
+    <script defer src="/assets/workspace-project-icons.js?v=20261017-stable-session-menu"></script>
+    <script defer src="/assets/terminal-common.js?v=20260920groupbadge1"></script>
+    <script defer src="/assets/specified-preset-actions.js?v=20260928-cline-opencode"></script>
+    <script defer src="/assets/new-terminal.js?v=20260916groups3"></script>
+    <script defer src="/assets/terminal-session-cache.js?v=20261004-android-opt1"></script>
+    <script defer src="/assets/terminal-shell-settings.js?v=20261016-background-bottom"></script>
+    <script defer src="/assets/terminal-paste.js?v=20260922-scheduled-status"></script>
+    <script defer src="/assets/terminal-dialogs.js?v=20261014-win-doc-ime2"></script>
+    <script defer src="/assets/terminal-report-filter.js?v=20260924a"></script>
+    <script defer src="/assets/terminal-focus-selection.js?v=20261015-dialog-ime"></script>
+    <script defer src="/assets/terminal-resume-agent.js?v=20260906a"></script>
+    <link rel="stylesheet" href="/assets/terminal-universal-shortcut.css?v=20261018-keyboard" />
+    <script defer src="/assets/terminal-universal-shortcut.js?v=20261018-keyboard"></script>
+    <script defer src="/assets/terminal-input-transport.js?v=20261004-android-opt1"></script>
     <script defer src="/assets/terminal-synchronized-output.js?v=20260805a"></script>
     <script defer src="/assets/terminal-codex-status-output.js?v=20260726c"></script>
-    <script defer src="/assets/terminal-output-scroll.js?v=20260807a"></script>
-    <script defer src="/assets/terminal-quota.js?v=20260706a"></script>
-    <script defer src="/assets/terminal-command-quickstart.js?v=20260803b"></script>
-    <script defer src="/assets/terminal-tools.js?v=20260725a"></script>
+    <script defer src="/assets/terminal-output-scroll.js?v=20261016-background-bottom"></script>
+<script defer src="/assets/terminal-quota.js?v=20260905c"></script>
+    <script defer src="/assets/terminal-command-quickstart.js?v=20261011-compact-agent-guard"></script>
+    <script defer src="/assets/terminal-tools.js?v=20260916a"></script>
     <script defer src="/assets/terminal-android-select-menu.js?v=20260804b"></script>
-    <script defer src="/assets/terminal-server-switch.js?v=20260731a"></script>
-    <script defer src="/assets/terminal-server-probe.js?v=20260805c"></script>
-    <script defer src="/assets/terminal-specified-task.js?v=20260812d"></script>
-    <script defer src="/assets/terminal-tool-actions.js?v=20260812d"></script>
-    <script defer src="/assets/terminal-settings-loader.js?v=20260803f"></script>
-    <script defer src="/assets/terminal-cursor-correction.js?v=20260706a"></script>
-    <script defer src="/assets/terminal-navigation-layout.js?v=20260803b"></script>
-    <script defer src="/assets/terminal-session-render.js?v=20260731a"></script>
-    <script defer src="/assets/terminal-auto-continue.js?v=20260728a"></script>
-    <script defer src="/assets/terminal-sessions.js?v=20260731a"></script>
+    <script defer src="/assets/terminal-server-switch.js?v=20260830a"></script>
+    <script defer src="/assets/terminal-server-probe.js?v=20261004-android-opt1"></script>
+    <script defer src="/assets/terminal-specified-task.js?v=20261015-workspace-all-tabs"></script>
+    <script defer src="/assets/terminal-future-tasks.js?v=20260916a"></script>
+    <script defer src="/assets/terminal-multi-model-advisor.js?v=20260919group1"></script>
+    <script defer src="/assets/terminal-multi-terminal-discussion.js?v=20260919group1"></script>
+    <script defer src="/assets/terminal-workspace-restores.js?v=20260918a"></script>
+    <script defer src="/assets/terminal-tool-actions.js?v=20260926-workflow-history"></script>
+    <script defer src="/assets/terminal-settings-loader.js?v=20260904a"></script>
+    <script defer src="/assets/terminal-cursor-correction.js?v=20261009-codebuddy-agent-gate"></script>
+    <script defer src="/assets/terminal-navigation-layout.js?v=20261015-scroll-geometry"></script>
+    <script defer src="/assets/terminal-session-render.js?v=20261015-dialog-ime"></script>
+    <script defer src="/assets/terminal-auto-continue.js?v=20261011-compact-agent-guard"></script>
+    <script defer src="/assets/terminal-experience-save.js?v=20261018-save-only"></script>
+    <script defer src="/assets/terminal-sessions.js?v=20261017-background-close"></script>
     <script defer src="/assets/terminal-preset-extraction.js?v=20260727a"></script>
-    <script defer src="/assets/terminal-mobile-keys.js?v=20260813b"></script>
-    <script defer src="/assets/terminal-designate-preset.js?v=20260812d"></script>
+    <script defer src="/assets/terminal-mobile-keys.js?v=20261014-soft-key-ime"></script>
+    <script defer src="/assets/terminal-designate-preset.js?v=20260829a"></script>
     <script defer src="/assets/terminal-permanent-preset-switch.js?v=20260801a"></script>
-    <script defer src="/assets/terminal-in-place-preset-switch.js?v=20260812d"></script>
-    <script defer src="/assets/terminal-layout-connection.js?v=20260805a"></script>
-    <script defer src="/assets/terminal.js?v=20260813b"></script>
+    <script defer src="/assets/terminal-in-place-preset-switch.js?v=20260905a"></script>
+    <script defer src="/assets/terminal-layout-connection.js?v=20261015-scroll-geometry"></script>
+    <script defer src="/assets/terminal-preconnect.js?v=20261004-android-opt1"></script>
+    <script defer src="/assets/terminal.js?v=20261018-save-only"></script>
     <script defer src="/assets/terminal-work-agent.js?v=20260728a"></script>
+    <script defer src="/assets/app-unified-tasks.js?v=20261012-action-first"></script>
   </head>
   <body class="app-shell terminal-body">
     <script>
@@ -99,12 +122,19 @@
           <a id="top-nav-terminal" class="tab-button topbar-link-button active" href="/terminal" aria-current="page">终端管理</a>
           <a id="top-nav-workspace" class="tab-button topbar-link-button" href="/workspace" data-home-path="/workspace">工作区</a>
           <a id="top-nav-workspace-history" class="tab-button topbar-link-button" href="/workspace_history" data-home-path="/workspace_history">历史工作区</a>
-          <a id="top-nav-api" class="tab-button topbar-link-button" href="/codex_api" data-home-path="/codex_api">Codex_API</a>
-          <a id="top-nav-claude" class="tab-button topbar-link-button" href="/claude_api" data-home-path="/claude_api">Claude_API</a>
+          <a id="top-nav-api" class="tab-button topbar-link-button" href="/codex_api" data-home-path="/codex_api">LLM_API</a>
           <a id="top-nav-settings" class="tab-button topbar-link-button" href="/settings" data-home-path="/settings">设置</a>
-          <a class="tab-button topbar-link-button" href="/desktop">远程桌面</a>
-          <a class="tab-button topbar-link-button" href="/agent">Agent</a>
-          <a id="top-nav-auth" class="tab-button topbar-link-button" href="/codex_oauth" data-home-path="/codex_oauth">Codex_OAuth</a>
+          <a class="tab-button topbar-link-button" href="/agent">DeepSeek Agent</a>
+          <a class="tab-button topbar-link-button" href="/collaboration">智能体协作</a>
+
+          <button
+            id="top-nav-server"
+            class="tab-button topbar-link-button"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="terminal-server-workspace"
+          >服务器</button>
           <a id="top-nav-terminal-archives" class="tab-button topbar-link-button" href="/archives" data-home-path="/archives">归档列表</a>
           <a class="tab-button topbar-link-button" href="/downloads">编译产物</a>
         </nav>
@@ -114,17 +144,18 @@
 
       <header class="topbar slim compact terminal-control-bar">
         <div class="terminal-session-control">
-          <label class="terminal-session-picker" for="session-switcher">
-            <span class="terminal-session-category">终端</span>
+          <div class="terminal-session-picker">
+            <button id="copy-current-terminal-name" class="terminal-session-category terminal-session-category-copy" type="button" title="复制终端名" aria-label="复制终端名">终端</button>
             <select id="session-switcher" class="terminal-session-select" aria-label="切换当前终端">
               <option value="">加载中…</option>
             </select>
-          </label>
+          </div>
         </div>
         <div class="toolbar terminal-toolbar">
-          <button id="create-session" class="button secondary" type="button">新建</button>
+          <button id="create-session" class="button secondary" type="button">新开</button>
           <button id="rename-session" class="button secondary" type="button">改名</button>
-          <button id="delete-session" class="button secondary danger" type="button">结束</button>
+          <button id="delete-session" class="button secondary danger" type="button" title="先转入隐藏终端，再关闭终端">结束</button>
+          <button id="save-experience-session" class="button secondary" type="button" title="提交经验落盘任务，转入隐藏并在完成后自行关闭">落盘并结束</button>
           <button id="idle-session" class="button secondary" type="button">闲置</button>
           <button id="archive-resume" class="button secondary" type="button">归档</button>
           <select
@@ -133,6 +164,13 @@
             aria-label="选择闲置终端"
           >
             <option value="">闲置终端</option>
+          </select>
+          <select
+            id="hidden-session-select"
+            class="terminal-session-select terminal-archive-select"
+            aria-label="选择隐藏终端"
+          >
+            <option value="">隐藏专区</option>
           </select>
           <button
             id="toggle-terminal-path"
@@ -158,7 +196,7 @@
       </header>
 
       <dialog id="terminal-rename-dialog" class="terminal-rename-dialog" aria-labelledby="terminal-rename-dialog-title">
-        <form id="session-rename-form" class="terminal-rename-dialog-form" method="dialog">
+        <form id="session-rename-form" class="terminal-rename-dialog-form">
           <div class="panel-head wide">
             <div>
               <p class="section-label">终端管理</p>
@@ -192,7 +230,143 @@
         </form>
       </dialog>
 
-      <main class="terminal-layout terminal-layout-single">
+      <dialog
+        id="terminal-experience-save-dialog"
+        class="terminal-rename-dialog"
+        aria-labelledby="terminal-experience-save-title"
+      >
+        <form id="terminal-experience-save-form" class="terminal-rename-dialog-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">结束终端</p>
+              <h2 id="terminal-experience-save-title">结束终端</h2>
+            </div>
+          </div>
+          <p class="session-group-help">是否需要经验落盘到运维 skill？选择“是”将后台落盘并在完成后自行关闭；选择“否”或倒计时结束将直接关闭终端；点取消可中止操作。</p>
+          <p id="terminal-experience-save-countdown" class="meta-text" role="status" aria-live="polite">10 秒后默认直接关闭</p>
+          <div
+            id="terminal-experience-save-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-experience-save-cancel" class="button secondary" type="button">取消</button>
+            <button id="terminal-experience-save-yes" class="button secondary" type="button" title="后台落盘并移入隐藏专区，完成后自行关闭">是</button>
+            <button id="terminal-experience-save-no" class="button primary" type="button" title="先转入隐藏终端，再关闭终端">否</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="terminal-group-dialog" class="terminal-rename-dialog" aria-labelledby="terminal-group-dialog-title">
+        <form id="terminal-group-form" class="terminal-rename-dialog-form">
+          <div class="panel-head wide">
+            <div class="card-title-help">
+              <p class="section-label">终端管理</p>
+              <h2 id="terminal-group-dialog-title">群组终端管理</h2>
+              <span class="card-desc" role="button" tabindex="0" aria-pressed="false" aria-label="帮助说明" title="点击查看说明">
+                <span class="card-desc-icon">?</span>
+                <span class="card-desc-text">勾选成员后为每个终端指定角色：每组一名管理者负责计划和派发任务，其余成员为执行者或复核者；把某个终端设为管理者时，原管理者会自动改为执行者。点击成员行里的「改名」可修改该终端名称。</span>
+              </span>
+            </div>
+          </div>
+          <div class="terminal-group-sort-tabs" role="tablist" aria-label="列表排序方式">
+            <button
+              type="button"
+              class="terminal-group-sort-tab is-active"
+              data-sort-mode=""
+              role="tab"
+              aria-selected="true"
+            >终端顺序</button>
+            <button
+              type="button"
+              class="terminal-group-sort-tab"
+              data-sort-mode="name-asc"
+              role="tab"
+              aria-selected="false"
+            >名称升序</button>
+            <button
+              type="button"
+              class="terminal-group-sort-tab"
+              data-sort-mode="name-desc"
+              role="tab"
+              aria-selected="false"
+            >名称倒序</button>
+          </div>
+          <p id="terminal-group-token-display" class="session-group-help" hidden></p>
+          <div class="terminal-group-name-color-row">
+            <label class="terminal-group-name-option">
+              <span>分组名称</span>
+              <input
+                id="terminal-group-name"
+                class="text-input"
+                type="text"
+                maxlength="32"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="可选，用于终端消息里识别这个分组"
+              />
+            </label>
+            <label class="terminal-group-color-option">
+              <span>分组颜色</span>
+              <div class="terminal-group-color-control">
+                <input
+                  id="terminal-group-color"
+                  type="color"
+                  value="#4f8cff"
+                  aria-describedby="terminal-group-color-value"
+                >
+                <code id="terminal-group-color-value">#4f8cff</code>
+              </div>
+            </label>
+          </div>
+          <label class="terminal-group-fixed-order-option">
+            <input id="terminal-group-fixed-order" type="checkbox">
+            <span>固定组内顺序</span>
+          </label>
+          <div
+            id="terminal-group-session-list"
+            class="terminal-group-session-list"
+            role="group"
+            aria-label="选择并调整要一起跟随的终端"
+          ></div>
+          <div class="terminal-group-order-actions">
+            <button id="terminal-group-move-up" class="button secondary" type="button">上移</button>
+            <button id="terminal-group-move-down" class="button secondary" type="button">下移</button>
+          </div>
+          <div
+            id="terminal-group-dialog-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
+          <div class="toolbar dialog-actions">
+            <button class="button primary" type="submit">保存编组</button>
+            <button id="terminal-group-cancel" class="button secondary" type="button">取消</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="terminal-group-manager-dialog" class="terminal-rename-dialog" aria-labelledby="terminal-group-manager-title">
+        <form id="terminal-group-manager-form" class="terminal-rename-dialog-form">
+          <div class="panel-head wide"><div><p class="section-label">终端管理</p><h2 id="terminal-group-manager-title">修改成员终端名</h2></div></div>
+          <p id="terminal-group-manager-target" class="session-group-help"></p>
+          <label class="terminal-group-name-option"><span>终端名称</span>
+            <input id="terminal-group-manager-rename-input" class="text-input" type="text" maxlength="80" autocomplete="off" spellcheck="false">
+          </label>
+          <div id="terminal-group-manager-status" class="inline-status" data-tone="muted" role="status" aria-live="polite" hidden></div>
+          <div class="toolbar dialog-actions">
+            <button class="button primary" type="submit">保存并通知</button>
+            <button id="terminal-group-manager-cancel" class="button secondary" type="button">取消</button>
+          </div>
+        </form>
+      </dialog>
+
+      <main id="terminal-workspace" class="terminal-layout terminal-layout-single">
         <section class="panel terminal-panel">
           <div class="terminal-scroll-shell">
             <span
@@ -247,6 +421,41 @@
         </section>
       </main>
 
+      <section
+        id="terminal-server-workspace"
+        class="panel terminal-panel terminal-server-workspace"
+        role="tabpanel"
+        aria-labelledby="top-nav-server"
+        hidden
+      >
+        <form id="terminal-server-frame-form" class="terminal-server-frame-form">
+          <label class="terminal-specified-task-field" for="terminal-server-frame-select">
+            <span>远程服务器</span>
+            <select id="terminal-server-frame-select" class="text-input mono-text" required></select>
+          </label>
+          <button
+            id="terminal-server-frame-edit"
+            class="button secondary terminal-server-frame-edit"
+            type="button"
+            title="编辑服务器预设"
+            aria-label="编辑服务器预设"
+          >
+            编辑服务器
+          </button>
+          <button class="button primary" type="submit">连接</button>
+          <button id="terminal-server-frame-reload" class="button secondary" type="button">重载</button>
+          <button id="terminal-server-frame-open" class="button secondary" type="button">独立打开</button>
+          <button id="terminal-server-frame-close" class="button secondary" type="button">返回终端</button>
+        </form>
+        <p id="terminal-server-frame-status" class="meta-text terminal-server-frame-status" role="status" aria-live="polite"></p>
+        <iframe
+          id="terminal-server-frame"
+          class="terminal-server-frame"
+          title="远程 webClx 服务器"
+          referrerpolicy="no-referrer"
+        ></iframe>
+      </section>
+
       <div
         id="terminal-context-menu"
         class="terminal-context-menu"
@@ -261,6 +470,24 @@
           role="menuitem"
         >
           复制全部文本
+        </button>
+        <button
+          id="terminal-context-select-all"
+          class="terminal-context-menu-item"
+          type="button"
+          role="menuitem"
+          hidden
+        >
+          全选
+        </button>
+        <button
+          id="terminal-context-agent-prompt"
+          class="terminal-context-menu-item"
+          type="button"
+          role="menuitem"
+          hidden
+        >
+          临时/新终端/新对话
         </button>
       </div>
 
@@ -334,15 +561,20 @@
                 <option value="open_project_url">项目 URL</option>
                 <option value="open_artifact_downloads">下载中心</option>
                 <option value="codes_backup">!codes_backup</option>
-                <option value="deploy_project" data-shortcut="Ctrl+B">本项目部署脚本</option>
+                <option value="deploy_project" data-shortcut="^B">本项目部署脚本</option>
                 <option value="open_agents_doc">文档</option>
-                <option value="permanent_switch_preset">永久切换预设</option>
-                <option value="open_specified_task">指定（临时）</option>
-                <option value="designate_preset_fork">指定预设+fork（临时）</option>
-                <option value="designate_preset_resume">指定预设+resume（临时）</option>
-                <option value="switch_preset_in_terminal">终端内临时切换预设</option>
-                <option value="switch_preset_in_terminal_new_session">终端内临时切换预设（新会话）</option>
-                <option value="designate_preset_terminal">指定预设临时终端</option>
+                <option value="permanent_switch_preset">永久</option>
+                <option value="open_specified_task">临时</option>
+        <option value="open_future_tasks">未来任务</option>
+        <option value="open_workspace_restores">恢复终端</option>
+        <option value="open_multi_model_advisor">群组建议</option>
+                <option value="open_multi_terminal_discussion">群组讨论</option>
+                <option value="designate_preset_fork">临时/新终端/fork</option>
+                <option value="designate_preset_resume">临时/新终端/resume</option>
+                <option value="switch_preset_in_terminal">临时/原地/resume</option>
+                <option value="switch_preset_in_terminal_new_session">临时/原地/新对话</option>
+                <option value="designate_preset_terminal">临时/新终端/新对话</option>
+                <option value="designate_preset_ask">临时/新终端/提问</option>
               </select>
               <button
                 type="button"
@@ -399,8 +631,8 @@
             type="button"
             role="menuitem"
             data-action="open_schedule_paste"
-            aria-label="定时消息"
-            title="定时消息"
+            aria-label="定时任务"
+            title="定时任务"
           >
             <span class="terminal-fab-item-icon" aria-hidden="true">&#9200;</span>
             <span
@@ -490,13 +722,18 @@
         <button type="button" role="menuitem" data-project-action="codes_backup">!codes_backup</button>
         <button type="button" role="menuitem" data-project-action="deploy_project">部署项目</button>
         <button type="button" role="menuitem" data-project-action="open_agents_doc">文档</button>
-        <button type="button" role="menuitem" data-project-action="permanent_switch_preset">永久切换预设</button>
-        <button type="button" role="menuitem" data-project-action="open_specified_task">指定（临时）</button>
-        <button type="button" role="menuitem" data-project-action="designate_preset_fork">指定预设 + fork（临时）</button>
-        <button type="button" role="menuitem" data-project-action="designate_preset_resume">指定预设 + resume（临时）</button>
-        <button type="button" role="menuitem" data-project-action="switch_preset_in_terminal">终端内临时切换预设</button>
-        <button type="button" role="menuitem" data-project-action="switch_preset_in_terminal_new_session">终端内临时切换预设（新会话）</button>
-        <button type="button" role="menuitem" data-project-action="designate_preset_terminal">指定预设临时终端</button>
+        <button type="button" role="menuitem" data-project-action="permanent_switch_preset">永久</button>
+        <button type="button" role="menuitem" data-project-action="open_specified_task">临时</button>
+        <button type="button" role="menuitem" data-project-action="open_future_tasks">未来任务</button>
+        <button type="button" role="menuitem" data-project-action="open_workspace_restores">恢复终端</button>
+        <button type="button" role="menuitem" data-project-action="open_multi_model_advisor">群组建议</button>
+        <button type="button" role="menuitem" data-project-action="open_multi_terminal_discussion">群组讨论</button>
+        <button type="button" role="menuitem" data-project-action="designate_preset_fork">临时/新终端/fork</button>
+        <button type="button" role="menuitem" data-project-action="designate_preset_resume">临时/新终端/resume</button>
+        <button type="button" role="menuitem" data-project-action="switch_preset_in_terminal">临时/原地/resume</button>
+        <button type="button" role="menuitem" data-project-action="switch_preset_in_terminal_new_session">临时/原地/新对话</button>
+        <button type="button" role="menuitem" data-project-action="designate_preset_terminal">临时/新终端/新对话</button>
+        <button type="button" role="menuitem" data-project-action="designate_preset_ask">临时/新终端/提问</button>
       </div>
 
       <div
@@ -527,6 +764,17 @@
         aria-label="全能命令"
         hidden
       >
+          <button id="terminal-universal-shortcut" class="terminal-tools-action" type="button" role="menuitem">万能快捷键</button>
+        <button
+          id="terminal-orientation-toggle"
+          class="terminal-tools-action terminal-orientation-recovery"
+          type="button"
+          role="menuitem"
+          data-action="restore_portrait"
+          aria-label="恢复竖屏"
+          title="恢复竖屏"
+          hidden
+        >恢复竖屏</button>
         <label class="terminal-tools-option terminal-function-command-toggle">
           <input id="terminal-system-keyboard-checkbox" class="terminal-tools-switch" type="checkbox" role="switch" />
           <span>系统键盘</span>
@@ -537,19 +785,18 @@
         </label>
         <span class="terminal-tools-actions" role="group" aria-label="全能命令列表">
           <button
-            id="terminal-image-upload-button"
+            id="terminal-file-upload-button"
             class="terminal-tools-action"
             type="button"
             role="menuitem"
-            data-action="upload_terminal_image"
-          >上传图片</button>
+            data-action="upload_terminal_file"
+          >上传文件</button>
           <span id="terminal-function-command-buttons" class="terminal-tools-quick-commands"></span>
           <input
-            id="terminal-image-upload-input"
+            id="terminal-file-upload-input"
             class="sr-only"
             type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/bmp"
-            aria-label="选择要上传的图片"
+            aria-label="选择要上传的文件"
             multiple
           />
         </span>
@@ -595,6 +842,13 @@
           <button
             type="button"
             class="terminal-tools-action"
+            id="terminal-save-experience"
+            role="menuitem"
+            title="向当前终端发送经验落盘要求，保留终端继续对话"
+          >经验落盘</button>
+          <button
+            type="button"
+            class="terminal-tools-action"
             id="terminal-interrupt-resume"
             role="menuitem"
             aria-label="强制中断当前智能体并恢复会话"
@@ -618,6 +872,24 @@
             aria-label="切换终端排序，首次按工作区"
             title="依次按工作区、Agent 类型、状态排序"
           >切换终端排序</button>
+          <button
+            type="button"
+            class="terminal-tools-action"
+            id="terminal-reflow-current-session"
+            data-action="reflow_current_session"
+            role="menuitem"
+            aria-label="按当前手机宽度重排当前终端"
+            title="把当前终端宽度强制同步为手机可容纳的列数，并清除横向拖动"
+          >重排当前终端</button>
+          <button type="button" class="terminal-tools-action" id="terminal-group-sessions"
+            data-action="set_terminal_group_token" role="menuitem">终端分组</button>
+          <button type="button" class="terminal-tools-action" id="terminal-group-restore"
+            role="menuitem">恢复分组</button>
+          <button type="button" class="terminal-tools-action" id="terminal-exit-group"
+            data-action="exit_terminal_group" role="menuitem">退出分组</button>
+          <button type="button" class="terminal-tools-action" id="terminal-message-open"
+            role="menuitem" aria-label="向一个或多个终端发送消息"
+            title="按终端名或整组选择目标，向它们的 Agent 发送消息">终端消息</button>
         </span>
         <label class="terminal-tools-option">
           <input id="session-detail-toggle" type="checkbox" role="menuitemcheckbox" />
@@ -628,8 +900,16 @@
           <span>智能体</span>
         </label>
         <label class="terminal-tools-option">
+          <input id="session-context-toggle" type="checkbox" role="menuitemcheckbox" />
+          <span>上下文</span>
+        </label>
+        <label class="terminal-tools-option">
           <input id="session-auto-continue-toggle" type="checkbox" role="menuitemcheckbox" />
           <span>继续</span>
+        </label>
+        <label class="terminal-tools-option">
+          <input id="session-auto-compact-toggle" type="checkbox" role="menuitemcheckbox" />
+          <span>自动压缩</span>
         </label>
         <div
           id="terminal-tool-menu"
@@ -657,10 +937,36 @@
             aria-live="polite"
             hidden
           ></div>
+          <input id="terminal-tool-search" type="search" aria-label="搜索全部工作流"
+            placeholder="搜索工作流名称 / 目录" autocomplete="off"
+            style="width:100%;min-width:0;box-sizing:border-box" />
           <div id="terminal-tool-menu-body" class="terminal-tool-menu-body">
             <p class="meta-text terminal-tool-menu-empty">未配置利器条目。</p>
           </div>
         </div>
+        <dialog
+          id="terminal-workflow-parameters-dialog"
+          class="auth-import-dialog terminal-workflow-parameters-dialog"
+          aria-labelledby="terminal-workflow-parameters-title"
+        >
+          <form
+            id="terminal-workflow-parameters-form"
+            class="auth-import-form terminal-workflow-parameters-form"
+            method="dialog"
+          >
+            <div class="panel-head wide">
+              <div>
+                <p class="section-label">工作流</p>
+                <h2 id="terminal-workflow-parameters-title">运行参数</h2>
+              </div>
+            </div>
+            <div id="terminal-workflow-parameters-body" class="terminal-workflow-parameters-body"></div>
+            <div class="toolbar dialog-actions">
+              <button id="terminal-workflow-parameters-cancel" class="button secondary" type="button">取消</button>
+              <button class="button primary" type="submit">继续执行</button>
+            </div>
+          </form>
+        </dialog>
         <span class="terminal-tools-actions" role="group" aria-label="终端预设更新">
           <button
             id="extract-session-preset"
@@ -699,17 +1005,161 @@
             <span>服务器</span>
             <select id="terminal-server-switch-select" class="text-input mono-text" required>
               <option value="PUBLIC_DOMAIN">PUBLIC_DOMAIN:PORT</option>
-              <option value="frp6.ccszxc.site:25401">frp6.ccszxc.site:25401</option>
               <option value="PUBLIC_DOMAIN:PORT">PUBLIC_DOMAIN:PORT</option>
               <option value="PUBLIC_DOMAIN:14151">PUBLIC_DOMAIN:14151</option>
               <option value="us.PUBLIC_DOMAIN">us.PUBLIC_DOMAIN:PORT</option>
               <option value="jd.PUBLIC_DOMAIN">jd.PUBLIC_DOMAIN:PORT</option>
-              <option value="192.168.3.38">192.168.3.38:PORT</option>
             </select>
           </label>
           <div class="toolbar dialog-actions">
             <button id="terminal-server-switch-cancel" class="button secondary" type="button">取消</button>
             <button class="button primary" type="submit">连接</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-server-edit-dialog"
+        class="auth-import-dialog terminal-server-edit-dialog"
+        aria-labelledby="terminal-server-edit-title"
+      >
+        <form id="terminal-server-edit-form" class="auth-import-form terminal-server-edit-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">服务器预设</p>
+              <h2 id="terminal-server-edit-title">编辑服务器地址</h2>
+            </div>
+          </div>
+          <label class="terminal-specified-task-field" for="terminal-server-edit-select">
+            <span>服务器</span>
+            <select
+              id="terminal-server-edit-select"
+              class="text-input mono-text"
+              required
+            ></select>
+          </label>
+          <label class="terminal-specified-task-field" for="terminal-server-edit-input">
+            <span>服务器地址（host:port）</span>
+            <input
+              id="terminal-server-edit-input"
+              class="text-input mono-text"
+              type="text"
+              inputmode="url"
+              autocomplete="off"
+              spellcheck="false"
+              required
+              placeholder="例如 PUBLIC_DOMAIN:PORT"
+            />
+          </label>
+          <p id="terminal-server-edit-status" class="inline-status" role="status" aria-live="polite" hidden></p>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-server-edit-cancel" class="button secondary" type="button">取消</button>
+            <button class="button primary" type="submit">保存预设</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="terminal-shortcut-dialog" class="auth-import-dialog" aria-labelledby="terminal-shortcut-title" style="width: min(780px, calc(100vw - 16px)); max-height: 90dvh; overflow: auto; box-sizing: border-box;">
+        <form id="terminal-shortcut-form" class="auth-import-form">
+          <h2 id="terminal-shortcut-title">万能快捷键</h2>
+          <fieldset style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <legend>组合控制键（可多选）</legend>
+            <label><input type="checkbox" name="ctrl" /> Ctrl</label>
+            <label><input type="checkbox" name="alt" /> Alt</label>
+            <label><input type="checkbox" name="shift" /> Shift</label>
+            <label><input type="checkbox" name="meta" /> Meta</label>
+          </fieldset>
+          <select name="key" class="sr-only" aria-label="按键" tabindex="-1" aria-hidden="true"></select>
+          <output id="terminal-shortcut-preview" aria-live="polite"></output>
+          <div id="terminal-shortcut-keyboard" role="group" aria-label="全键盘"></div>
+          <p class="inline-status">发送到当前终端应用；部分组合键需应用支持扩展键盘协议。Meta 对应 Win / Command 键。</p>
+          <p id="terminal-shortcut-status" class="inline-status" role="alert"></p>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-shortcut-cancel" class="button secondary" type="button">取消</button>
+            <button class="button primary" type="submit">发送</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-future-tasks-dialog"
+        class="auth-import-dialog terminal-future-tasks-dialog"
+        aria-labelledby="terminal-future-tasks-title"
+      >
+        <form id="terminal-future-tasks-form" class="auth-import-form terminal-future-tasks-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">项目管理</p>
+              <h2 id="terminal-future-tasks-title">未来任务</h2>
+            </div>
+          </div>
+          <p id="terminal-future-tasks-status" class="inline-status" data-tone="muted" role="status" aria-live="polite"></p>
+          <div id="terminal-future-tasks-table-wrap" class="terminal-future-tasks-table-wrap">
+            <table class="terminal-future-tasks-table">
+              <thead>
+                <tr>
+                  <th scope="col">执行时间</th>
+                  <th scope="col">大模型</th>
+                  <th scope="col">工作目录</th>
+                  <th scope="col">提示词</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="terminal-future-tasks-tbody"></tbody>
+            </table>
+          </div>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-future-tasks-new" class="button primary" type="button">新建未来任务</button>
+            <button id="terminal-future-tasks-refresh" class="button secondary" type="button">刷新</button>
+            <button id="terminal-future-tasks-close" class="button secondary" type="button">关闭</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog
+        id="terminal-workspace-restores-dialog"
+        class="auth-import-dialog terminal-workspace-restores-dialog"
+        aria-labelledby="terminal-workspace-restores-title"
+      >
+        <form
+          id="terminal-workspace-restores-form"
+          class="auth-import-form terminal-workspace-restores-form"
+          method="dialog"
+        >
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">项目管理</p>
+              <h2 id="terminal-workspace-restores-title">恢复终端</h2>
+            </div>
+          </div>
+          <p
+            id="terminal-workspace-restores-status"
+            class="inline-status"
+            data-tone="muted"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <div id="terminal-workspace-restores-table-wrap" class="terminal-workspace-restores-table-wrap">
+            <table class="terminal-workspace-restores-table">
+              <thead>
+                <tr>
+                  <th scope="col"><input id="terminal-workspace-restore-all" type="checkbox" aria-label="全选终端" /></th>
+                  <th scope="col">Agent</th>
+                  <th scope="col">终端</th>
+                  <th scope="col">分组</th>
+                  <th scope="col">目录</th>
+                  <th scope="col">更新时间</th>
+                  <th scope="col">操作</th>
+                </tr>
+              </thead>
+              <tbody id="terminal-workspace-restores-tbody"></tbody>
+            </table>
+          </div>
+          <div class="toolbar dialog-actions">
+            <button id="terminal-workspace-restore-selected" class="button primary" type="button">恢复选中</button>
+            <button id="terminal-workspace-restore-all-button" class="button secondary" type="button">全部恢复</button>
+            <button id="terminal-workspace-restores-refresh" class="button secondary" type="button">刷新</button>
+            <button id="terminal-workspace-restores-close" class="button secondary" type="button">关闭</button>
           </div>
         </form>
       </dialog>
@@ -725,37 +1175,80 @@
              <p class="section-label">Agent 任务</p>
              <h2 id="terminal-specified-task-title">指定预设执行</h2>
            </div>
-           <span id="terminal-specified-task-path" class="mono-text terminal-specified-task-path"></span>
+           <span id="terminal-specified-task-path" class="sr-only"></span>
+         </div>
+
+         <div
+           id="terminal-specified-task-workspace-field"
+           class="terminal-specified-task-workspace-field"
+         >
+           <label for="terminal-specified-task-workspace">工作目录</label>
+           <select
+             id="terminal-specified-task-workspace"
+             class="text-input mono-text terminal-specified-task-history-select"
+             aria-label="选择历史工作区"
+           ></select>
+           <select
+             id="terminal-specified-task-favorite"
+             class="text-input mono-text terminal-specified-task-favorite-select"
+             aria-label="跳转收藏"
+           >
+             <option value="">跳转收藏</option>
+           </select>
+           <button
+             id="terminal-specified-task-workspace-browse"
+             class="button secondary"
+             type="button"
+             title="浏览并选择工作目录"
+           >浏览…</button>
          </div>
 
          <fieldset class="terminal-specified-task-modes terminal-specified-task-agent-modes">
-           <legend>Agent</legend>
-           <label>
-             <input type="radio" name="terminal-specified-task-agent" value="codex" checked />
-             <span>Codex</span>
-           </label>
-           <label>
-             <input type="radio" name="terminal-specified-task-agent" value="claude" />
-             <span>Claude</span>
-           </label>
-         </fieldset>
+            <legend>Agent</legend>
+            <span class="terminal-specified-task-group-title" aria-hidden="true">Agent</span>
+            <div id="terminal-specified-task-agent-list" class="terminal-specified-task-agent-list"></div>
+          </fieldset>
 
-         <label class="terminal-specified-task-field terminal-specified-task-preset-field">
-           <span>API 预设</span>
+         <div id="terminal-specified-task-preset-field" class="terminal-specified-task-field terminal-specified-task-preset-field">
+           <span>Codex 账号</span>
            <select id="terminal-specified-task-preset" class="text-input" required>
              <option value="">正在读取预设…</option>
            </select>
+           <label class="terminal-specified-task-session-only-label">
+             <input id="terminal-specified-task-session-only" type="checkbox" name="terminal-specified-task-session-only" />
+             <span>仅对此会话</span>
+           </label>
+         </div>
+         <label id="terminal-specified-task-other-command-field" class="terminal-specified-task-field" hidden>
+           <span>终端命令</span>
+           <input id="terminal-specified-task-other-command" class="text-input mono-text" value="" placeholder="例如 aider、gemini" autocomplete="off" spellcheck="false" />
          </label>
 
-         <fieldset class="terminal-specified-task-modes">
+         <label
+           id="terminal-specified-task-schedule-field"
+           class="terminal-specified-task-field terminal-specified-task-schedule-field"
+           hidden
+         >
+           <span>执行时间</span>
+           <input
+             id="terminal-specified-task-schedule"
+             class="text-input"
+             type="datetime-local"
+             step="60"
+             autocomplete="off"
+           />
+         </label>
+
+         <fieldset id="terminal-specified-task-mode-field" class="terminal-specified-task-modes">
            <legend>执行方式</legend>
+           <span class="terminal-specified-task-group-title" aria-hidden="true">执行方式</span>
            <label>
              <input type="radio" name="terminal-specified-task-mode" value="fixed" checked />
-             <span>固定终端</span>
+             <span>交互终端</span>
            </label>
            <label>
              <input type="radio" name="terminal-specified-task-mode" value="terminal" />
-             <span>临时终端</span>
+             <span>终端任务</span>
            </label>
            <label>
              <input type="radio" name="terminal-specified-task-mode" value="exec" />
@@ -764,13 +1257,31 @@
          </fieldset>
 
          <div id="terminal-specified-task-fixed-options" class="terminal-specified-task-fixed-options">
-           <label class="terminal-specified-task-field terminal-specified-task-temporary-switch">
-             <input id="terminal-specified-task-temporary" type="checkbox" checked />
-             <span>临时切换预设（运行后恢复原预设）</span>
-           </label>
+           <fieldset class="terminal-specified-task-modes terminal-specified-task-preset-scope" hidden>
+             <legend>预设作用范围</legend>
+             <span class="terminal-specified-task-group-title" aria-hidden="true">预设作用范围</span>
+             <label>
+               <input
+                 type="radio"
+                 name="terminal-specified-task-preset-scope"
+                 value="terminal"
+                 checked
+               />
+               <span>仅本终端使用该预设</span>
+             </label>
+             <label>
+               <input
+                 type="radio"
+                 name="terminal-specified-task-preset-scope"
+                 value="global"
+               />
+               <span>全局切换到该预设</span>
+             </label>
+           </fieldset>
 
-           <fieldset class="terminal-specified-task-modes">
+           <fieldset class="terminal-specified-task-modes terminal-specified-task-session-actions">
              <legend>会话动作</legend>
+             <span class="terminal-specified-task-group-title" aria-hidden="true">会话动作</span>
              <label>
                <input type="radio" name="terminal-specified-task-session-action" value="new" checked />
                <span>新会话</span>
@@ -779,15 +1290,71 @@
                <input type="radio" name="terminal-specified-task-session-action" value="resume" />
                <span>恢复</span>
              </label>
-             <label>
-               <input type="radio" name="terminal-specified-task-session-action" value="fork" />
-               <span>Fork</span>
-             </label>
+           <label>
+             <input type="radio" name="terminal-specified-task-session-action" value="fork" />
+             <span>Fork</span>
+           </label>
+           <label>
+             <input type="radio" name="terminal-specified-task-session-action" value="ask" />
+             <span>提问</span>
+           </label>
            </fieldset>
 
-           <label
+          <label class="terminal-specified-task-option">
+            <input id="terminal-specified-task-auto-compact" type="checkbox" checked />
+            <span>自动压缩</span>
+          </label>
+
+          <label
+            id="terminal-specified-task-group-field"
+            class="terminal-specified-task-option terminal-specified-task-group-option"
+          >
+            <input id="terminal-specified-task-join-group" type="checkbox" />
+            <span>加入当前群组</span>
+            <select
+              id="terminal-specified-task-group"
+              class="text-input"
+              aria-label="指定当前群组"
+              disabled
+            >
+              <option value="">没有可用群组</option>
+            </select>
+            <select
+              id="terminal-specified-task-group-role"
+              class="text-input"
+              aria-label="新终端角色"
+              disabled
+            >
+              <option value="executor">执行者</option>
+              <option value="manager">管理者</option>
+              <option value="reviewer">复核者</option>
+            </select>
+          </label>
+
+          <label
+            id="terminal-specified-task-new-group-field"
+            class="terminal-specified-task-option terminal-specified-task-group-option"
+          >
+            <input id="terminal-specified-task-new-group" type="checkbox" />
+            <span>自组群</span>
+            <label class="terminal-specified-task-new-group-count" title="自组群终端数量">
+              <span>数量</span>
+              <input
+                id="terminal-specified-task-new-group-count"
+                class="text-input"
+                type="number"
+                min="2"
+                max="8"
+                step="1"
+                value="2"
+                disabled
+              />
+            </label>
+          </label>
+
+          <div
              id="terminal-specified-task-session-id-field"
-             class="terminal-specified-task-field"
+             class="terminal-specified-task-field terminal-specified-task-session-id-field"
              hidden
            >
              <span>Session</span>
@@ -800,20 +1367,52 @@
                spellcheck="false"
                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
              />
-           </label>
+             <label
+               id="terminal-specified-task-agy-continue-label"
+               class="terminal-specified-task-session-only-label"
+               hidden
+             >
+               <input
+                 id="terminal-specified-task-agy-continue"
+                 type="checkbox"
+                 name="terminal-specified-task-agy-continue"
+                 checked
+               />
+               <span>默认最后一次会话</span>
+             </label>
+           </div>
 
-           <label class="terminal-specified-task-field">
-             <span>终端名</span>
-             <input
+           <div
+             id="terminal-specified-task-terminal-name-row"
+             class="terminal-specified-task-terminal-name-row"
+           >
+             <span class="terminal-specified-task-row-title">原终端名</span>
+             <output
                id="terminal-specified-task-terminal-name"
-               class="text-input"
-               type="text"
-               maxlength="120"
-               autocomplete="off"
-               spellcheck="false"
-               placeholder="自动提取当前终端名"
-             />
-           </label>
+               class="terminal-specified-task-original-name"
+               aria-label="原终端名"
+             ></output>
+             <div
+               id="terminal-specified-task-terminal-name-suffix-field"
+               class="terminal-specified-task-suffix-field"
+             >
+               <label class="terminal-specified-task-suffix-label" for="terminal-specified-task-terminal-name-suffix">快速后缀</label>
+               <input
+                 id="terminal-specified-task-terminal-name-suffix"
+                 class="text-input"
+                 type="text"
+                 maxlength="80"
+                 autocomplete="off"
+                 spellcheck="false"
+                 placeholder="输入后自动添加到编号后"
+               />
+               <button
+                 id="terminal-specified-task-use-original-suffix"
+                 class="button secondary"
+                 type="button"
+               >提取原后缀</button>
+             </div>
+           </div>
            <div class="terminal-specified-task-name-preview" aria-live="polite">
              <span>最终终端名</span>
              <output
@@ -823,8 +1422,18 @@
            </div>
          </div>
 
-         <label class="terminal-specified-task-field">
-           <span id="terminal-specified-task-text-label">初始任务（可选）</span>
+         <div class="terminal-specified-task-field terminal-specified-task-prompt-field">
+           <div class="terminal-specified-task-prompt-labels">
+             <label id="terminal-specified-task-text-label" for="terminal-specified-task-text">初始提示词</label>
+             <label class="terminal-specified-task-import-title-option">
+               <input
+                 id="terminal-specified-task-import-title"
+                 type="checkbox"
+                 checked
+               />
+               <span>导入标题</span>
+             </label>
+           </div>
            <textarea
              id="terminal-specified-task-text"
              class="dialog-textarea terminal-specified-task-text"
@@ -832,7 +1441,7 @@
              spellcheck="false"
              placeholder="可选：启动后立即交给 Agent 的任务"
            ></textarea>
-         </label>
+         </div>
 
          <label
            id="terminal-specified-task-timeout-field"
@@ -866,6 +1475,152 @@
            <button id="terminal-specified-task-cancel-task" class="button secondary danger" type="button" hidden>取消任务</button>
            <button id="terminal-specified-task-close" class="button secondary" type="button">关闭</button>
            <button id="terminal-specified-task-run" class="button primary" type="submit">启动</button>
+         </div>
+       </form>
+     </dialog>
+
+     <dialog
+       id="terminal-multi-model-advisor-dialog"
+       class="auth-import-dialog terminal-specified-task-dialog terminal-multi-model-advisor-dialog"
+       aria-labelledby="terminal-multi-model-advisor-title"
+     >
+       <form id="terminal-multi-model-advisor-form" class="auth-import-form terminal-specified-task-form">
+         <div class="panel-head wide">
+           <div>
+             <p class="section-label">只读讨论</p>
+             <h2 id="terminal-multi-model-advisor-title">群组建议</h2>
+           </div>
+           <span id="terminal-multi-model-advisor-path" class="mono-text terminal-specified-task-path"></span>
+         </div>
+         <fieldset class="terminal-multi-model-advisor-group">
+           <legend>参与模型（1–3 个）</legend>
+           <div id="terminal-multi-model-advisor-presets" class="terminal-multi-model-advisor-options">正在读取预设…</div>
+         </fieldset>
+         <label class="terminal-specified-task-field terminal-multi-model-advisor-task-field">
+           <span>需要讨论的问题</span>
+           <textarea id="terminal-multi-model-advisor-task" class="dialog-textarea terminal-specified-task-text" maxlength="65536" required spellcheck="false"></textarea>
+         </label>
+         <div class="terminal-multi-model-advisor-controls">
+           <label class="terminal-specified-task-field">
+             <span>单模型超时（秒）</span>
+             <input id="terminal-multi-model-advisor-timeout" class="text-input" type="number" min="30" max="7200" value="1800" />
+           </label>
+         </div>
+         <fieldset class="terminal-multi-model-advisor-group">
+           <legend>讨论完成后通知终端（可选）</legend>
+           <div id="terminal-multi-model-advisor-terminals" class="terminal-multi-model-advisor-options">不通知其它终端</div>
+         </fieldset>
+         <div id="terminal-multi-model-advisor-status" class="inline-status terminal-specified-task-status" role="status" aria-live="polite" hidden></div>
+         <pre id="terminal-multi-model-advisor-result" class="terminal-specified-task-result" tabindex="0" hidden></pre>
+         <div class="toolbar dialog-actions">
+           <button id="terminal-multi-model-advisor-close" class="button secondary" type="button">关闭</button>
+           <button id="terminal-multi-model-advisor-run" class="button primary" type="submit">开始讨论</button>
+         </div>
+       </form>
+     </dialog>
+
+     <dialog
+       id="terminal-multi-terminal-discussion-dialog"
+       class="auth-import-dialog terminal-specified-task-dialog terminal-multi-model-advisor-dialog"
+       aria-labelledby="terminal-multi-terminal-discussion-title"
+     >
+       <form id="terminal-multi-terminal-discussion-form" class="auth-import-form terminal-specified-task-form">
+         <div class="panel-head wide">
+           <div>
+             <p class="section-label">协作讨论</p>
+             <h2 id="terminal-multi-terminal-discussion-title">群组讨论</h2>
+           </div>
+           <span id="terminal-multi-terminal-discussion-path" class="mono-text terminal-specified-task-path"></span>
+         </div>
+         <label class="terminal-specified-task-field terminal-multi-model-advisor-task-field">
+           <span>需要讨论的问题</span>
+           <textarea id="terminal-multi-terminal-discussion-topic" class="dialog-textarea terminal-specified-task-text" maxlength="65536" required spellcheck="false"></textarea>
+         </label>
+         <div class="terminal-multi-model-advisor-controls">
+           <label class="terminal-specified-task-field">
+             <span>讨论时限（分钟）</span>
+             <input id="terminal-multi-terminal-discussion-timebox" class="text-input" type="number" min="1" max="240" value="15" required />
+           </label>
+         </div>
+         <fieldset class="terminal-multi-model-advisor-group">
+           <legend>参与终端（至少 2 个）</legend>
+           <div id="terminal-multi-terminal-discussion-terminals" class="terminal-multi-model-advisor-options">正在读取终端…</div>
+         </fieldset>
+         <div id="terminal-multi-terminal-discussion-status" class="inline-status terminal-specified-task-status" role="status" aria-live="polite" hidden></div>
+         <pre id="terminal-multi-terminal-discussion-result" class="terminal-specified-task-result" tabindex="0" hidden></pre>
+         <div class="toolbar dialog-actions">
+           <button id="terminal-multi-terminal-discussion-close" class="button secondary" type="button">关闭</button>
+           <button id="terminal-multi-terminal-discussion-start" class="button primary" type="submit">发起讨论</button>
+         </div>
+       </form>
+     </dialog>
+
+     <dialog
+       id="terminal-message-dialog"
+       class="auth-import-dialog terminal-specified-task-dialog terminal-multi-model-advisor-dialog"
+       aria-labelledby="terminal-message-title"
+     >
+       <form id="terminal-message-form" class="auth-import-form terminal-specified-task-form">
+         <div class="panel-head wide">
+           <div>
+             <p class="section-label">终端消息</p>
+             <h2 id="terminal-message-title">发送终端消息</h2>
+           </div>
+           <span id="terminal-message-selected" class="mono-text terminal-specified-task-path">未选择目标</span>
+         </div>
+         <label class="terminal-specified-task-field terminal-multi-model-advisor-task-field">
+           <span>消息内容</span>
+           <textarea id="terminal-message-text" class="dialog-textarea terminal-specified-task-text" maxlength="65536" required spellcheck="false"></textarea>
+         </label>
+         <fieldset class="terminal-multi-model-advisor-group">
+           <legend>目标终端（勾选，或按整组选中）</legend>
+           <div id="terminal-message-group-actions" class="terminal-message-group-actions"></div>
+           <div id="terminal-message-targets" class="terminal-multi-model-advisor-options terminal-message-targets">正在读取终端…</div>
+         </fieldset>
+         <div class="terminal-multi-model-advisor-controls">
+           <label class="terminal-message-option">
+             <input id="terminal-message-identify" type="checkbox" checked />
+             <span>附带发送方终端名</span>
+           </label>
+           <label class="terminal-message-option">
+             <input id="terminal-message-verify" type="checkbox" checked />
+             <span>等待 Agent 确认投递</span>
+           </label>
+         </div>
+         <div id="terminal-message-status" class="inline-status terminal-specified-task-status" role="status" aria-live="polite" hidden></div>
+         <pre id="terminal-message-result" class="terminal-specified-task-result" tabindex="0" hidden></pre>
+         <div class="toolbar dialog-actions">
+           <button id="terminal-message-close" class="button secondary" type="button">关闭</button>
+           <button id="terminal-message-send" class="button primary" type="submit">发送消息</button>
+         </div>
+       </form>
+     </dialog>
+
+     <dialog
+       id="terminal-specified-task-path-dialog"
+       class="auth-import-dialog terminal-specified-task-path-dialog"
+       aria-labelledby="terminal-specified-task-path-title"
+     >
+       <form id="terminal-specified-task-path-form" class="path-browse-dialog" method="dialog">
+         <div class="path-browse-dialog-header">
+           <h3 id="terminal-specified-task-path-title">选择目录</h3>
+           <input
+             id="terminal-specified-task-path-input"
+             class="text-input path-browse-dialog-path-input mono-text"
+             type="text"
+             autocomplete="off"
+             spellcheck="false"
+             aria-label="目录路径"
+           />
+         </div>
+         <div id="terminal-specified-task-path-body" class="path-browse-dialog-body"></div>
+         <div class="path-browse-dialog-footer">
+           <span
+             id="terminal-specified-task-path-selected"
+             class="path-browse-selected-display mono-text"
+           ></span>
+           <button id="terminal-specified-task-path-cancel" class="button secondary" type="button">取消</button>
+           <button id="terminal-specified-task-path-confirm" class="button primary" type="submit">确定</button>
          </div>
        </form>
      </dialog>
@@ -957,6 +1712,12 @@
          ></div>
          <div class="toolbar dialog-actions">
            <button id="terminal-in-place-preset-close" class="button secondary" type="button">关闭</button>
+           <button
+             id="terminal-in-place-preset-ignore-exit-error"
+             class="button secondary"
+             type="button"
+             hidden
+           >忽略错误继续</button>
            <button id="terminal-in-place-preset-submit" class="button primary" type="submit">切换并恢复</button>
          </div>
        </form>
@@ -992,6 +1753,8 @@
                <option value="SAVED">已保存配置</option>
                <option value="ZHIPU">智谱 GLM Coding Plan</option>
                <option value="MINIMAX">MiniMax TokenPlan</option>
+               <option value="OPENROUTER">OpenRouter Credits</option>
+               <option value="CUSTOM">指定账号</option>
              </select>
            </label>
            <label class="settings-row">
@@ -1001,12 +1764,18 @@
              </select>
            </label>
            <label class="settings-row">
+             <span class="settings-label">指定账号</span>
+             <select id="terminal-quota-custom-preset-select" class="settings-input">
+               <option value="">未指定</option>
+             </select>
+           </label>
+           <label class="settings-row">
              <span class="settings-label">API Key</span>
-             <input id="terminal-quota-api-key-input" type="text" class="settings-input" placeholder="智谱或 MiniMax API Key" autocomplete="off" spellcheck="false" />
+             <input id="terminal-quota-api-key-input" type="text" class="settings-input" placeholder="智谱、MiniMax 或 OpenRouter API Key" autocomplete="off" spellcheck="false" />
            </label>
            <label class="settings-row">
              <span class="settings-label">Base URL</span>
-             <input id="terminal-quota-base-url-input" type="text" class="settings-input" placeholder="https://open.bigmodel.cn  或  https://www.minimaxi.com" autocomplete="off" spellcheck="false" />
+             <input id="terminal-quota-base-url-input" type="text" class="settings-input" placeholder="https://open.bigmodel.cn、https://www.minimaxi.com 或 https://openrouter.ai/api/v1" autocomplete="off" spellcheck="false" />
            </label>
            <div class="toolbar">
              <button type="button" class="mini-button" id="terminal-quota-save-config">保存配置</button>
@@ -1188,7 +1957,7 @@
       </dialog>
 
       <dialog id="terminal-input-history-dialog" class="auth-import-dialog terminal-input-history-dialog">
-        <form id="terminal-input-history-form" class="auth-import-form terminal-input-history-form" method="dialog">
+        <form id="terminal-input-history-form" class="auth-import-form terminal-input-history-form">
           <div class="panel-head wide">
             <div>
               <p class="section-label">对话历史</p>
@@ -1208,6 +1977,172 @@
           <div class="toolbar dialog-actions">
             <button id="terminal-input-history-copy" class="button secondary" type="button">复制全部</button>
             <button id="terminal-input-history-close" class="button primary" type="button">关闭</button>
+          </div>
+        </form>
+      </dialog>
+
+      <dialog id="terminal-scheduled-tasks-dialog" class="terminal-scheduled-tasks-dialog" aria-labelledby="terminal-scheduled-tasks-title">
+        <form method="dialog" class="terminal-scheduled-tasks-form">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">定时</p>
+              <h2 id="terminal-scheduled-tasks-title">定时任务统一管理器</h2>
+              <p id="unified-task-dialog-scope" class="meta-text compact-meta">只显示当前工作目录。</p>
+            </div>
+            <div class="toolbar">
+              <div class="unified-task-view-switch" role="tablist" aria-label="定时任务范围">
+                <button class="button secondary active" type="button" data-unified-task-view="current" role="tab" aria-selected="true">当前目录</button>
+                <button class="button secondary" type="button" data-unified-task-view="all" role="tab" aria-selected="false">全部</button>
+              </div>
+              <button
+                id="scheduled-tasks-dialog-close"
+                class="button secondary scheduled-tasks-window-close"
+                type="button"
+                aria-label="关闭定时任务窗口"
+                title="关闭"
+              >&#10005;</button>
+            </div>
+          </div>
+          <p id="unified-task-create-status" class="inline-status" data-tone="muted" hidden></p>
+          <div id="unified-task-form-card" class="settings-card settings-card-wide settings-card-tight" hidden>
+            <div class="unified-task-form">
+              <label class="field">
+                <span class="field-label">任务类型</span>
+                <select id="unified-task-type" class="text-input">
+                  <option value="paste">粘贴消息</option>
+                  <option value="command">执行命令</option>
+                  <option value="continue">发送继续</option>
+                  <option value="preset-test">预设 API 测试</option>
+                </select>
+              </label>
+              <label class="field unified-terminal-task-field">
+                <span class="field-label">发送目标</span>
+                <select id="unified-task-target-mode" class="text-input">
+                  <option value="existing">发送到现有终端</option>
+                  <option value="new">新建终端</option>
+                </select>
+              </label>
+              <label class="field unified-terminal-task-field" id="unified-task-terminal-field">
+                <span class="field-label">目标终端</span>
+                <select id="unified-task-terminal" class="text-input">
+                  <option value="">加载中...</option>
+                </select>
+              </label>
+              <div class="field hidden unified-terminal-task-field" id="unified-task-workdir-field">
+                <span class="field-label">工作目录</span>
+                <div class="unified-task-workdir-row">
+                  <input id="unified-task-workdir" class="text-input" type="text" list="unified-task-workdir-suggestions" placeholder="输入或选择工作目录" autocomplete="off" spellcheck="false" />
+                  <datalist id="unified-task-workdir-suggestions"></datalist>
+                  <button id="unified-task-workdir-browse" class="button secondary" type="button" title="浏览选择路径">...</button>
+                </div>
+              </div>
+              <label class="field unified-terminal-task-field" id="unified-task-terminal-schedule-field">
+                <span class="field-label">发送时间</span>
+                <div class="unified-task-schedule-row">
+                  <select id="unified-task-schedule-mode" class="text-input">
+                    <option value="delay">延迟</option>
+                    <option value="interval">循环间隔</option>
+                    <option value="datetime">指定时间</option>
+                  </select>
+                  <input id="unified-task-delay-value" class="text-input" type="number" min="1" step="1" value="5" placeholder="延迟数值" />
+                  <select id="unified-task-delay-unit" class="text-input">
+                    <option value="seconds">秒</option>
+                    <option value="minutes" selected>分钟</option>
+                    <option value="hours">小时</option>
+                  </select>
+                  <input id="unified-task-datetime" class="text-input hidden" type="datetime-local" />
+                </div>
+              </label>
+              <label class="field field-full unified-terminal-task-field" id="unified-task-text-field">
+                <span class="field-label">消息内容</span>
+                <input id="unified-task-text" class="text-input" type="text" placeholder="输入要定时发送的内容..." autocomplete="off" spellcheck="false" />
+              </label>
+              <div class="field field-full unified-task-send-enter-row unified-terminal-task-field" id="unified-task-send-enter-field">
+                <label class="toggle-row">
+                  <input id="unified-task-send-enter" type="checkbox" checked />
+                  <span class="field-label">自动回车提交</span>
+                </label>
+              </div>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">任务名称</span>
+                <input id="unified-task-preset-name" class="text-input" type="text" placeholder="如：每日检查主 API" autocomplete="off" />
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">预设类型</span>
+                <select id="unified-task-preset-kind" class="text-input">
+                  <option value="api">API 预设 (Codex)</option>
+                  <option value="claude">Claude 预设</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">目标预设</span>
+                <select id="unified-task-preset-id" class="text-input">
+                  <option value="">加载中...</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field">
+                <span class="field-label">调度周期</span>
+                <select id="unified-task-preset-schedule-type" class="text-input">
+                  <option value="daily">每天</option>
+                  <option value="weekly">每周</option>
+                  <option value="interval">固定间隔</option>
+                </select>
+              </label>
+              <label class="field hidden unified-preset-test-field" id="unified-task-preset-time-field">
+                <span class="field-label">执行时间</span>
+                <input id="unified-task-preset-time" class="text-input" type="time" value="09:00" />
+              </label>
+              <div class="field hidden unified-preset-test-field" id="unified-task-preset-weekday-field">
+                <span class="field-label">星期（可多选）</span>
+                <div class="weekday-checkbox-group" id="unified-task-preset-weekdays">
+                  <label class="weekday-chip"><input type="checkbox" value="1" /><span>一</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="2" /><span>二</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="3" /><span>三</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="4" /><span>四</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="5" /><span>五</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="6" /><span>六</span></label>
+                  <label class="weekday-chip"><input type="checkbox" value="0" /><span>日</span></label>
+                </div>
+              </div>
+              <label class="field hidden unified-preset-test-field" id="unified-task-preset-interval-field">
+                <span class="field-label">间隔（分钟）</span>
+                <input id="unified-task-preset-interval" class="text-input" type="number" min="1" step="1" value="60" placeholder="60 表示每小时" />
+              </label>
+              <div class="field field-full unified-task-send-enter-row hidden unified-preset-test-field">
+                <label class="toggle-row">
+                  <input id="unified-task-preset-enabled" type="checkbox" checked />
+                  <span class="field-label">启用循环测试</span>
+                </label>
+              </div>
+              <div class="toolbar unified-task-actions">
+                <button id="unified-task-create-btn" class="button primary" type="button">创建任务</button>
+                <button id="unified-task-clear-btn" class="button secondary" type="button">清空</button>
+              </div>
+            </div>
+          </div>
+          <p id="unified-task-list-status" class="inline-status" data-tone="muted">尚未读取。</p>
+          <div class="unified-task-table-wrap">
+            <table class="entry-table unified-task-table">
+              <thead>
+                <tr>
+                  <th scope="col">操作</th>
+                  <th scope="col">类型</th>
+                  <th scope="col">终端</th>
+                  <th scope="col">执行时间</th>
+                  <th scope="col">剩余</th>
+                  <th scope="col">内容</th>
+                </tr>
+              </thead>
+              <tbody id="unified-task-list">
+                <tr><td colspan="6">尚未读取。</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="toolbar dialog-actions">
+            <button id="unified-task-new-btn" class="button primary" type="button">新建</button>
+            <button id="unified-task-delivery-toggle" class="button secondary" type="button" aria-pressed="false">投递记录</button>
+            <button id="unified-task-refresh" class="button secondary" type="button">刷新</button>
+            <button id="terminal-scheduled-tasks-close" class="button secondary" type="submit">关闭</button>
           </div>
         </form>
       </dialog>

@@ -7,6 +7,10 @@ const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta
 const appJs = readEntryScriptBundle("index.html");
 const terminalJs = readEntryScriptBundle("terminal.html");
 const terminalSessionsJs = readFileSync(new URL("../static/terminal-sessions.js", import.meta.url), "utf8");
+const terminalExperienceSaveJs = readFileSync(
+  new URL("../static/terminal-experience-save.js", import.meta.url),
+  "utf8",
+);
 const terminalSessionRenderJs = readFileSync(new URL("../static/terminal-session-render.js", import.meta.url), "utf8");
 const workspaceHistoryTooltipJs = readFileSync(
   new URL("../static/app-workspace-history-tooltip.js", import.meta.url),
@@ -103,7 +107,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /function workspaceHistoryCoreRequestUrls\(\)[\s\S]*sessions: "\/api\/terminal\/sessions\?all=true"[\s\S]*sessions: `\/api\/terminal\/sessions\?path=\$\{encodeURIComponent\(relativePath\)\}`[\s\S]*conversations: `\/api\/terminal\/codex-conversations\?cwd=\$\{encodeURIComponent\(path\)\}`/,
+  /function workspaceHistoryCoreRequestUrls\(\)[\s\S]*recent_days=7[\s\S]*sessions: "\/api\/terminal\/sessions\?all=true&history=true"[\s\S]*sessions: `\/api\/terminal\/sessions\?path=\$\{encodeURIComponent\(relativePath\)\}&history=true`[\s\S]*conversations: `\/api\/terminal\/codex-conversations\?cwd=\$\{encodeURIComponent\(path\)\}/,
   "workspace history should load only the selected directory unless all-workspace search is explicit",
 );
 
@@ -337,7 +341,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /function createWorkspaceHistoryMoreButton\(item\)[\s\S]*label: "删除"[\s\S]*danger: true[\s\S]*disabled: item\.type === "terminal"/,
+  /function createWorkspaceHistoryMoreButton\(item, fallbackPath\)[\s\S]*label: "删除"[\s\S]*danger: true[\s\S]*disabled: item\.type === "terminal"/,
   "workspace history should disable delete in the more menu for active Codex conversations",
 );
 
@@ -367,7 +371,7 @@ assert.match(
 
 assert.match(
   appJs,
-  /actionCell\.appendChild\(createWorkspaceHistoryMoreButton\(item\)\)/,
+  /actionCell\.appendChild\(createWorkspaceHistoryMoreButton\(item, selectedPath\)\)/,
   "workspace history should add Codex actions through the more menu",
 );
 
@@ -405,6 +409,42 @@ assert.match(
   terminalSessionsJs,
   /async function idleCurrentSession\(\)[\s\S]*\/api\/terminal\/sessions\/\$\{encodeURIComponent\(current\.id\)\}\/idle[\s\S]*method: "PUT"/,
   "idle button should persist idle state through the server",
+);
+
+assert.match(
+  terminalHtml,
+  /id="terminal-experience-save-dialog"[\s\S]*是否需要经验落盘到运维 skill\？[\s\S]*id="terminal-experience-save-yes"[\s\S]*id="terminal-experience-save-no"/,
+  "ending a terminal should confirm optional experience persistence with No as the primary action",
+);
+
+assert.match(
+  terminalExperienceSaveJs,
+  /due_at: Date\.now\(\) \+ TERMINAL_EXPERIENCE_SAVE_DELAY_MS[\s\S]*send_enter: true[\s\S]*task_type: "agent_message"/,
+  "accepting experience persistence should create one submitting scheduled Agent message",
+);
+
+assert.match(
+  terminalExperienceSaveJs,
+  /\.agents\/skills\/<项目名>-ops\/SKILL\.md[\s\S]*更新旧内容而非重复追加[\s\S]*skill-bidirectional-sync/,
+  "experience prompt should target the current project-local ops skill and synchronize to other agents",
+);
+
+assert.doesNotMatch(
+  terminalSessionsJs,
+  /async function deleteSession\(session\)[\s\S]*method: "DELETE"/,
+  "terminal page ending should hide rather than terminate the session",
+);
+
+assert.match(
+  terminalSessionsJs,
+  /async function deleteSession\(session\)[\s\S]*confirmTerminalExperienceSaveAndHide\(session\)[\s\S]*\/hide[\s\S]*method: "PUT"/,
+  "terminal page ending should use the single-session hide API",
+);
+
+assert.match(
+  terminalJs,
+  /function updateSessionIdleState\(sessionId, idle\)[\s\S]*groupToken[\s\S]*session\.group_token === groupToken \? \{ \.\.\.session, idle: true \} : session/,
+  "idling one grouped terminal should move its group locally to idle",
 );
 
 assert.doesNotMatch(
@@ -457,6 +497,6 @@ assert.doesNotMatch(
 
 assert.match(
   terminalJs,
-  /if \(targetSession && isIdleSession\(targetSession\.id\)\) \{[\s\S]*targetSession = visibleSessions\(\)\[0\] \|\| null;[\s\S]*\}/,
+  /if \(targetSession && isIdleSession\(targetSession\.id\)\) \{[\s\S]*visibleSessions\(\)\[0\][\s\S]*null;[\s\S]*\}/,
   "refreshing a URL that points at an idle session should keep it idle and pick an active session instead",
 );

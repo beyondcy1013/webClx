@@ -14,7 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::{fs, io::AsyncWriteExt, sync::Mutex};
+use tokio::{fs, sync::Mutex};
 
 use crate::{ApiResult, AppError, AppState};
 
@@ -84,6 +84,21 @@ pub struct ProjectArtifacts {
     artifacts: Vec<ArtifactRecord>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteArtifactRequest {
+    project: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteArtifactResponse {
+    id: String,
+    project: String,
+    name: String,
+    deleted: bool,
+    file_deleted: bool,
+}
+
 pub async fn downloads_page() -> Html<String> {
     Html(DOWNLOADS_HTML.to_string())
 }
@@ -148,6 +163,33 @@ pub async fn android_update_manifest(
         size: record.size,
         download_url: record.download_url,
     }))
+}
+
+pub async fn windows_update_manifest(
+    State(state): State<AppState>,
+    AxumPath(project): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let project = sanitize_segment(&project, "project")?;
+    refresh_artifact_index(&state.app_dir).await?;
+    let index = load_index(&state.app_dir).await?;
+    let Some(record) = index
+        .artifacts
+        .into_iter()
+        .filter(|record| {
+            record.project == project
+                && record.name.starts_with(&format!("{project}-"))
+                && record.name.ends_with("-manifest.json")
+        })
+        .max_by(|left, right| left.published_at.cmp(&right.published_at))
+    else {
+        return Err(AppError::not_found("没有可用的 Windows 更新。"));
+    };
+    let bytes = fs::read(&record.stored_path)
+        .await
+        .map_err(|error| AppError::internal(format!("读取 Windows 更新清单失败: {error}")))?;
+    let manifest = serde_json::from_slice(&bytes)
+        .map_err(|error| AppError::internal(format!("Windows 更新清单格式无效: {error}")))?;
+    Ok(Json(manifest))
 }
 
 fn group_artifacts_by_project(artifacts: Vec<ArtifactRecord>) -> Vec<ProjectArtifacts> {
@@ -240,6 +282,211 @@ pub async fn publish_artifact(
     save_index(&state.app_dir, &index).await?;
     remove_retired_artifact_files(&project_dir, &retired).await;
     Ok(Json(record))
+}
+
+pub async fn delete_artifact(
+    State(state): State<AppState>,
+    AxumPath(artifact_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(payload): Json<DeleteArtifactRequest>,
+) -> ApiResult<Json<DeleteArtifactResponse>> {
+    let confirmation = headers
+        .get("x-webclx-confirm-artifact")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if artifact_id.is_empty() || confirmation != artifact_id {
+        return Err(AppError::bad_request(
+            "删除产物需要 x-webclx-confirm-artifact 头确认目标产物 ID。",
+        ));
+    }
+    let _index_guard = ARTIFACT_INDEX_LOCK.lock().await;
+    let index = load_index(&state.app_dir).await?;
+    let Some(record) = index
+        .artifacts
+        .iter()
+        .find(|item| item.id == artifact_id)
+        .cloned()
+    else {
+        return Err(AppError::not_found("产物不存在。"));
+    };
+    if record.project != payload.project || record.name != payload.name {
+        return Err(AppError::bad_request("产物项目或文件名与索引记录不匹配。"));
+    }
+    validate_deletable_artifact(&state.app_dir, &index, &record).await?;
+    let file_deleted = delete_artifact_record(&state.app_dir, index, &record).await?;
+    Ok(Json(DeleteArtifactResponse {
+        id: record.id,
+        project: record.project,
+        name: record.name,
+        deleted: true,
+        file_deleted,
+    }))
+}
+
+async fn validate_deletable_artifact(
+    app_dir: &Path,
+    index: &ArtifactIndex,
+    record: &ArtifactRecord,
+) -> ApiResult<()> {
+    if sanitize_segment(&record.project, "project").ok().as_deref() != Some(record.project.as_str())
+    {
+        return Err(AppError::bad_request("索引中的项目名不是规范化名称，拒绝删除。"));
+    }
+    if sanitize_file_name(&record.id).ok().as_deref() != Some(record.id.as_str())
+        || sanitize_file_name(&record.name).ok().as_deref() != Some(record.name.as_str())
+    {
+        return Err(AppError::bad_request("索引中的产物名称不是规范化名称，拒绝删除。"));
+    }
+    let stored = PathBuf::from(&record.stored_path);
+    if has_parent_component(&stored) {
+        return Err(AppError::bad_request("索引中的产物路径包含 ..，拒绝删除。"));
+    }
+    let project_dir = artifacts_root(app_dir).join(&record.project);
+    if !is_managed_artifact_path(&project_dir, record, &stored) {
+        return Err(AppError::bad_request("索引中的产物路径不在受管目录内，拒绝删除。"));
+    }
+    match fs::symlink_metadata(&project_dir).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(AppError::bad_request("产物项目目录不是普通目录，拒绝删除。"));
+            }
+            let canonical_dir = project_dir
+                .canonicalize()
+                .map_err(|error| AppError::internal(format!("解析产物目录失败: {error}")))?;
+            let canonical_root = artifacts_root(app_dir)
+                .canonicalize()
+                .map_err(|error| AppError::internal(format!("解析产物根目录失败: {error}")))?;
+            if canonical_dir != canonical_root.join(&record.project) {
+                return Err(AppError::bad_request("产物项目目录超出受管范围，拒绝删除。"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::internal(format!("读取产物项目目录失败: {error}")));
+        }
+    }
+    match fs::symlink_metadata(&stored).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(AppError::bad_request("产物文件不是普通文件，拒绝删除。"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AppError::internal(format!("读取产物文件失败: {error}")));
+        }
+    }
+    let project_records = index
+        .artifacts
+        .iter()
+        .filter(|item| item.project == record.project)
+        .collect::<Vec<_>>();
+    if let Some(newest) = project_records.iter().max_by(|left, right| {
+        left.published_at
+            .cmp(&right.published_at)
+            .then_with(|| left.id.cmp(&right.id))
+    }) {
+        if newest.id == record.id {
+            return Err(AppError::bad_request("当前项目最新产物不允许删除。"));
+        }
+    }
+    let mut android_candidates = project_records
+        .iter()
+        .filter(|item| !item.sha256.is_empty())
+        .filter_map(|item| {
+            android_version_from_name(&item.project, &item.name)
+                .map(|(_, version_code)| (item, version_code))
+        })
+        .collect::<Vec<_>>();
+    android_candidates.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.0.published_at.cmp(&left.0.published_at))
+    });
+    if android_candidates
+        .first()
+        .is_some_and(|(item, _)| item.id == record.id)
+    {
+        return Err(AppError::bad_request("当前 Android 更新清单引用的产物不允许删除。"));
+    }
+    if project_records
+        .iter()
+        .filter(|item| {
+            item.name.starts_with(&format!("{}-", record.project))
+                && item.name.ends_with("-manifest.json")
+        })
+        .max_by(|left, right| left.published_at.cmp(&right.published_at))
+        .is_some_and(|item| item.id == record.id)
+    {
+        return Err(AppError::bad_request("当前 Windows 更新清单产物不允许删除。"));
+    }
+    Ok(())
+}
+
+async fn delete_artifact_record(
+    app_dir: &Path,
+    mut index: ArtifactIndex,
+    record: &ArtifactRecord,
+) -> ApiResult<bool> {
+    let project_dir = artifacts_root(app_dir).join(&record.project);
+    let stored = PathBuf::from(&record.stored_path);
+    let staged_name = sanitize_file_name(&format!(".delete-{}__{}.tmp", record.id, record.name))?;
+    let staged = project_dir.join(&staged_name);
+    let stored_exists = match fs::symlink_metadata(&stored).await {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(AppError::internal(format!("读取产物文件失败: {error}")));
+        }
+    };
+    if stored_exists {
+        match fs::symlink_metadata(&staged).await {
+            Ok(_) => {
+                return Err(AppError::internal(format!(
+                    "删除暂存文件已存在: {}",
+                    staged.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(AppError::internal(format!(
+                    "读取删除暂存文件失败: {}: {error}",
+                    staged.display()
+                )));
+            }
+        }
+        fs::rename(&stored, &staged)
+            .await
+            .map_err(|error| AppError::internal(format!("暂存产物文件失败: {error}")))?;
+    }
+    index.artifacts.retain(|item| item.id != record.id);
+    if let Err(save_error) = save_index(app_dir, &index).await {
+        if stored_exists {
+            if let Err(rollback_error) = fs::rename(&staged, &stored).await {
+                return Err(AppError::internal(format!(
+                    "写入产物索引失败且回滚暂存文件失败: 保存错误 {save_error}; 回滚错误 {rollback_error}; 暂存文件 {}",
+                    staged.display()
+                )));
+            }
+        }
+        return Err(save_error);
+    }
+    if !stored_exists {
+        return Ok(true);
+    }
+    match fs::remove_file(&staged).await {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            tracing::warn!(
+                artifact_id = %record.id,
+                staged_path = %staged.display(),
+                %error,
+                "failed to unlink staged artifact file after index update"
+            );
+            Ok(false)
+        }
+    }
 }
 
 fn retire_artifacts_over_limit(
@@ -536,7 +783,7 @@ async fn sha256_file(path: &Path) -> ApiResult<String> {
     let bytes = fs::read(path)
         .await
         .map_err(|error| AppError::internal(format!("读取产物摘要失败: {error}")))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 fn android_version_from_name(project: &str, name: &str) -> Option<(String, u64)> {
@@ -605,19 +852,8 @@ async fn save_index(app_dir: &Path, index: &ArtifactIndex) -> ApiResult<()> {
     let data = serde_json::to_vec_pretty(index)
         .map_err(|error| AppError::internal(format!("序列化产物索引失败: {error}")))?;
     let path = index_path(app_dir);
-    let tmp = path.with_extension("json.tmp");
-    let mut file = fs::File::create(&tmp)
-        .await
+    crate::atomic_file::write_atomic(&path, &data)
         .map_err(|error| AppError::internal(format!("写入产物索引失败: {error}")))?;
-    file.write_all(&data)
-        .await
-        .map_err(|error| AppError::internal(format!("写入产物索引失败: {error}")))?;
-    file.flush()
-        .await
-        .map_err(|error| AppError::internal(format!("写入产物索引失败: {error}")))?;
-    fs::rename(&tmp, &path)
-        .await
-        .map_err(|error| AppError::internal(format!("替换产物索引失败: {error}")))?;
     Ok(())
 }
 
@@ -770,13 +1006,13 @@ const DOWNLOADS_HTML: &str = r#"<!doctype html>
   <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260727b">
   <style>
     .downloads-page { min-height: 100dvh; }
-    .downloads-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; max-width: 1180px; margin: 0 auto; padding: 14px 16px 4px; }
+    .downloads-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; margin: 0 auto; padding: 14px 16px 4px; box-sizing: border-box; }
     .downloads-heading-copy { min-width: 0; }
     .downloads-heading h1 { margin: 0; font-size: 20px; }
     .downloads-heading-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
     #refresh-artifacts { min-width: 88px; }
     #manage-downloads[hidden] { display: none; }
-    .downloads-content { max-width: 1180px; margin: 0 auto; padding: 10px; }
+    .downloads-content { width: 100%; margin: 0 auto; padding: 10px; box-sizing: border-box; }
     .downloads-content section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th, td { padding: 7px 6px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; font-size: 13px; }
@@ -817,11 +1053,10 @@ const DOWNLOADS_HTML: &str = r#"<!doctype html>
         <a class="tab-button topbar-link-button" href="/terminal">终端管理</a>
         <a class="tab-button topbar-link-button" href="/workspace">工作区</a>
         <a class="tab-button topbar-link-button" href="/workspace_history">历史工作区</a>
-        <a class="tab-button topbar-link-button" href="/codex_api">Codex_API</a>
+        <a class="tab-button topbar-link-button" href="/codex_api">LLM_API</a>
         <a class="tab-button topbar-link-button" href="/claude_api">Claude_API</a>
         <a class="tab-button topbar-link-button" href="/settings">设置</a>
-        <a class="tab-button topbar-link-button" href="/desktop">远程桌面</a>
-        <a class="tab-button topbar-link-button" href="/agent">Agent</a>
+        <a class="tab-button topbar-link-button" href="/agent">DeepSeek Agent</a>
         <a class="tab-button topbar-link-button" href="/codex_oauth">Codex_OAuth</a>
         <a class="tab-button topbar-link-button" href="/archives">归档列表</a>
         <a class="tab-button topbar-link-button active" href="/downloads" aria-current="page">编译产物</a>
@@ -1119,11 +1354,14 @@ const DOWNLOADS_HTML: &str = r#"<!doctype html>
 mod tests {
     use super::{
         ANDROID_MINIMUM_SUPPORTED_VERSION, ARTIFACTS_DIR, ArtifactIndex, ArtifactRecord,
-        DOWNLOADS_HTML, PublishArtifactRequest, android_update_manifest, android_version_from_name,
-        enforce_artifact_retention, group_artifacts_by_project, list_artifacts, publish_artifact,
-        requested_open_range, save_index,
+        DOWNLOADS_HTML, DeleteArtifactRequest, PublishArtifactRequest, android_update_manifest,
+        android_version_from_name, artifacts_root, delete_artifact, delete_artifact_record,
+        enforce_artifact_retention, group_artifacts_by_project, index_path, list_artifacts,
+        load_index, publish_artifact, requested_open_range, save_index,
     };
-    use crate::{AppState, agent, auth, codex_proxy, frpc, proxy, quota, settings, terminal};
+    use crate::{
+        AppState, agent, auth, codex_proxy, collaboration, frpc, proxy, quota, settings, terminal,
+    };
     use axum::{
         Json,
         extract::{Path as AxumPath, State},
@@ -1437,11 +1675,10 @@ mod tests {
             ("/terminal", "终端管理"),
             ("/workspace", "工作区"),
             ("/workspace_history", "历史工作区"),
-            ("/codex_api", "Codex_API"),
+            ("/codex_api", "LLM_API"),
             ("/claude_api", "Claude_API"),
             ("/settings", "设置"),
-            ("/desktop", "远程桌面"),
-            ("/agent", "Agent"),
+            ("/agent", "DeepSeek Agent"),
             ("/codex_oauth", "Codex_OAuth"),
             ("/archives", "归档列表"),
         ] {
@@ -1474,6 +1711,440 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn delete_requires_exact_confirmation_header() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-confirm-test");
+        let state = test_state(app_dir.path());
+        let record =
+            publish_fixture(&state, app_dir.path(), "source.apk", "demo", "demo-1.0.0.apk", "v1")
+                .await;
+        let stored = PathBuf::from(&record.stored_path);
+        let request = || {
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.apk".to_string(),
+            })
+        };
+
+        let missing = delete_artifact(
+            State(state.clone()),
+            AxumPath(record.id.clone()),
+            HeaderMap::new(),
+            request(),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(missing.to_string().contains("x-webclx-confirm-artifact"));
+
+        let mut wrong = HeaderMap::new();
+        wrong.insert("x-webclx-confirm-artifact", HeaderValue::from_static("other-id"));
+        let error =
+            delete_artifact(State(state.clone()), AxumPath(record.id.clone()), wrong, request())
+                .await
+                .err()
+                .unwrap();
+        assert!(error.to_string().contains("x-webclx-confirm-artifact"));
+
+        assert!(stored.exists(), "rejected deletes must keep the file");
+        let index = load_index(app_dir.path()).await.unwrap();
+        assert_eq!(index.artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_mismatched_project_or_name() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-mismatch-test");
+        let state = test_state(app_dir.path());
+        let record =
+            publish_fixture(&state, app_dir.path(), "source.apk", "demo", "demo-1.0.0.apk", "v1")
+                .await;
+
+        for (project, name) in [("other", "demo-1.0.0.apk"), ("demo", "demo-9.9.9.apk")] {
+            let error = delete_artifact(
+                State(state.clone()),
+                AxumPath(record.id.clone()),
+                confirm_headers(&record.id),
+                Json(DeleteArtifactRequest {
+                    project: project.to_string(),
+                    name: name.to_string(),
+                }),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(error.to_string().contains("不匹配"));
+        }
+        assert!(PathBuf::from(&record.stored_path).exists());
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_only_the_target_artifact_and_index_record() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-happy-test");
+        let state = test_state(app_dir.path());
+        let old = publish_fixture(
+            &state,
+            app_dir.path(),
+            "old.apk",
+            "webClx",
+            "webClx-1.8.20.apk",
+            "old-apk",
+        )
+        .await;
+        let current = publish_fixture(
+            &state,
+            app_dir.path(),
+            "new.apk",
+            "webClx",
+            "webClx-1.8.21.apk",
+            "new-apk",
+        )
+        .await;
+        let other =
+            publish_fixture(&state, app_dir.path(), "other.zip", "demo", "demo-1.0.0.zip", "demo")
+                .await;
+        let old_path = PathBuf::from(&old.stored_path);
+
+        let Json(response) = delete_artifact(
+            State(state.clone()),
+            AxumPath(old.id.clone()),
+            confirm_headers(&old.id),
+            Json(DeleteArtifactRequest {
+                project: "webClx".to_string(),
+                name: "webClx-1.8.20.apk".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(response.deleted);
+        assert!(response.file_deleted);
+        assert!(!old_path.exists());
+        assert!(PathBuf::from(&current.stored_path).exists());
+        assert!(PathBuf::from(&other.stored_path).exists());
+        assert!(app_dir.path().join("old.apk").exists());
+
+        let Json(manifest) =
+            android_update_manifest(State(state.clone()), AxumPath("webClx".to_string()))
+                .await
+                .unwrap();
+        assert_eq!(manifest.version, "1.8.21");
+
+        let Json(list) = list_artifacts(State(state.clone())).await.unwrap();
+        assert_eq!(list.projects.len(), 2);
+        let webclx = list
+            .projects
+            .iter()
+            .find(|project| project.project == "webClx")
+            .unwrap();
+        assert_eq!(webclx.artifacts.len(), 1);
+        assert_eq!(webclx.artifacts[0].name, "webClx-1.8.21.apk");
+
+        let error = delete_artifact(
+            State(state),
+            AxumPath(old.id.clone()),
+            confirm_headers(&old.id),
+            Json(DeleteArtifactRequest {
+                project: "webClx".to_string(),
+                name: "webClx-1.8.20.apk".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("不存在"));
+    }
+
+    #[tokio::test]
+    async fn delete_protects_the_current_android_manifest_artifact() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-android-guard-test");
+        let state = test_state(app_dir.path());
+        let current = publish_fixture(
+            &state,
+            app_dir.path(),
+            "new.apk",
+            "webClx",
+            "webClx-1.8.21.apk",
+            "new-apk",
+        )
+        .await;
+        publish_fixture(
+            &state,
+            app_dir.path(),
+            "older.apk",
+            "webClx",
+            "webClx-1.7.0.apk",
+            "older-apk",
+        )
+        .await;
+
+        let error = delete_artifact(
+            State(state),
+            AxumPath(current.id.clone()),
+            confirm_headers(&current.id),
+            Json(DeleteArtifactRequest {
+                project: "webClx".to_string(),
+                name: "webClx-1.8.21.apk".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("更新清单"));
+        assert!(PathBuf::from(&current.stored_path).exists());
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_protects_the_newest_artifact() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-newest-guard-test");
+        let state = test_state(app_dir.path());
+        publish_fixture(&state, app_dir.path(), "old.zip", "demo", "demo-1.0.0.zip", "old").await;
+        let newest =
+            publish_fixture(&state, app_dir.path(), "new.zip", "demo", "demo-2.0.0.zip", "new")
+                .await;
+
+        let error = delete_artifact(
+            State(state),
+            AxumPath(newest.id.clone()),
+            confirm_headers(&newest.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-2.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("最新"));
+        assert!(PathBuf::from(&newest.stored_path).exists());
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_protects_the_current_windows_manifest_artifact() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-windows-guard-test");
+        let state = test_state(app_dir.path());
+        let manifest = publish_fixture(
+            &state,
+            app_dir.path(),
+            "manifest.json",
+            "demo",
+            "demo-1.0.0-manifest.json",
+            "{}",
+        )
+        .await;
+        publish_fixture(&state, app_dir.path(), "newer.zip", "demo", "demo-2.0.0.zip", "newer")
+            .await;
+
+        let error = delete_artifact(
+            State(state),
+            AxumPath(manifest.id.clone()),
+            confirm_headers(&manifest.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0-manifest.json".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("Windows"));
+        assert!(PathBuf::from(&manifest.stored_path).exists());
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn delete_rejects_paths_outside_the_managed_project_dir() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-scope-test");
+        let state = test_state(app_dir.path());
+
+        let outside = app_dir.path().join("outside.txt");
+        tokio::fs::write(&outside, b"outside").await.unwrap();
+        let record =
+            publish_fixture(&state, app_dir.path(), "old.zip", "demo", "demo-1.0.0.zip", "old")
+                .await;
+        let mut index = load_index(app_dir.path()).await.unwrap();
+        index.artifacts[0].stored_path = outside.display().to_string();
+        save_index(app_dir.path(), &index).await.unwrap();
+        let error = delete_artifact(
+            State(state.clone()),
+            AxumPath(record.id.clone()),
+            confirm_headers(&record.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("受管"));
+        assert!(outside.exists());
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 1);
+
+        let managed_path = artifacts_root(app_dir.path())
+            .join("demo")
+            .join(format!("{}__{}", record.id, record.name));
+        let mut index = load_index(app_dir.path()).await.unwrap();
+        index.artifacts[0].stored_path = managed_path.display().to_string();
+        save_index(app_dir.path(), &index).await.unwrap();
+        let target = app_dir.path().join("symlink-target.txt");
+        tokio::fs::write(&target, b"target").await.unwrap();
+        tokio::fs::remove_file(&managed_path).await.unwrap();
+        std::os::unix::fs::symlink(&target, &managed_path).unwrap();
+        let error = delete_artifact(
+            State(state.clone()),
+            AxumPath(record.id.clone()),
+            confirm_headers(&record.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("普通文件"));
+        assert_eq!(tokio::fs::read_to_string(&target).await.unwrap(), "target");
+
+        tokio::fs::remove_file(&managed_path).await.unwrap();
+        let project_dir = artifacts_root(app_dir.path()).join("demo");
+        let renamed = artifacts_root(app_dir.path()).join("demo-real");
+        tokio::fs::rename(&project_dir, &renamed).await.unwrap();
+        std::os::unix::fs::symlink(&renamed, &project_dir).unwrap();
+        let error = delete_artifact(
+            State(state.clone()),
+            AxumPath(record.id.clone()),
+            confirm_headers(&record.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("普通目录"));
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_a_stale_record_whose_file_is_already_gone() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-stale-test");
+        let state = test_state(app_dir.path());
+        let stale =
+            publish_fixture(&state, app_dir.path(), "old.zip", "demo", "demo-1.0.0.zip", "old")
+                .await;
+        publish_fixture(&state, app_dir.path(), "newer.zip", "demo", "demo-2.0.0.zip", "newer")
+            .await;
+        tokio::fs::remove_file(&stale.stored_path).await.unwrap();
+
+        let Json(response) = delete_artifact(
+            State(state),
+            AxumPath(stale.id.clone()),
+            confirm_headers(&stale.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(response.deleted);
+        assert!(response.file_deleted);
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_rolls_back_the_staged_file_when_index_save_fails() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-rollback-test");
+        let state = test_state(app_dir.path());
+        let record =
+            publish_fixture(&state, app_dir.path(), "old.zip", "demo", "demo-1.0.0.zip", "old")
+                .await;
+        let stored = PathBuf::from(&record.stored_path);
+        let index = load_index(app_dir.path()).await.unwrap();
+        let index_file = index_path(app_dir.path());
+        tokio::fs::remove_file(&index_file).await.unwrap();
+        tokio::fs::create_dir(&index_file).await.unwrap();
+
+        let error = delete_artifact_record(app_dir.path(), index, &record)
+            .await
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("写入产物索引失败"));
+        assert!(stored.exists(), "a failed index save must restore the staged file");
+        assert!(
+            !stored
+                .with_file_name(format!(".delete-{}__{}.tmp", record.id, record.name))
+                .exists(),
+            "no staged temp file may remain after rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_fails_when_a_staged_file_already_exists() {
+        let app_dir = TestAppDir::new("webclx-artifact-delete-staged-test");
+        let state = test_state(app_dir.path());
+        let record =
+            publish_fixture(&state, app_dir.path(), "old.zip", "demo", "demo-1.0.0.zip", "old")
+                .await;
+        publish_fixture(&state, app_dir.path(), "newer.zip", "demo", "demo-2.0.0.zip", "newer")
+            .await;
+        let stored = PathBuf::from(&record.stored_path);
+        let staged = stored.with_file_name(format!(".delete-{}__{}.tmp", record.id, record.name));
+        tokio::fs::write(&staged, b"existing-staged").await.unwrap();
+
+        let error = delete_artifact(
+            State(state),
+            AxumPath(record.id.clone()),
+            confirm_headers(&record.id),
+            Json(DeleteArtifactRequest {
+                project: "demo".to_string(),
+                name: "demo-1.0.0.zip".to_string(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("暂存文件已存在"));
+        assert_eq!(tokio::fs::read_to_string(&stored).await.unwrap(), "old");
+        assert_eq!(tokio::fs::read_to_string(&staged).await.unwrap(), "existing-staged");
+        assert_eq!(load_index(app_dir.path()).await.unwrap().artifacts.len(), 2);
+    }
+
+    fn confirm_headers(id: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-webclx-confirm-artifact", HeaderValue::from_str(id).unwrap());
+        headers
+    }
+
+    async fn publish_fixture(
+        state: &AppState,
+        dir: &Path,
+        source_name: &str,
+        project: &str,
+        name: &str,
+        contents: &str,
+    ) -> ArtifactRecord {
+        let source = dir.join(source_name);
+        tokio::fs::write(&source, contents).await.unwrap();
+        let Json(record) = publish_artifact(
+            State(state.clone()),
+            Json(PublishArtifactRequest {
+                project: project.to_string(),
+                path: source.display().to_string(),
+                name: name.to_string(),
+                label: name.to_string(),
+                note: String::new(),
+            }),
+        )
+        .await
+        .unwrap();
+        record
+    }
+
     fn test_artifact(name: &str, project: &str, published_at: &str) -> ArtifactRecord {
         ArtifactRecord {
             id: name.to_string(),
@@ -1500,6 +2171,16 @@ mod tests {
             local_api_token: std::sync::Arc::from("test-local-api-token"),
             workspace_settings: settings::SettingsManager::load(app_dir).unwrap(),
             auth_manager: auth::AuthPresetManager::load(app_dir).unwrap(),
+            codebuddy_manager: crate::codebuddy::CodeBuddyManager::load(
+                app_dir.to_path_buf(),
+                std::env::temp_dir(),
+            )
+            .unwrap(),
+            agy_manager: crate::agy::Manager::load(app_dir.to_path_buf(), std::env::temp_dir()),
+            devin_manager: crate::devin::DevinManager::load(
+                app_dir.to_path_buf(),
+                std::env::temp_dir(),
+            ),
             codex_oauth_manager: auth::CodexOAuthManager::new(),
             codex_proxy_history: codex_proxy::CodexProxyHistory::new(),
             proxy_manager: proxy::ProxyManager::load(app_dir).unwrap(),
@@ -1514,11 +2195,9 @@ mod tests {
             preset_test_scheduler: auth::PresetTestScheduler::new(
                 &app_dir.join(".webclx-terminal-sessions.json"),
             ),
-            preset_run_lease_manager: auth::PresetRunLeaseManager::new(
-                app_dir.join(".webclx-preset-run-lease.json"),
-            ),
             agent_manager: agent::AgentManager::new(app_dir),
             agent_config: agent::AgentConfigManager::new(app_dir),
+            collaboration_manager: collaboration::CollaborationManager::new(app_dir),
         }
     }
 

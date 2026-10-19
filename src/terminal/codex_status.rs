@@ -2,7 +2,6 @@ use std::{
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use serde::Serialize;
@@ -10,8 +9,9 @@ use serde_json::Value;
 use terminal_core::{codex_session_id_from_path, tmux_session_name};
 
 use super::{
-    agent_session::detect_current_session_rollout_path, sanitize_child_command,
-    tmux::capture_tmux_text_pane_snapshot,
+    agent_session::detect_current_session_rollout_path,
+    sanitize_child_command,
+    tmux::{capture_tmux_text_pane_snapshot, isolated_tmux_command},
 };
 
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -111,15 +111,19 @@ fn codex_root_for_tmux_session(terminal_session_id: &str) -> Option<PathBuf> {
 }
 
 fn tmux_environment_value(terminal_session_id: &str, key: &str) -> Option<String> {
-    let mut command = Command::new("tmux");
+    let mut command = isolated_tmux_command(terminal_session_id);
     sanitize_child_command(&mut command);
-    let output = command
+    command
         .arg("show-environment")
         .arg("-t")
         .arg(tmux_session_name(terminal_session_id))
-        .arg(key)
-        .output()
-        .ok()?;
+        .arg(key);
+    let output = super::tmux::command_output::bounded_command_output(
+        command,
+        super::tmux::TMUX_COMMAND_TIMEOUT,
+        64 * 1024,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -344,7 +348,7 @@ fn agents_documents(codex_root: &Path, cwd: &Path) -> Vec<String> {
     if global.is_file() {
         documents.push(global.display().to_string());
     }
-    for name in ["AGENTS.md", "AGENTS.MD"] {
+    for name in ["AGENTS.md", "AGENTS.md"] {
         let project = cwd.join(name);
         if project.is_file()
             && !documents
@@ -366,9 +370,9 @@ mod tests {
     #[test]
     fn parses_complete_codex_status_from_rollout_records() {
         let input = concat!(
-            r#"{"type":"session_meta","payload":{"id":"019f741e-6bb4-7a03-ac49-d28a60ef3765","cli_version":"0.144.5","cwd":"/home/codes/stockScreener","thread_source":{"forked_from":"019f73d6-ece8-72d0-addc-e74da1b25a1a"}}}"#,
+            r#"{"type":"session_meta","payload":{"id":"019f741e-6bb4-7a03-ac49-d28a60ef3765","cli_version":"0.144.5","cwd":"/home/codes/lyyStock/stockScreener","thread_source":{"forked_from":"019f73d6-ece8-72d0-addc-e74da1b25a1a"}}}"#,
             "\n",
-            r#"{"type":"turn_context","payload":{"cwd":"/home/codes/stockScreener","model":"gpt-5.6-sol","effort":"xhigh","summary":"auto","sandbox_policy":{"type":"danger-full-access"},"approval_policy":"never","collaboration_mode":{"mode":"default"}}}"#,
+            r#"{"type":"turn_context","payload":{"cwd":"/home/codes/lyyStock/stockScreener","model":"gpt-5.6-sol","effort":"xhigh","summary":"auto","sandbox_policy":{"type":"danger-full-access"},"approval_policy":"never","collaboration_mode":{"mode":"default"}}}"#,
             "\n",
             r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1610000,"output_tokens":45700,"total_tokens":1730000},"last_token_usage":{"total_tokens":15800},"model_context_window":1000000}}}"#,
         );

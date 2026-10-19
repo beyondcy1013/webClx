@@ -73,7 +73,9 @@ function sortAndRenderDirectorySessions(sortMode) {
 globalThis.sortAndRenderDirectorySessions = sortAndRenderDirectorySessions;
 
 function activeTerminalSessions(sessions) {
-  return (Array.isArray(sessions) ? sessions : []).filter((session) => !session?.idle);
+  return (Array.isArray(sessions) ? sessions : []).filter(
+    (session) => !session?.idle && !session?.hidden,
+  );
 }
 
 function announceSessionMutation(action, session = {}) {

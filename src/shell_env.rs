@@ -3,9 +3,15 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow};
+
+/// 读取登录 shell 环境是短命令（一次性 `env -0` 输出）；限时防止
+/// runuser/su/异常 rc 脚本把调用线程永久挂起。上限按环境变量集合大小放宽到 1 MiB。
+const SHELL_ENV_BUDGET: Duration = Duration::from_secs(15);
+const SHELL_ENV_MAX_OUTPUT: usize = 1024 * 1024;
 
 #[cfg(not(windows))]
 const DEFAULT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -142,13 +148,15 @@ fn read_shell_env(
             .arg("--")
             .arg(shell_path);
         configure(&mut command);
-        let output = command.output().with_context(|| {
-            format!(
-                "执行 shell 启动环境失败: shell={}, init={}",
-                shell_path.display(),
-                init_file_path.display()
-            )
-        })?;
+        let output =
+            crate::process_exec::bounded_output(command, SHELL_ENV_BUDGET, SHELL_ENV_MAX_OUTPUT)
+                .with_context(|| {
+                    format!(
+                        "执行 shell 启动环境失败: shell={}, init={}",
+                        shell_path.display(),
+                        init_file_path.display()
+                    )
+                })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -173,13 +181,15 @@ fn read_shell_env(
 
     let mut command = Command::new(shell_path);
     configure(&mut command);
-    let output = command.output().with_context(|| {
-        format!(
-            "执行 shell 启动环境失败: shell={}, init={}",
-            shell_path.display(),
-            init_file_path.display()
-        )
-    })?;
+    let output =
+        crate::process_exec::bounded_output(command, SHELL_ENV_BUDGET, SHELL_ENV_MAX_OUTPUT)
+            .with_context(|| {
+                format!(
+                    "执行 shell 启动环境失败: shell={}, init={}",
+                    shell_path.display(),
+                    init_file_path.display()
+                )
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -227,13 +237,15 @@ fn read_shell_env_via_su(
         .env("USER", user_env)
         .env("LOGNAME", user_env);
 
-    let output = command.output().with_context(|| {
-        format!(
-            "执行 shell 启动环境失败 (via su): shell={}, init={}",
-            shell_path.display(),
-            init_file
-        )
-    })?;
+    let output =
+        crate::process_exec::bounded_output(command, SHELL_ENV_BUDGET, SHELL_ENV_MAX_OUTPUT)
+            .with_context(|| {
+                format!(
+                    "执行 shell 启动环境失败 (via su): shell={}, init={}",
+                    shell_path.display(),
+                    init_file
+                )
+            })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();

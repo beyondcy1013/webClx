@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SOURCE_ROOT="/home/codes"
-QUEUE_DIR="/home/codes/webClx/.webclx-compile-queue"
+QUEUE_DIR="/home/codes/tools/webClx/.webclx-compile-queue"
 APPLY=false
 
 usage() {

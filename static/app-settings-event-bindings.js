@@ -107,6 +107,55 @@ function bindSettingsEventHandlers() {
     saveCodexCommonConfig();
   });
 
+  let globalSettingsOpenerEl = null;
+
+  function switchGlobalSettingsTab(tabKey) {
+    const codexTab = document.getElementById("global-settings-tab-codex");
+    const claudeTab = document.getElementById("global-settings-tab-claude");
+    const codexSection = document.getElementById("codex-api-global-defaults");
+    const claudeSection = document.getElementById("claude-api-global-defaults");
+    const isCodex = tabKey !== "claude";
+    if (codexTab) { codexTab.classList.toggle("active", isCodex); codexTab.setAttribute("aria-selected", isCodex ? "true" : "false"); }
+    if (claudeTab) { claudeTab.classList.toggle("active", !isCodex); claudeTab.setAttribute("aria-selected", isCodex ? "false" : "true"); }
+    if (codexSection) codexSection.hidden = !isCodex;
+    if (claudeSection) claudeSection.hidden = isCodex;
+    if (isCodex) loadCodexCommonConfig();
+  }
+
+  const globalSettingsTablistEl = document.querySelector(".global-settings-subtabs");
+  if (globalSettingsTablistEl) {
+    globalSettingsTablistEl.addEventListener("click", (event) => {
+      const btn = event.target.closest("[data-global-tab]");
+      if (btn) switchGlobalSettingsTab(btn.dataset.globalTab);
+    });
+  }
+
+  const openGlobalSettingsDialog = (event) => {
+    if (!codexGlobalSettingsDialogEl || codexGlobalSettingsDialogEl.open) {
+      return;
+    }
+    globalSettingsOpenerEl = event?.currentTarget || null;
+    const isClaude =
+      globalSettingsOpenerEl === claudeGlobalSettingsOpenButtonEl ||
+      globalSettingsOpenerEl?.dataset.globalTab === "claude";
+    switchGlobalSettingsTab(isClaude ? "claude" : "codex");
+    codexGlobalSettingsDialogEl.showModal();
+    requestAnimationFrame(() => codexGlobalSettingsCloseButtonEl?.focus({ preventScroll: true }));
+  };
+
+  codexGlobalSettingsOpenButtonEl?.addEventListener("click", openGlobalSettingsDialog);
+  claudeGlobalSettingsOpenButtonEl?.addEventListener("click", openGlobalSettingsDialog);
+
+  codexGlobalSettingsCloseButtonEl?.addEventListener("click", () => {
+    codexGlobalSettingsDialogEl?.close();
+    globalSettingsOpenerEl?.focus({ preventScroll: true });
+  });
+
+  codexGlobalSettingsDialogEl?.addEventListener("close", () => {
+    globalSettingsOpenerEl?.focus({ preventScroll: true });
+  });
+
+
   terminalErrorKeywordAddBtnEl?.addEventListener("click", () => {
     addTerminalErrorKeywordRule();
   });
@@ -181,6 +230,7 @@ function bindSettingsEventHandlers() {
     );
     const nextTerminalToolEntries = normalizeTerminalToolEntries(state.terminalToolEntries);
     const nextTerminalRenamePresets = readTerminalRenamePresetsFromInput();
+    const nextTerminalAgentCommands = readTerminalAgentCommandsFromInput();
     const nextCodexDefaultConfigEntries = readCodexDefaultConfigEntriesFromTable();
     const nextLegacyCodexConfigEntries = normalizeCodexDefaultConfigEntries(
       nextCodexDefaultConfigEntries,
@@ -201,8 +251,10 @@ function bindSettingsEventHandlers() {
       nextTerminalCommandCollections,
       nextTerminalToolEntries,
       nextTerminalRenamePresets,
+      nextTerminalAgentCommands,
       showDotEntriesInputEl.checked,
       showAllWorkspaceSessionsInputEl.checked,
+      terminalNewSessionBehaviorInputEl.value,
       desktopTerminalSoftKeyboardInputEl.checked,
       readTerminalSoftKeyboardScaleFromInput(),
       readTerminalFloatingButtonOffsetVhFromInput(),
@@ -216,6 +268,7 @@ function bindSettingsEventHandlers() {
       readTerminalAutoContinueBackoffFactorFromInput(),
       readTerminalAutoContinueBackoffMaxMinutesFromInput(),
       terminalAutoContinueRespectManualInterruptInputEl?.checked !== false,
+      terminalAutoCompactSkipCodebuddyInputEl?.checked !== false,
       parseTerminalAutoContinueTimePatternsInput(terminalAutoContinueTimePatternsInputEl?.value || ""),
       normalizeTerminalAutoContinueActiveWindow(terminalAutoContinueActiveWindowInputEl?.value || ""),
       normalizeTerminalScheduledInputAvoidWindow(terminalScheduledInputAvoidWindowInputEl?.value || ""),
@@ -235,6 +288,10 @@ function bindSettingsEventHandlers() {
         const v = Number(sessionTtlDaysInputEl?.value);
         return Number.isFinite(v) ? Math.min(365, Math.max(1, Math.trunc(v))) : DEFAULT_SESSION_TTL_DAYS;
       })(),
+      (() => {
+        const v = Number(webuiPasswordMinLengthInputEl?.value);
+        return Number.isFinite(v) ? Math.max(0, Math.trunc(v)) : DEFAULT_WEBUI_PASSWORD_MIN_LENGTH;
+      })(),
       claudeManager.parseClaudeModelOptionsInput(claudeModelOptionsInputEl.value),
       nextCodexDefaultConfigEntries,
       readCodexApiAutoProxyMatchProviderIds(),
@@ -247,8 +304,8 @@ function bindSettingsEventHandlers() {
       terminalWorkspaceIconPathInputEl?.value || DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
       readThemeModeFromInputs(),
       readFontSizeTiersFromInputs(),
-      normalizeDesktopRemoteUrl(desktopUrlInputEl?.value || ""),
-      normalizeDesktopRemoteUrlHistory(state.desktopRemoteUrlHistory),
+      "",
+      [],
     );
   });
 
@@ -280,6 +337,7 @@ function bindSettingsEventHandlers() {
     resetTerminalCommandCollectionsToDefaults();
     renderTerminalShortcutSettings();
     renderTerminalRenamePresetsSetting(state.defaultTerminalRenamePresets);
+    renderTerminalAgentCommandsSetting(state.defaultTerminalAgentCommands);
     clearTerminalQuickCommandEditor();
     showDotEntriesInputEl.checked = false;
     if (workspaceShowHiddenInputEl) {
@@ -340,6 +398,10 @@ function bindSettingsEventHandlers() {
       terminalAutoContinueRespectManualInterruptInputEl.checked =
         DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT;
     }
+    if (terminalAutoCompactSkipCodebuddyInputEl) {
+      terminalAutoCompactSkipCodebuddyInputEl.checked =
+        DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY;
+    }
     if (terminalAutoContinueTimePatternsInputEl) {
       terminalAutoContinueTimePatternsInputEl.value = formatTerminalAutoContinueTimePatterns(
         DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS,
@@ -374,6 +436,12 @@ function bindSettingsEventHandlers() {
     if (sessionTtlDaysInputEl) {
       sessionTtlDaysInputEl.value = String(DEFAULT_SESSION_TTL_DAYS);
     }
+    if (webuiPasswordMinLengthInputEl) {
+      webuiPasswordMinLengthInputEl.value = String(DEFAULT_WEBUI_PASSWORD_MIN_LENGTH);
+    }
+    if (terminalNewSessionBehaviorInputEl) {
+      terminalNewSessionBehaviorInputEl.value = "dialog";
+    }
     claudeModelOptionsInputEl.value = DEFAULT_CLAUDE_MODEL_OPTIONS.join("\n");
     renderClaudeDefaultConfigEntries(cloneDefaultClaudeDefaultConfigEntries());
     renderCodexApiAutoProxyMatchProviders(DEFAULT_CODEX_API_AUTO_PROXY_MATCH_PROVIDER_IDS);
@@ -387,6 +455,14 @@ function bindSettingsEventHandlers() {
     if (terminalWorkspaceIconPathInputEl) {
       terminalWorkspaceIconPathInputEl.value = DEFAULT_TERMINAL_WORKSPACE_ICON_PATH;
     }
+    if (terminalGroupManagerEmojiInputEl) terminalGroupManagerEmojiInputEl.value = "👑";
+    if (terminalGroupExecutorEmojiModeEl) terminalGroupExecutorEmojiModeEl.value = "random";
+    if (terminalGroupExecutorEmojiInputEl) terminalGroupExecutorEmojiInputEl.value = "⚙️";
+    window.localStorage.removeItem("webclx:terminal-group-manager-emoji");
+    window.localStorage.removeItem("webclx:terminal-group-executor-emoji-mode");
+    window.localStorage.removeItem("webclx:terminal-group-executor-emoji");
+    if (terminalGroupExecutorEmojiFieldEl) terminalGroupExecutorEmojiFieldEl.hidden = true;
+    document.dispatchEvent(new CustomEvent("webclx:terminal-role-emoji-changed"));
     setThemeModeInputs(DEFAULT_THEME_MODE);
     if (fontSizeTier1InputEl) {
       fontSizeTier1InputEl.value = formatFontSizeTier(DEFAULT_FONT_SIZE_TIER_1, DEFAULT_FONT_SIZE_TIER_1);
@@ -414,8 +490,10 @@ function bindSettingsEventHandlers() {
       state.defaultTerminalCommandCollections,
       state.defaultTerminalToolEntries,
       state.defaultTerminalRenamePresets,
+      state.defaultTerminalAgentCommands,
       true,
       true,
+      "dialog",
       false,
       DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
       DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
@@ -429,6 +507,7 @@ function bindSettingsEventHandlers() {
       DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_FACTOR,
       DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
       DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
+      DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
       [...DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS],
       "",
       "",
@@ -439,6 +518,7 @@ function bindSettingsEventHandlers() {
       DEFAULT_COMPILE_COMMAND_TIMEOUT_SECS,
       DEFAULT_COMPILE_MAX_CONCURRENCY,
       DEFAULT_SESSION_TTL_DAYS,
+      DEFAULT_WEBUI_PASSWORD_MIN_LENGTH,
       [...DEFAULT_CLAUDE_MODEL_OPTIONS],
       cloneDefaultCodexDefaultConfigEntries(),
       [...DEFAULT_CODEX_API_AUTO_PROXY_MATCH_PROVIDER_IDS],
@@ -451,7 +531,7 @@ function bindSettingsEventHandlers() {
       DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
       DEFAULT_THEME_MODE,
       [...DEFAULT_FONT_SIZE_TIERS],
-      DEFAULT_DESKTOP_REMOTE_URL,
+      "",
       [],
     );
   });
@@ -459,4 +539,21 @@ function bindSettingsEventHandlers() {
   if (terminalCompletionBellTestButtonEl) {
     terminalCompletionBellTestButtonEl.addEventListener("click", playTerminalCompletionBellTest);
   }
+
+  const refreshTerminalRoleEmojiSettings = () => {
+    const manager = String(terminalGroupManagerEmojiInputEl?.value || "👑").trim().slice(0, 8) || "👑";
+    const mode = terminalGroupExecutorEmojiModeEl?.value === "fixed" ? "fixed" : "random";
+    const executor = String(terminalGroupExecutorEmojiInputEl?.value || "⚙️").trim().slice(0, 8) || "⚙️";
+    state.terminalGroupManagerEmoji = manager;
+    state.terminalGroupExecutorEmojiMode = mode;
+    state.terminalGroupExecutorEmoji = executor;
+    window.localStorage.setItem("webclx:terminal-group-manager-emoji", manager);
+    window.localStorage.setItem("webclx:terminal-group-executor-emoji-mode", mode);
+    window.localStorage.setItem("webclx:terminal-group-executor-emoji", executor);
+    if (terminalGroupExecutorEmojiFieldEl) terminalGroupExecutorEmojiFieldEl.hidden = mode !== "fixed";
+    document.dispatchEvent(new CustomEvent("webclx:terminal-role-emoji-changed"));
+  };
+  terminalGroupManagerEmojiInputEl?.addEventListener("input", refreshTerminalRoleEmojiSettings);
+  terminalGroupExecutorEmojiModeEl?.addEventListener("change", refreshTerminalRoleEmojiSettings);
+  terminalGroupExecutorEmojiInputEl?.addEventListener("input", refreshTerminalRoleEmojiSettings);
 }

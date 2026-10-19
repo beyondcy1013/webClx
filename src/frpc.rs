@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
 use tar::Archive;
 use tokio::process::{Child, Command};
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 use tracing::{info, warn};
 use zip::ZipArchive;
 
@@ -152,7 +152,7 @@ impl FrpcManager {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
-            .kill_on_drop(false)
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("启动 frpc 失败: {}", binary_path.display()))?;
 
@@ -328,7 +328,7 @@ impl FrpsManager {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
-            .kill_on_drop(false)
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("启动 frps 失败: {}", binary_path.display()))?;
 
@@ -480,6 +480,7 @@ impl FrpRoleManager {
         validate_frp_role(&role)?;
         let mut roles = self.roles();
         if let Some(existing) = roles.iter_mut().find(|item| item.id == role.id) {
+            persist_external_role_config(&role)?;
             *existing = role;
         } else {
             roles.push(role);
@@ -517,6 +518,9 @@ impl FrpRoleManager {
         if self.is_running(&role.id) {
             return Ok(self.status());
         }
+        if self.detect_external_process_for_role(&role).is_some() {
+            return Ok(self.status());
+        }
         validate_frp_role(&role)?;
         let role_dir = self.role_dir(&role.id);
         fs::create_dir_all(&role_dir)?;
@@ -550,20 +554,22 @@ impl FrpRoleManager {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(log_file_err))
-            .kill_on_drop(false)
+            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("启动 {} 失败: {}", role.name, binary_path.display()))?;
 
         let pid = child.id();
-        let mut runtime = crate::lock_or_recover!(self.inner.lock());
-        runtime.insert(
-            role.id.clone(),
-            FrpcRuntime {
-                child: Some(child),
-                started_at: Some(unix_now_secs()),
-                last_error: None,
-            },
-        );
+        {
+            let mut runtime = crate::lock_or_recover!(self.inner.lock());
+            runtime.insert(
+                role.id.clone(),
+                FrpcRuntime {
+                    child: Some(child),
+                    started_at: Some(unix_now_secs()),
+                    last_error: None,
+                },
+            );
+        }
         info!("frp role started: id={} pid={pid:?}", role.id);
         Ok(self.status())
     }
@@ -583,9 +589,11 @@ impl FrpRoleManager {
         } else if let Some(role) = role.as_ref()
             && let Some(process) = self.detect_external_process_for_role(role)
         {
-            let log_path = self.role_log_path(id, Some(role.component));
-            append_log_line(&log_path, &format!("stopping external frp pid={}", process.pid))?;
-            terminate_process(process.pid).await?;
+            anyhow::bail!(
+                "角色 `{}` 正由外部 FRP 进程 PID {} 运行；webClx 不会停止或重启非自身启动的进程，请使用对应的系统服务管理",
+                role.name,
+                process.pid
+            );
         }
         Ok(self.status())
     }
@@ -1143,6 +1151,85 @@ fn parse_frpc_toml_config(path: &Path) -> Result<FrpcConfig> {
     let content = fs::read_to_string(path)
         .with_context(|| format!("cannot read external frpc config {}", path.display()))?;
     parse_frpc_toml_config_content(&content)
+}
+
+fn persist_external_role_config(role: &FrpRole) -> Result<()> {
+    match role.component {
+        FrpComponent::Frpc => {
+            let config = role.frpc.as_ref().context("frpc 角色缺少客户端配置")?;
+            if !config.external_config_path.trim().is_empty() {
+                update_external_frpc_toml(Path::new(&config.external_config_path), config)?;
+            }
+        }
+        FrpComponent::Frps => {}
+    }
+    Ok(())
+}
+
+fn update_external_frpc_toml(path: &Path, config: &FrpcConfig) -> Result<()> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("cannot read external frpc config {}", path.display()))?;
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .with_context(|| format!("外部 frpc TOML 格式无效: {}", path.display()))?;
+
+    doc["serverAddr"] = value(&config.server_addr);
+    doc["serverPort"] = value(i64::from(config.server_port));
+    if config.token.is_empty() {
+        if let Some(auth) = doc.get_mut("auth").and_then(Item::as_table_like_mut) {
+            auth.remove("token");
+        }
+    } else {
+        doc["auth"]["token"] = value(&config.token);
+    }
+    doc["transport"]["tls"]["enable"] = value(config.tls_enable);
+    doc["webServer"]["addr"] = value(&config.web_server_addr);
+    doc["webServer"]["port"] = value(i64::from(config.web_server_port));
+
+    let mut existing = doc
+        .get("proxies")
+        .and_then(Item::as_array_of_tables)
+        .map(|tables| tables.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut proxies = ArrayOfTables::new();
+    for proxy in &config.proxies {
+        let position = existing.iter().position(|table| {
+            table.get("name").and_then(Item::as_str) == Some(proxy.name.as_str())
+        });
+        let mut table = position
+            .map(|index| existing.remove(index))
+            .unwrap_or_else(Table::new);
+        table["name"] = value(&proxy.name);
+        table["type"] = value(&proxy.proxy_type);
+        table["localIP"] = value(&proxy.local_ip);
+        table["localPort"] = value(i64::from(proxy.local_port));
+        if proxy.proxy_type == "tcp" {
+            table["remotePort"] = value(i64::from(proxy.remote_port));
+            table.remove("customDomains");
+        } else {
+            table.remove("remotePort");
+            let mut domains = Array::new();
+            for domain in proxy
+                .custom_domains
+                .split(',')
+                .map(str::trim)
+                .filter(|domain| !domain.is_empty())
+            {
+                domains.push(domain);
+            }
+            table["customDomains"] = value(domains);
+        }
+        proxies.push(table);
+    }
+    doc["proxies"] = Item::ArrayOfTables(proxies);
+
+    write_config_atomically(path, doc.to_string().as_bytes())
+}
+
+fn write_config_atomically(path: &Path, content: &[u8]) -> Result<()> {
+    fs::metadata(path)?;
+    crate::atomic_file::write_atomic(path, content)
+        .with_context(|| format!("cannot replace {}", path.display()))
 }
 
 fn parse_frpc_toml_config_content(content: &str) -> Result<FrpcConfig> {
@@ -1835,10 +1922,57 @@ fn unix_now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FrpPlatform, FrpsConfig, GithubReleaseAsset, normalize_binary_source,
-        parse_frpc_toml_config_content, select_frp_release_asset, validate_frps_config,
+    use std::{fs, time::SystemTime};
+
+    use tokio::{
+        process::{Child, Command},
+        time::Duration,
     };
+
+    use super::{
+        FrpComponent, FrpPlatform, FrpRole, FrpRoleManager, FrpcConfig, FrpcProxyConfig,
+        FrpsConfig, GithubReleaseAsset, make_executable, normalize_binary_source,
+        parse_frpc_toml_config_content, select_frp_release_asset, terminate_process,
+        validate_frps_config,
+    };
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("webclx-frp-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    struct ChildGuard(Option<Child>);
+
+    impl ChildGuard {
+        fn new(child: Child) -> Self {
+            Self(Some(child))
+        }
+
+        fn id(&self) -> u32 {
+            self.0
+                .as_ref()
+                .and_then(Child::id)
+                .expect("guarded child pid")
+        }
+
+        async fn kill_and_wait(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+            }
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+    }
 
     #[test]
     fn frp_release_asset_selection_matches_current_platform_suffix() {
@@ -1920,5 +2054,221 @@ customDomains = ["a.example.com", "b.example.com"]
         assert_eq!(config.proxies[0].remote_port, 29999);
         assert_eq!(config.proxies[1].proxy_type, "http");
         assert_eq!(config.proxies[1].custom_domains, "a.example.com,b.example.com");
+    }
+
+    #[test]
+    fn saving_existing_external_frpc_role_updates_file_without_losing_unknown_fields() {
+        let app_dir = unique_temp_dir("external-save");
+        fs::create_dir_all(&app_dir).expect("create app dir");
+        let config_path = app_dir.join("frpc3.toml");
+        fs::write(
+            &config_path,
+            r#"
+serverAddr = "old.example.com"
+serverPort = 7000
+loginFailExit = false
+
+[auth]
+method = "token"
+token = "old-token"
+
+[transport]
+protocol = "quic"
+
+[[proxies]]
+name = "webclx"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 11111
+remotePort = 11111
+bandwidthLimit = "10MB"
+"#,
+        )
+        .expect("write external config");
+
+        let manager = FrpRoleManager::load(&app_dir, 11111).expect("load manager");
+        let mut role = FrpRole {
+            id: "frpc-frpc3".to_string(),
+            name: "系统 frpc3".to_string(),
+            component: FrpComponent::Frpc,
+            frpc: Some(FrpcConfig {
+                external_config_path: config_path.display().to_string(),
+                server_addr: "old.example.com".to_string(),
+                server_port: 7000,
+                token: "old-token".to_string(),
+                proxies: vec![FrpcProxyConfig {
+                    name: "webclx".to_string(),
+                    proxy_type: "tcp".to_string(),
+                    local_ip: "127.0.0.1".to_string(),
+                    local_port: 11111,
+                    remote_port: 11111,
+                    custom_domains: String::new(),
+                }],
+                ..FrpcConfig::default()
+            }),
+            frps: None,
+        };
+        manager
+            .save_role(role.clone())
+            .expect("register external role");
+
+        let config = role.frpc.as_mut().expect("frpc config");
+        config.server_addr = "new.example.com".to_string();
+        config.server_port = 13389;
+        config.token = "new-token".to_string();
+        config.proxies[0].local_port = 12111;
+        manager.save_role(role).expect("save external role changes");
+
+        let saved = fs::read_to_string(&config_path).expect("read saved external config");
+        assert!(saved.contains("serverAddr = \"new.example.com\""));
+        assert!(saved.contains("serverPort = 13389"));
+        assert!(saved.contains("token = \"new-token\""));
+        assert!(saved.contains("localPort = 12111"));
+        assert!(saved.contains("loginFailExit = false"));
+        assert!(saved.contains("protocol = \"quic\""));
+        assert!(saved.contains("bandwidthLimit = \"10MB\""));
+
+        fs::remove_dir_all(app_dir).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn starting_external_role_reuses_matching_running_process() {
+        let app_dir = unique_temp_dir("external-start");
+        fs::create_dir_all(&app_dir).expect("create app dir");
+        let binary_path = app_dir.join("frpc");
+        let source_path = app_dir.join("fake_frpc.rs");
+        fs::write(
+            &source_path,
+            "fn main() { loop { std::thread::sleep(std::time::Duration::from_secs(60)); } }\n",
+        )
+        .expect("write fake frpc source");
+        let compile_status = std::process::Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&binary_path)
+            .status()
+            .expect("compile fake frpc");
+        assert!(compile_status.success());
+        make_executable(&binary_path).expect("make fake frpc executable");
+        let config_path = app_dir.join("frpc3.toml");
+        fs::write(&config_path, "serverAddr = \"127.0.0.1\"\nserverPort = 7000\n")
+            .expect("write fake frpc config");
+
+        let manager = FrpRoleManager::load(&app_dir, 11111).expect("load manager");
+        manager
+            .save_role(FrpRole {
+                id: "frpc-frpc3".to_string(),
+                name: "系统 frpc3".to_string(),
+                component: FrpComponent::Frpc,
+                frpc: Some(FrpcConfig {
+                    binary_source: "custom".to_string(),
+                    binary_path: binary_path.display().to_string(),
+                    external_config_path: config_path.display().to_string(),
+                    ..FrpcConfig::default()
+                }),
+                frps: None,
+            })
+            .expect("register external role");
+
+        let mut external_command = Command::new(&binary_path);
+        external_command
+            .arg("-c")
+            .arg(&config_path)
+            .kill_on_drop(true);
+        let mut external = ChildGuard::new(external_command.spawn().expect("start external frpc"));
+        let external_pid = external.id();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let response =
+            tokio::time::timeout(Duration::from_secs(3), manager.start_role("frpc-frpc3"))
+                .await
+                .expect("start role exceeded test timeout")
+                .expect("starting an already running external role should be idempotent");
+        let reported_pid = response
+            .roles
+            .iter()
+            .find(|status| status.role.id == "frpc-frpc3")
+            .and_then(|status| status.pid)
+            .expect("role pid");
+
+        if reported_pid != external_pid {
+            terminate_process(reported_pid)
+                .await
+                .expect("stop duplicate managed process");
+        }
+        external.kill_and_wait().await;
+        fs::remove_dir_all(app_dir).expect("remove fixture");
+
+        assert_eq!(reported_pid, external_pid);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restarting_external_role_preserves_unmanaged_process() {
+        let app_dir = unique_temp_dir("external-restart");
+        fs::create_dir_all(&app_dir).expect("create app dir");
+        let binary_path = app_dir.join("frpc");
+        let source_path = app_dir.join("fake_frpc.rs");
+        fs::write(
+            &source_path,
+            "fn main() { loop { std::thread::sleep(std::time::Duration::from_secs(60)); } }\n",
+        )
+        .expect("write fake frpc source");
+        let compile_status = std::process::Command::new("rustc")
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&binary_path)
+            .status()
+            .expect("compile fake frpc");
+        assert!(compile_status.success());
+        make_executable(&binary_path).expect("make fake frpc executable");
+        let config_path = app_dir.join("frpc3.toml");
+        fs::write(&config_path, "serverAddr = \"127.0.0.1\"\nserverPort = 7000\n")
+            .expect("write fake frpc config");
+
+        let manager = FrpRoleManager::load(&app_dir, 11111).expect("load manager");
+        manager
+            .save_role(FrpRole {
+                id: "frpc-frpc3".to_string(),
+                name: "system frpc3".to_string(),
+                component: FrpComponent::Frpc,
+                frpc: Some(FrpcConfig {
+                    binary_source: "custom".to_string(),
+                    binary_path: binary_path.display().to_string(),
+                    external_config_path: config_path.display().to_string(),
+                    ..FrpcConfig::default()
+                }),
+                frps: None,
+            })
+            .expect("register external role");
+
+        let mut external_command = Command::new(&binary_path);
+        external_command
+            .arg("-c")
+            .arg(&config_path)
+            .kill_on_drop(true);
+        let mut external = ChildGuard::new(external_command.spawn().expect("start external frpc"));
+        let external_pid = external.id();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let error =
+            tokio::time::timeout(Duration::from_secs(3), manager.restart_role("frpc-frpc3"))
+                .await
+                .expect("restart role exceeded test timeout")
+                .expect_err("externally owned role restart should be rejected");
+        assert!(error.to_string().contains("外部 FRP 进程"));
+
+        let status = Command::new("kill")
+            .arg("-0")
+            .arg(external_pid.to_string())
+            .status()
+            .await
+            .expect("check external frpc process");
+
+        external.kill_and_wait().await;
+        fs::remove_dir_all(app_dir).expect("remove fixture");
+
+        assert!(status.success(), "external frpc process was terminated");
     }
 }

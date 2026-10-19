@@ -12,7 +12,7 @@ use std::{
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path as AxumPath, Query, State},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,12 +24,15 @@ use crate::{ApiResult, AppError, AppState};
 
 const BUILD_SOURCE_REPO_DIR: &str = env!("CARGO_MANIFEST_DIR");
 const SOURCE_REPO_DIR_ENV: &str = "WEBCLX_SOURCE_REPO_DIR";
-const DEFAULT_SOURCE_REPO_DIR: &str = "/home/codes/webClx";
+const DEFAULT_SOURCE_REPO_DIR: &str = "/home/codes/tools/webClx";
 const COMPILE_WORKER_SCRIPT: &str = "docs/codex/skills/webclx-rebuild/scripts/compile-worker.sh";
 const COMPILE_WORK_DIR_ENV: &str = "WEBCLX_COMPILE_WORK_DIR";
 const DEFAULT_COMPILE_WORK_DIR: &str = "/data/cargo-target/webclx-compile";
 const DEFAULT_DEBOUNCE_SECS: u64 = 0;
 const MAX_DEBOUNCE_SECS: u64 = 900;
+const COMPILE_QUERY_SUGGESTED_POLL_SECS: u32 = 15;
+const COMPILE_QUERY_DEFAULT_TAIL_LINES: usize = 50;
+const COMPILE_QUERY_MAX_TAIL_LINES: usize = 400;
 const COMPILE_RUN_RETENTION_SECS: u64 = 5 * 24 * 60 * 60; // 5 days
 const COMPILE_INSTALL_STALLED_SECS: u64 = 120;
 const REQUEST_ID_TIME_FORMAT: &[FormatItem<'static>] =
@@ -113,6 +116,51 @@ pub struct CompileResponse {
     required_artifacts: Vec<String>,
     queue_dir: String,
     worker: String,
+    /// 源终端可解析时为 true：worker 完成后向源终端推送回调消息。
+    callback_supported: bool,
+    /// 结果查询方式。不支持回调的第三方智能体应轮询该 URL 直到 done=true。
+    query: CompileRequestQueryHint,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CompileRequestQueryHint {
+    /// 结果查询接口的完整 URL。
+    url: String,
+    /// 建议轮询间隔（秒）。
+    suggested_poll_seconds: u32,
+    note: String,
+}
+
+/// 单个编译/部署请求的状态查询响应。
+///
+/// 供不支持终端回调的第三方智能体轮询：提交后按 `query.url` 轮询，
+/// `done=true` 时读取 `state`、`exit_codes` 与日志路径。响应同时直接
+/// 携带进度（`progress`）与最新日志尾部（`log_tail`），调用方无需读取
+/// 文件即可看到当前阶段与失败时的报错内容。
+#[derive(Debug, Serialize)]
+pub struct CompileRequestQueryResponse {
+    ok: bool,
+    found: bool,
+    request_id: String,
+    /// queued（仍在待执行队列）/ running / stalled / unknown（run 已启动但
+    /// 状态文件缺失且无近期活动）/ succeeded / failed / timed_out。
+    state: String,
+    /// true 表示不会再变化，可以停止轮询。
+    done: bool,
+    /// 最后一次命令的退出码列表（run 内每个 spec 一个；合并运行的请求
+    /// 无法对应到单个 spec，调用方以 state 为准）。
+    exit_codes: Vec<i32>,
+    /// run 最近一次上报的进度（阶段、命令、包计数等）；完成后保留最后
+    /// 已知值，未启动时为空对象。
+    progress: CompileRunProgress,
+    /// 最新集中日志的末尾若干行（默认 50，可用 ?tail_lines=N 调节，
+    /// 上限 400）。失败时这里通常直接包含报错内容。
+    log_tail: Vec<String>,
+    /// log_tail 来源的日志文件绝对路径。
+    log_path: Option<String>,
+    suggested_poll_seconds: u32,
+    request: Option<CompileRequestSummary>,
+    run: Option<CompileRunSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -125,6 +173,12 @@ pub struct CompileStatusResponse {
     latest_log: Option<String>,
     pending_requests: Vec<CompileRequestSummary>,
     runs: Vec<CompileRunSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClearCompileHistoryResponse {
+    ok: bool,
+    deleted_count: usize,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -213,7 +267,7 @@ pub struct CompileRunSummary {
     dir_path: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CompileRunProgress {
     #[serde(default)]
     project: Option<String>,
@@ -243,22 +297,29 @@ pub async fn request_compile(
 ) -> ApiResult<Json<CompileResponse>> {
     payload.install_command.clear();
     payload.audit_paths.clear();
-    queue_build_request(state, payload, BuildRequestKind::Compile)
+    tokio::task::spawn_blocking(move || {
+        queue_build_request(state, payload, BuildRequestKind::Compile)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("编译入队任务失败: {error}")))?
 }
 
 pub async fn request_deploy(
     State(state): State<AppState>,
-    mut payload: Json<CompileRequest>,
+    Json(mut payload): Json<CompileRequest>,
 ) -> ApiResult<Json<CompileResponse>> {
-    let repo_dir = source_repo_dir()?;
-    let project_dir = compile_project_dir(&payload, &repo_dir)?;
-    if payload.install_command.is_empty() {
-        let resolved = detect_install_command(&repo_dir, &project_dir)?;
-        payload.install_command = resolved;
-    }
-    validate_shell_command_argv(&payload.install_command, "install_command")?;
-    validate_install_command_script(&payload.install_command, &project_dir)?;
-    queue_build_request(state, payload.0, BuildRequestKind::Deploy)
+    tokio::task::spawn_blocking(move || {
+        let repo_dir = source_repo_dir()?;
+        let project_dir = compile_project_dir(&payload, &repo_dir)?;
+        if payload.install_command.is_empty() {
+            payload.install_command = detect_install_command(&repo_dir, &project_dir)?;
+        }
+        validate_shell_command_argv(&payload.install_command, "install_command")?;
+        validate_install_command_script(&payload.install_command, &project_dir)?;
+        queue_build_request(state, payload, BuildRequestKind::Deploy)
+    })
+    .await
+    .map_err(|error| AppError::internal(format!("部署入队任务失败: {error}")))?
 }
 
 pub async fn complete_compile_request(
@@ -315,6 +376,7 @@ fn queue_build_request(
             (!source_terminal_id.is_empty()).then(|| tmux_session_name(&source_terminal_id))
         })
         .unwrap_or_default();
+    let external_callback = is_external_callback_url(&current_source_terminal_name);
 
     let repo_dir = source_repo_dir()?;
     let project_dir = compile_project_dir(&payload, &repo_dir)?;
@@ -398,19 +460,21 @@ fn queue_build_request(
             return Err(error);
         }
     };
-    notify_compile_request_queued(
-        &state,
-        if source_terminal_id.is_empty() {
-            source_terminal_name.as_str()
-        } else {
-            source_terminal_id.as_str()
-        },
-        &current_source_terminal_name,
-        &project,
-        &request_id,
-        request_kind,
-        debounce_secs,
-    );
+    if !external_callback {
+        notify_compile_request_queued(
+            &state,
+            if source_terminal_id.is_empty() {
+                source_terminal_name.as_str()
+            } else {
+                source_terminal_id.as_str()
+            },
+            &current_source_terminal_name,
+            &project,
+            &request_id,
+            request_kind,
+            debounce_secs,
+        );
+    }
     info!(
         request_id,
         project,
@@ -424,6 +488,15 @@ fn queue_build_request(
         "queued build request"
     );
 
+    // An http(s) source_terminal_name is an external callback URL: the worker
+    // POSTs the result JSON to it on completion instead of messaging a terminal.
+    let callback_supported = !source_terminal_id.is_empty() || external_callback;
+    let query_hint = CompileRequestQueryHint {
+        url: format!("{base_url}/api/build/compile/requests/{request_id}"),
+        suggested_poll_seconds: COMPILE_QUERY_SUGGESTED_POLL_SECS,
+        note: "轮询该 URL 直到 done=true；done 后读取 state、exit_codes 与 run.log_path."
+            .to_string(),
+    };
     Ok(Json(CompileResponse {
         ok: true,
         request_id,
@@ -441,7 +514,13 @@ fn queue_build_request(
         required_artifacts: payload.required_artifacts,
         queue_dir: queue_dir.display().to_string(),
         worker,
+        callback_supported,
+        query: query_hint,
     }))
+}
+
+pub(crate) fn is_external_callback_url(source_terminal_name: &str) -> bool {
+    source_terminal_name.starts_with("http://") || source_terminal_name.starts_with("https://")
 }
 
 fn notify_compile_request_queued(
@@ -489,6 +568,21 @@ pub async fn compile_status(
         .map(Json)
 }
 
+pub async fn clear_compile_history(
+    State(_state): State<AppState>,
+) -> ApiResult<Json<ClearCompileHistoryResponse>> {
+    let queue_dir = compile_queue_dir()?;
+    let deleted_count =
+        tokio::task::spawn_blocking(move || clear_finished_compile_runs(&queue_dir))
+            .await
+            .map_err(|error| AppError::internal(format!("清空编译运行历史任务失败: {error}")))??;
+
+    Ok(Json(ClearCompileHistoryResponse {
+        ok: true,
+        deleted_count,
+    }))
+}
+
 fn compile_status_snapshot(include_history: bool) -> ApiResult<CompileStatusResponse> {
     let queue_dir = compile_queue_dir()?;
     prune_expired_compile_runs(&queue_dir, compile_run_cutoff_secs());
@@ -520,6 +614,191 @@ fn compile_status_snapshot(include_history: bool) -> ApiResult<CompileStatusResp
         pending_requests,
         runs,
     })
+}
+
+/// 查询单个编译/部署请求的当前状态。
+///
+/// 供不支持终端回调的第三方智能体轮询：请求尚在待执行队列为 `queued`；
+/// 已被 run 吸收后跟随 run 状态（running/stalled/unknown → done=false，
+/// succeeded/failed/timed_out → done=true）。合并运行的每个原始
+/// request_id 仍能通过自己的请求文件找到吸收它的 run。
+pub async fn compile_request_query(
+    State(_state): State<AppState>,
+    AxumPath(request_id): AxumPath<String>,
+    Query(params): Query<CompileRequestQueryParams>,
+) -> ApiResult<Json<CompileRequestQueryResponse>> {
+    let request_id = request_id.trim().to_string();
+    let tail_lines = params.tail_lines();
+    tokio::task::spawn_blocking(move || compile_request_query_snapshot(&request_id, tail_lines))
+        .await
+        .map_err(|error| AppError::internal(format!("查询编译请求状态任务失败: {error}")))?
+        .map(Json)
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct CompileRequestQueryParams {
+    /// 返回的日志尾部行数，默认 50，范围 1..=400。
+    #[serde(default)]
+    tail_lines: Option<usize>,
+}
+
+impl CompileRequestQueryParams {
+    fn tail_lines(&self) -> usize {
+        self.tail_lines
+            .unwrap_or(COMPILE_QUERY_DEFAULT_TAIL_LINES)
+            .clamp(1, COMPILE_QUERY_MAX_TAIL_LINES)
+    }
+}
+
+fn compile_request_query_snapshot(
+    request_id: &str,
+    tail_lines: usize,
+) -> ApiResult<CompileRequestQueryResponse> {
+    let queue_dir = compile_queue_dir()?;
+    prune_expired_compile_runs(&queue_dir, compile_run_cutoff_secs());
+    Ok(find_compile_request_in_queue(&queue_dir, request_id, tail_lines))
+}
+
+fn find_compile_request_in_queue(
+    queue_dir: &Path,
+    request_id: &str,
+    tail_lines: usize,
+) -> CompileRequestQueryResponse {
+    // request_id 出现在文件名里，只允许请求 id 的实际字符集（字母数字与
+    // 连字符），避免任何路径语法造成目录穿越。
+    let valid_id = !request_id.is_empty()
+        && request_id.len() <= 128
+        && request_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid_id {
+        return not_found_query_response(request_id);
+    }
+
+    // 1) 仍在待执行队列。
+    let pending_path = queue_dir
+        .join("requests")
+        .join(format!("{request_id}.json"));
+    if pending_path.is_file() {
+        return CompileRequestQueryResponse {
+            ok: true,
+            found: true,
+            request_id: request_id.to_string(),
+            state: "queued".to_string(),
+            done: false,
+            exit_codes: Vec::new(),
+            progress: CompileRunProgress::default(),
+            log_tail: Vec::new(),
+            log_path: None,
+            suggested_poll_seconds: COMPILE_QUERY_SUGGESTED_POLL_SECS,
+            request: compile_request_summary_from_file(&pending_path),
+            run: None,
+        };
+    }
+
+    // 2) 已被某个 run 吸收（含合并请求：每个原始请求都有独立的
+    //    <request_id>.json 落在吸收它的 run 目录里）。run 目录按新到旧
+    //    排序，第一个命中即为当前归属。
+    for run_dir in list_compile_run_dirs(&queue_dir) {
+        let request_path = run_dir.join(format!("{request_id}.json"));
+        if !request_path.is_file() {
+            continue;
+        }
+        let Some(run) = compile_run_summary_from_dir(&run_dir) else {
+            continue;
+        };
+        let (state, done) = match run.status.as_str() {
+            "success" => ("succeeded", true),
+            "failed" => ("failed", true),
+            "timed_out" => ("timed_out", true),
+            other => (other, false),
+        };
+        // progress.json 在 run 结束后仍保留最后一次上报值，直接读取，
+        // 不受 run summary 仅在 running/stalled 时展示进度的影响。
+        let progress = read_json_file::<CompileRunProgress>(&run_dir.join("progress.json"))
+            .unwrap_or_default();
+        let resolved_log_path = resolve_query_log_path(&run_dir, &progress);
+        let log_tail = resolved_log_path
+            .as_deref()
+            .and_then(|path| read_log_tail(path, tail_lines))
+            .unwrap_or_default();
+        return CompileRequestQueryResponse {
+            ok: true,
+            found: true,
+            request_id: request_id.to_string(),
+            state: state.to_string(),
+            done,
+            exit_codes: list_status_codes(&run_dir),
+            progress,
+            log_path: resolved_log_path
+                .or_else(|| run.log_path.clone().map(PathBuf::from))
+                .map(|path| path.display().to_string()),
+            log_tail,
+            suggested_poll_seconds: COMPILE_QUERY_SUGGESTED_POLL_SECS,
+            request: compile_request_summary_from_file(&request_path),
+            run: Some(run),
+        };
+    }
+
+    // 3) 未找到：可能已超过保留期被清理。
+    not_found_query_response(request_id)
+}
+
+fn not_found_query_response(request_id: &str) -> CompileRequestQueryResponse {
+    CompileRequestQueryResponse {
+        ok: true,
+        found: false,
+        request_id: request_id.to_string(),
+        state: "not_found".to_string(),
+        done: true,
+        exit_codes: Vec::new(),
+        progress: CompileRunProgress::default(),
+        log_tail: Vec::new(),
+        log_path: None,
+        suggested_poll_seconds: COMPILE_QUERY_SUGGESTED_POLL_SECS,
+        request: None,
+        run: None,
+    }
+}
+
+/// 解析查询用的日志文件路径，与 run summary 的 log_path 解析顺序一致：
+/// progress.json 上报的路径 → run 目录内 log-*.path 指针 → run.log。
+fn resolve_query_log_path(run_dir: &Path, progress: &CompileRunProgress) -> Option<PathBuf> {
+    progress
+        .log_path
+        .clone()
+        .map(PathBuf::from)
+        .or_else(|| list_run_log_paths(run_dir).first().cloned())
+        .or_else(|| {
+            let run_log = run_dir.join("run.log");
+            run_log.is_file().then_some(run_log)
+        })
+}
+
+/// 读取日志文件末尾最多 `max_lines` 行。文件过大时只取尾部 512 KiB
+/// 窗口，并从窗口内第一个完整行开始，避免输出以截断的半行开头。
+fn read_log_tail(path: &Path, max_lines: usize) -> Option<Vec<String>> {
+    const MAX_TAIL_BYTES: usize = 512 * 1024;
+    let content = fs::read(path).ok()?;
+    let window = if content.len() > MAX_TAIL_BYTES {
+        let offset = content.len() - MAX_TAIL_BYTES;
+        let skip = content[offset..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|position| offset + position + 1)
+            .unwrap_or(offset);
+        &content[skip..]
+    } else {
+        &content[..]
+    };
+    let mut lines: Vec<String> = String::from_utf8_lossy(window)
+        .lines()
+        .map(ToString::to_string)
+        .collect();
+    if lines.len() > max_lines {
+        lines.drain(..lines.len() - max_lines);
+    }
+    Some(lines)
 }
 
 pub async fn notify_compile_terminal(
@@ -620,15 +899,20 @@ fn compile_project_dir(payload: &CompileRequest, fallback_repo_dir: &Path) -> Ap
     })
 }
 
+fn git_bounded_output(command: Command) -> anyhow::Result<std::process::Output> {
+    // git 元数据查询是短命令；限时避免阻塞线程被挂死的仓库操作拖住。
+    crate::process_exec::bounded_output(command, std::time::Duration::from_secs(10), 256 * 1024)
+}
+
 fn validate_project_checkout(project_dir: &Path, allow_worktree: bool) -> ApiResult<()> {
-    let git_root = Command::new("git")
-        .args([
-            "-C",
-            project_dir.to_string_lossy().as_ref(),
-            "rev-parse",
-            "--show-toplevel",
-        ])
-        .output()
+    let mut git_root_command = Command::new("git");
+    git_root_command.args([
+        "-C",
+        project_dir.to_string_lossy().as_ref(),
+        "rev-parse",
+        "--show-toplevel",
+    ]);
+    let git_root = git_bounded_output(git_root_command)
         .ok()
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
@@ -636,15 +920,15 @@ fn validate_project_checkout(project_dir: &Path, allow_worktree: bool) -> ApiRes
     let Some(git_root) = git_root else {
         return Ok(());
     };
-    let worktrees = Command::new("git")
-        .args([
-            "-C",
-            project_dir.to_string_lossy().as_ref(),
-            "worktree",
-            "list",
-            "--porcelain",
-        ])
-        .output()
+    let mut worktree_command = Command::new("git");
+    worktree_command.args([
+        "-C",
+        project_dir.to_string_lossy().as_ref(),
+        "worktree",
+        "list",
+        "--porcelain",
+    ]);
+    let worktrees = git_bounded_output(worktree_command)
         .map_err(|error| AppError::internal(format!("无法检查 Git worktree: {error}")))?;
     if !worktrees.status.success() {
         return Err(AppError::internal("无法读取 Git worktree 列表"));
@@ -943,7 +1227,11 @@ fn spawn_compile_worker(
         .arg("--max-concurrency")
         .arg(max_concurrency.to_string());
 
-    match command.output() {
+    match crate::process_exec::bounded_output(
+        command,
+        std::time::Duration::from_secs(10),
+        64 * 1024,
+    ) {
         Ok(output) if output.status.success() => Ok(format!("systemd-run:{unit_name}")),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -999,16 +1287,22 @@ fn list_pending_compile_requests(dir: &Path) -> Vec<CompileRequestSummary> {
 }
 
 fn list_compile_run_dirs(queue_dir: &Path) -> Vec<PathBuf> {
+    let cutoff = compile_run_cutoff_secs();
+    list_all_compile_run_dirs(queue_dir)
+        .into_iter()
+        .filter(|path| run_dir_is_within_retention(path, cutoff))
+        .collect()
+}
+
+fn list_all_compile_run_dirs(queue_dir: &Path) -> Vec<PathBuf> {
     let runs_dir = queue_dir.join("runs");
     let Ok(entries) = fs::read_dir(&runs_dir) else {
         return Vec::new();
     };
-    let cutoff = compile_run_cutoff_secs();
     let mut run_dirs = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
-        .filter(|path| run_dir_is_within_retention(path, cutoff))
         .collect::<Vec<_>>();
     run_dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     run_dirs
@@ -1019,6 +1313,24 @@ fn compile_run_summaries(run_dirs: &[PathBuf]) -> Vec<CompileRunSummary> {
         .iter()
         .filter_map(|run_dir| compile_run_summary_from_dir(run_dir))
         .collect()
+}
+
+fn clear_finished_compile_runs(queue_dir: &Path) -> ApiResult<usize> {
+    let mut deleted_count = 0;
+    for run_dir in list_all_compile_run_dirs(queue_dir) {
+        if !run_dir.join("run-finished-at").is_file() {
+            continue;
+        }
+        let run_id = run_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("unknown");
+        fs::remove_dir_all(&run_dir).map_err(|error| {
+            AppError::internal(format!("删除编译运行历史 {run_id} 失败: {error}"))
+        })?;
+        deleted_count += 1;
+    }
+    Ok(deleted_count)
 }
 
 /// Return the Unix-seconds cutoff for the compile run retention window.
@@ -1433,6 +1745,81 @@ mod tests {
         root
     }
 
+    fn query_fixture_run_dir(root: &Path) -> PathBuf {
+        let now = OffsetDateTime::now_utc()
+            .format(&format_description!("[year][month][day]T[hour][minute][second]"))
+            .expect("format query fixture run id");
+        root.join("runs").join(format!("{now}-querytest"))
+    }
+
+    #[test]
+    fn compile_request_query_finds_pending_finished_missing_and_rejects_traversal() {
+        let root = std::env::temp_dir().join(format!(
+            "webclx-compile-query-{}-{}",
+            std::process::id(),
+            build_request_id()
+        ));
+        fs::create_dir_all(root.join("requests")).expect("create requests fixture");
+        fs::write(
+            root.join("requests/req-pending-1.json"),
+            serde_json::json!({"request_id": "req-pending-1", "project": "p"}).to_string(),
+        )
+        .expect("write pending request fixture");
+        let run_dir = query_fixture_run_dir(&root);
+        fs::create_dir_all(&run_dir).expect("create run fixture");
+        fs::write(
+            run_dir.join("req-done-1.json"),
+            serde_json::json!({"request_id": "req-done-1", "project": "p"}).to_string(),
+        )
+        .expect("write run request fixture");
+        fs::write(run_dir.join("specs.jsonl"), "{\"project\":\"p\"}\n")
+            .expect("write specs fixture");
+        fs::write(run_dir.join("status-first"), "0\n").expect("write status fixture");
+        fs::write(run_dir.join("run-finished-at"), "2026-07-15 09:27:34\n")
+            .expect("write finished fixture");
+        let mut log_content = String::new();
+        for index in 0..60 {
+            log_content.push_str(&format!("build-line-{index}\n"));
+        }
+        fs::write(run_dir.join("run.log"), &log_content).expect("write run log fixture");
+
+        let pending = find_compile_request_in_queue(&root, "req-pending-1", 50);
+        assert_eq!(pending.state, "queued");
+        assert!(!pending.done);
+        assert!(pending.request.is_some());
+        assert!(pending.run.is_none());
+        assert!(pending.log_tail.is_empty());
+
+        let done = find_compile_request_in_queue(&root, "req-done-1", 50);
+        assert_eq!(done.state, "succeeded");
+        assert!(done.done);
+        assert_eq!(done.exit_codes, vec![0]);
+        assert!(done.request.is_some());
+        assert!(done.run.is_some());
+        assert!(
+            done.run
+                .as_ref()
+                .is_some_and(|run| run.dir_path == run_dir.display().to_string())
+        );
+        // 日志尾部直接返回最后 50 行（夹具共 60 行，应从 line-10 开始），
+        // 调用方无需读文件即可看到结果输出。
+        assert_eq!(done.log_path.as_deref(), Some(run_dir.join("run.log").to_str().unwrap()));
+        assert_eq!(done.log_tail.len(), 50);
+        assert_eq!(done.log_tail.first().map(String::as_str), Some("build-line-10"));
+        assert_eq!(done.log_tail.last().map(String::as_str), Some("build-line-59"));
+
+        let missing = find_compile_request_in_queue(&root, "missing-1", 50);
+        assert!(!missing.found);
+        assert_eq!(missing.state, "not_found");
+        assert!(missing.done);
+
+        let traversal = find_compile_request_in_queue(&root, "../escape", 50);
+        assert!(!traversal.found);
+        assert!(traversal.done);
+
+        fs::remove_dir_all(root).expect("remove query fixture");
+    }
+
     #[test]
     fn partially_finished_compile_run_stays_running_with_live_progress() {
         let root = compile_run_fixture("partial");
@@ -1603,12 +1990,38 @@ mod tests {
     }
 
     #[test]
+    fn clear_finished_compile_runs_preserves_active_runs() {
+        let root = compile_run_fixture("clear-history");
+        let finished = root.join("runs/20260715T092500-test");
+        fs::write(finished.join("status-first"), "0\n").expect("write first status");
+        fs::write(finished.join("status-second"), "0\n").expect("write second status");
+        fs::write(finished.join("run-finished-at"), "2026-07-15 09:30:00\n")
+            .expect("write run finish");
+
+        let active = root.join("runs/20260715T092501-active");
+        fs::create_dir_all(&active).expect("create active run");
+        fs::write(
+            active.join("request.json"),
+            serde_json::json!({"request_id":"active","project":"webClx"}).to_string(),
+        )
+        .expect("write active request");
+        fs::write(active.join("status-active"), "0\n").expect("write active status");
+
+        let deleted_count = clear_finished_compile_runs(&root).expect("clear history");
+
+        assert_eq!(deleted_count, 1);
+        assert!(!finished.exists());
+        assert!(active.exists());
+        fs::remove_dir_all(root).expect("remove clear fixture");
+    }
+
+    #[test]
     fn compile_request_path_is_not_a_terminal_notification_filter() {
         let payload = CompileRequest {
             source_terminal_name: "dingBot_4_pg数据库".to_string(),
             project_path: "stockScreener".to_string(),
             project: "stockScreener".to_string(),
-            project_dir: "/home/codes/stockScreener".to_string(),
+            project_dir: "/home/codes/lyyStock/stockScreener".to_string(),
             ..CompileRequest::default()
         };
 
@@ -1815,7 +2228,7 @@ mod tests {
               "source_terminal_name":"signIn_5",
               "source_tmux_session":"webclx_s1547",
               "project":"signIn",
-              "project_dir":"/home/codes/signIn"
+              "project_dir":"/home/codes/apps/signIn"
             }"#,
         )
         .expect("write temp request");
@@ -1831,7 +2244,7 @@ mod tests {
     #[test]
     fn compile_project_name_falls_back_to_project_dir_name() {
         let payload = CompileRequest::default();
-        let project_dir = Path::new("/home/codes/signIn");
+        let project_dir = Path::new("/home/codes/apps/signIn");
 
         assert_eq!(compile_project_name(&payload, project_dir), "signIn");
     }

@@ -75,6 +75,18 @@ pub(crate) fn read_codex_model(config_path: &Path) -> Result<Option<String>> {
         .with_context(|| format!("无法解析 {}", config_path.display()))
 }
 
+pub(crate) fn read_codex_model_provider(config_path: &Path) -> Result<Option<String>> {
+    let content = match fs::read_to_string(config_path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("无法读取 {}", config_path.display()));
+        }
+    };
+    codex_model_provider_from_config_content(&content)
+        .with_context(|| format!("无法解析 {}", config_path.display()))
+}
+
 fn codex_model_from_config_content(content: &str) -> Result<Option<String>> {
     let document = content
         .parse::<DocumentMut>()
@@ -88,6 +100,25 @@ fn codex_model_from_config_content(content: &str) -> Result<Option<String>> {
     Ok(normalized_model(Some(model)).map(str::to_string))
 }
 
+fn codex_model_provider_from_config_content(content: &str) -> Result<Option<String>> {
+    let document = content
+        .parse::<DocumentMut>()
+        .context("config.toml 格式无效")?;
+    let Some(item) = document
+        .get("model_provider")
+        .or_else(|| document.get("provider"))
+    else {
+        return Ok(None);
+    };
+    let Some(provider) = item.as_str() else {
+        bail!("config.toml 顶级 model_provider/provider 必须是字符串");
+    };
+    let Some(provider) = normalized_model(Some(provider)) else {
+        bail!("config.toml 顶级 model_provider/provider 不能为空");
+    };
+    Ok(Some(provider.to_string()))
+}
+
 #[derive(Clone, Copy)]
 struct CodexHistoryCommandTarget {
     codex_index: usize,
@@ -96,8 +127,6 @@ struct CodexHistoryCommandTarget {
 fn codex_history_command_target(command_line: &str) -> Option<CodexHistoryCommandTarget> {
     let tokens = shell_words::split(command_line.trim()).ok()?;
     let target = codex_history_tokens_target(&tokens)?;
-    // A wrapped `webclx run` command has not applied its selected preset yet.
-    // Its model is added later from the acquire response in `run_agent`.
     if target.codex_index != 0 {
         return None;
     }
@@ -115,15 +144,7 @@ fn codex_history_tokens_target(tokens: &[String]) -> Option<CodexHistoryCommandT
             continue;
         }
         let direct = index == 0;
-        let webclx_run = index > 0
-            && tokens
-                .get(index.wrapping_sub(1))
-                .is_some_and(|token| token == "--")
-            && tokens
-                .first()
-                .is_some_and(|token| is_program(token, "webclx"))
-            && tokens.get(1).is_some_and(|token| token == "run");
-        if direct || webclx_run {
+        if direct {
             return Some(CodexHistoryCommandTarget { codex_index: index });
         }
     }
@@ -184,21 +205,22 @@ mod tests {
         let resume_id = "019f2350-db5f-7cf0-b476-1cf14855b05d";
         assert_eq!(
             codex_history_command_with_model(
-                &format!("webclx run api 'api-1' -- codex resume {resume_id}"),
+                &format!("codex resume {resume_id}"),
                 Some("gpt-5.6-sol"),
             ),
-            format!("webclx run api api-1 -- codex resume --model gpt-5.6-sol {resume_id}")
+            format!("codex resume --model gpt-5.6-sol {resume_id}")
         );
     }
 
     #[test]
-    fn current_user_config_is_not_read_before_a_wrapped_preset_is_applied() {
-        let command = "webclx run api 'api-1' -- codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d";
-        assert!(codex_history_command_target(command).is_none());
-        assert_eq!(
-            prepare_codex_history_command_for_user("missing-webclx-test-user", command).unwrap(),
-            command
-        );
+    fn unresolvable_user_fails_closed_for_resume_commands() {
+        let command = "codex resume 019f2350-db5f-7cf0-b476-1cf14855b05d";
+        assert!(codex_history_command_target(command).is_some());
+        // 恢复/fork 必须迁移当前配置的 model；用户无法解析时必须失败并上报，
+        // 禁止静默放行导致用历史 rollout 的旧 model 启动。
+        let error = prepare_codex_history_command_for_user("missing-webclx-test-user", command)
+            .expect_err("unresolvable user must fail closed");
+        assert!(error.to_string().contains("missing-webclx-test-user"));
         assert!(codex_history_command_target("codex resume session-id").is_some());
     }
 
@@ -242,6 +264,30 @@ mod tests {
         );
         assert_eq!(codex_model_from_config_content("model_provider = \"openai\"\n").unwrap(), None);
         assert!(codex_model_from_config_content("model = 56\n").is_err());
+    }
+
+    #[test]
+    fn parses_explicit_provider_and_leaves_builtin_openai_implicit() {
+        assert_eq!(
+            codex_model_provider_from_config_content(
+                "model = \"gpt-6-astra\"\nmodel_provider = \"webclx_api\"\n",
+            )
+            .unwrap(),
+            Some("webclx_api".to_string())
+        );
+        assert_eq!(
+            codex_model_provider_from_config_content(
+                "model = \"gpt-6-astra\"\nprovider = \"legacy_api\"\n",
+            )
+            .unwrap(),
+            Some("legacy_api".to_string())
+        );
+        assert_eq!(
+            codex_model_provider_from_config_content("model = \"gpt-6-astra\"\n").unwrap(),
+            None
+        );
+        assert!(codex_model_provider_from_config_content("model_provider = 6\n").is_err());
+        assert!(codex_model_provider_from_config_content("model_provider = \" \"\n").is_err());
     }
 
     #[test]

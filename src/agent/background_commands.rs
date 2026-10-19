@@ -57,7 +57,7 @@ impl BackgroundCommandManager {
 
     fn persist(&self, sessions: &HashMap<String, BackgroundCommandSession>) {
         if let Ok(encoded) = serde_json::to_vec_pretty(sessions) {
-            let _ = std::fs::write(&self.file_path, encoded);
+            let _ = crate::atomic_file::write_atomic(&self.file_path, &encoded);
         }
     }
 

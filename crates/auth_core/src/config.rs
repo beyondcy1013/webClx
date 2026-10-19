@@ -260,7 +260,6 @@ pub fn clear_provider_and_set_model_in_config_content(
     clear_provider_and_set_config_entry_in_config_content(content, "model", expected_model)
 }
 
-#[cfg(test)]
 pub fn set_api_provider_in_config_content(
     content: &str,
     provider_name: &str,
@@ -275,7 +274,7 @@ pub fn set_api_provider_in_config_content(
     doc["model_providers"][API_PROVIDER_KEY]["base_url"] = value(base_url);
     doc["model_providers"][API_PROVIDER_KEY]["wire_api"] =
         value(provider_options.wire_api.as_str());
-    set_local_proxy_auth_header(&mut doc, is_local_webclx_api_url(base_url))?;
+    set_api_provider_auth_mode(&mut doc, is_local_webclx_api_url(base_url))?;
     Ok(ensure_trailing_newline(doc.to_string()))
 }
 
@@ -298,7 +297,7 @@ pub fn set_api_provider_and_config_entry_in_config_content(
     doc["model_providers"][API_PROVIDER_KEY]["base_url"] = value(base_url);
     doc["model_providers"][API_PROVIDER_KEY]["wire_api"] =
         value(provider_options.wire_api.as_str());
-    set_local_proxy_auth_header(&mut doc, is_local_webclx_api_url(base_url))?;
+    set_api_provider_auth_mode(&mut doc, is_local_webclx_api_url(base_url))?;
     Ok(ensure_trailing_newline(doc.to_string()))
 }
 
@@ -340,7 +339,15 @@ fn set_local_proxy_auth_header(doc: &mut DocumentMut, enabled: bool) -> Result<(
     Ok(())
 }
 
-fn is_local_webclx_api_url(base_url: &str) -> bool {
+fn set_api_provider_auth_mode(doc: &mut DocumentMut, use_local_proxy: bool) -> Result<()> {
+    let provider = doc["model_providers"][API_PROVIDER_KEY]
+        .as_table_like_mut()
+        .ok_or_else(|| anyhow::anyhow!("Codex API provider 必须是表。"))?;
+    provider.insert("requires_openai_auth", value(true));
+    set_local_proxy_auth_header(doc, use_local_proxy)
+}
+
+pub fn is_local_webclx_api_url(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };

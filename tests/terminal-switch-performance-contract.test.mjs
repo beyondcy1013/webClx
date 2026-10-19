@@ -17,8 +17,8 @@ const activitySource = fs.readFileSync(
 
 assert.match(
   tmuxSource,
-  /const INITIAL_TMUX_SNAPSHOT_LINE_LIMIT:\s*u32\s*=\s*800;/,
-  "initial terminal switch replay must stay bounded to 800 tmux lines",
+  /const INITIAL_TMUX_SNAPSHOT_LINE_LIMIT:\s*u32\s*=\s*100;/,
+  "initial terminal switch replay must stay bounded to 100 tmux lines",
 );
 assert.match(
   tmuxSource,
@@ -54,15 +54,30 @@ assert.doesNotMatch(
   /capture_tmux_recent_pane_snapshot|terminal_working_status_match_default|terminal_error_keyword_match\(\s*&session_id|terminal_worked_status_match_default/,
   "session activity probing must not recapture the same tmux pane for each status check",
 );
+assert.equal(
+  (activityProbeCollector.match(/capture_tmux_activity_pane_snapshot\(/g) || []).length,
+  1,
+  "all activity fields must share a single pane capture per probe",
+);
+const lockedActivityMerge = managerSource.slice(
+  managerSource.indexOf("fn terminal_activity_snapshot_from_probe_locked("),
+  managerSource.indexOf("pub(super) fn collect_terminal_auto_continue_schedules("),
+);
+assert.ok(lockedActivityMerge.length > 0, "locked activity merge must be found");
+assert.doesNotMatch(
+  lockedActivityMerge,
+  /capture_tmux_|Command::|\.output\(|\.spawn\(/,
+  "merging precomputed activity under the state write lock must not launch a subprocess",
+);
 assert.match(
   activitySource,
-  /Command::new\("tmux"\)[\s\S]{0,300}\.arg\("list-panes"\)[\s\S]{0,200}\.arg\("-a"\)/,
-  "agent detection must load pane PIDs with one tmux list-panes command",
+  /fn read_tmux_pane_pid\(session_id: &str\)[\s\S]*isolated_tmux_command\(session_id\)[\s\S]*display-message/,
+  "agent detection must use each session's isolated tmux socket for its pane PID",
 );
 assert.doesNotMatch(
   activitySource,
-  /fn tmux_pane_pid\(session_id: &str\)/,
-  "agent detection must not start one tmux pane-PID command per session",
+  /Command::new\("tmux"\)[\s\S]{0,200}list-panes/,
+  "agent detection must not use a global tmux server listing that cannot address isolated sockets",
 );
 assert.match(
   terminalSource,
@@ -81,3 +96,15 @@ assert.match(
 );
 
 console.log("terminal switch performance contract tests passed");
+
+const activityCapture = tmuxSource.slice(
+  tmuxSource.indexOf("pub(super) fn capture_tmux_activity_pane_snapshot("),
+  tmuxSource.indexOf("pub(super) fn capture_tmux_text_pane_snapshot("),
+);
+assert.match(activityCapture, /bounded_command_output/, "Unix activity capture must use the bounded runner");
+assert.match(activityCapture, /decode_tmux_snapshot\(output\)/, "bounded activity output retains existing decoding");
+const panePidLookup = activitySource.slice(
+  activitySource.indexOf("fn read_tmux_pane_pid("),
+  activitySource.indexOf("fn parse_tmux_pane_pid("),
+);
+assert.match(panePidLookup, /bounded_command_output/, "Unix pane PID lookup must use the same bounded runner");

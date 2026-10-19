@@ -19,8 +19,34 @@ Stable conclusions:
 - The auto-continue runner also checks already-loaded persisted tasks for stale cron scripts/comments, because an existing task may not flow through new schedule collection again.
 - Frontend auto-continue calls `/auto-continue`; manual soft-keyboard `继续` calls `/continue`, and generic `/input` remains available for raw terminal input.
 - `GET /api/terminal/sessions/{session_id}/input-history` filters standalone `继续` entries after selecting the rollout or keystroke-history source. This keeps automatic and manual continuation turns out of “对话史” without removing normal prompts such as `继续处理这个问题`.
+- The keystroke-reconstruction fallback (`capture_terminal_input_history`) is bracketed-paste aware: a paste block (one paste / one scheduled multi-line delivery) stays a single “对话史” entry with its internal newlines preserved, instead of being split into per-line segments at each `\r`/`\n`. Plain Enters outside paste still commit line by line. The rollout source already records one entry per real user message, so multi-line prompts remain one entry in both sources.
 - Terminal-page scheduled-task chips must aggregate both `/api/terminal/scheduled-inputs` and `/api/terminal/auto-continue-tasks`. The chip text is `定时 当前终端数/全部任务数`; newly detected auto-continue tasks should also emit a toast so server-side detection is visible even when the paste dialog did not create the task.
+- The terminal `定时` action opens the existing settings task manager in the named `webclx-scheduled-tasks` popup with `compact=tasks`; it must not replace the terminal page or fork a second task-management implementation. URL synchronization must preserve compact mode so refreshing or reopening the named window stays focused on the shared task form and list.
 - Regression coverage lives in `src/terminal/tests.rs`, `tests/terminal-error-status.test.mjs`, and `tests/terminal-session-details.test.mjs`.
+
+## Working-status guard (2026-10-18)
+
+Automatic retries must recheck native working status when matching the current
+pane snapshot, including direct `/auto-continue` calls and reset-time tasks.
+Previously only the activity-list probe applied this guard; an automatic caller
+could still match old error text or a keyword in normal tool output during an
+active turn. The shared snapshot matcher now uses the same last-10-readable-line
+working detector as the list before looking for error keywords. Manual continue
+remains available. Regression: `terminal_error_snapshot_does_not_retry_while_agent_is_working`.
+
+Investigation of `feishuFwd_1` found an active Codex `Working (... esc to interrupt)`
+status and broad configured keywords (`sending request for url` and a bare request
+URL). No retained trigger snapshot establishes which keyword caused the reported
+send; spinner animation alone is not evidence of an error. This guard closes the
+confirmed path discrepancy, but does not classify every prose/tool-output keyword
+match while an agent is idle.
+
+Verified locally: two `terminal_error_snapshot` regressions passed; deployment
+`222705-18df8229b141d59a` succeeded after correcting the stale static-link gate.
+Installed and running SHA-256 both equal
+`d37ba3e563569e039d32d45da7dffdf4b2452617b178614d2ae7c1fab006cfe0`;
+auth-session and session-list APIs returned HTTP 200, with `feishuFwd_1` working
+and no matched error. Source commits: `563c296`, `807fca6`.
 
 ## Starting Points
 

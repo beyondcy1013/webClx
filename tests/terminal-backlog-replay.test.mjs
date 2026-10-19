@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readEntryScriptBundle } from "./static-entry-assets.mjs";
 
-const terminalRs = readFileSync(new URL("../src/terminal.rs", import.meta.url), "utf8");
+const terminalRs = ["../src/terminal.rs", "../src/terminal/websocket.rs"]
+  .map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 const terminalJs = readEntryScriptBundle("terminal.html");
 const terminalCss = readFileSync(new URL("../static/styles-terminal.css", import.meta.url), "utf8");
 const terminalTmuxRs = readFileSync(new URL("../src/terminal/tmux.rs", import.meta.url), "utf8");
@@ -10,8 +11,29 @@ const terminalSessionRs = readFileSync(new URL("../src/terminal/session.rs", imp
 
 assert.match(
   terminalRs,
-  /send_backlog_replay_control\(&mut sender,\s*"start"\)[\s\S]*send_binary_chunks\(&mut sender,\s*&backlog\)[\s\S]*send_backlog_replay_control\(&mut sender,\s*"end"\)/,
+  /send_backlog_replay_control\([\s\S]*"start"[\s\S]*\)[\s\S]*send_binary_chunks\(\s*&mut sender,[\s\S]*&replay\.bytes[\s\S]*send_backlog_replay_control\([\s\S]*"end"/,
   "terminal websocket should bracket the initial backlog replay with start/end controls",
+);
+
+assert.match(
+  terminalRs,
+  /session\.current_viewport_size\(\)[\s\S]*send_terminal_viewport_size\(&mut sender, size\)[\s\S]*send_backlog_replay_control\([\s\S]*"start"/,
+  "a reconnecting xterm must adopt the shared PTY grid before parsing its initial replay",
+);
+assert.match(
+  terminalRs,
+  /Ok\(TerminalStreamEvent::ViewportSize\(size\)\)[\s\S]*send_terminal_viewport_size\(&mut sender, size\)[\s\S]*Ok\(TerminalStreamEvent::Output\(chunk\)\)/,
+  "live viewport controls and terminal bytes should retain their shared broadcast order",
+);
+assert.match(
+  terminalSessionRs,
+  /enum TerminalStreamEvent \{[\s\S]*Output\(TerminalOutputChunk\),[\s\S]*ViewportSize\(TerminalViewportSize\),[\s\S]*\}/,
+  "shared PTY size changes should travel through the same stream as terminal output",
+);
+assert.match(
+  terminalSessionRs,
+  /broadcaster\.send\(TerminalStreamEvent::ViewportSize\(size\)\)[\s\S]*\.resize\(PtySize \{[\s\S]*rows: size\.rows,[\s\S]*cols: size\.cols/,
+  "clients must receive the canonical grid before the PTY starts producing output for that grid",
 );
 
 assert.match(
@@ -40,7 +62,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function beginTerminalBacklogReplay\(context = activeTerminalContext\) \{[\s\S]*context\.backlogReplayActive = true;[\s\S]*hideTerminalCursorCorrection\(\);[\s\S]*terminalHost\?\.classList\.add\("terminal-host-replaying"\)/,
+  /function beginTerminalBacklogReplay\(context = activeTerminalContext[^)]*\) \{[\s\S]*context\.backlogReplayActive = true;[\s\S]*hideTerminalCursorCorrection\(\);[\s\S]*terminalHost\?\.classList\.add\("terminal-host-replaying"\)/,
   "backlog replay should clear cursor correction before replay frames start changing the terminal buffer",
 );
 
@@ -94,7 +116,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function terminalInitialReplaySettled\(context = activeTerminalContext\) \{[\s\S]*!context\.initialReplayPending[\s\S]*!context\.backlogReplayActive[\s\S]*!context\.backlogReplayEndQueued[\s\S]*!context\.outputWriteInFlight[\s\S]*!context\.outputQueue\.some\(\(item\) => item\.replay \|\| item\.kind === "backlog_replay_end"\)/,
+  /function terminalInitialReplaySettled\(context = activeTerminalContext\) \{[\s\S]*!context\.initialReplayPending[\s\S]*!context\.backlogReplayActive[\s\S]*!context\.backlogReplayEndQueued[\s\S]*!context\.outputReplayWriteInFlight[\s\S]*!context\.outputQueue\.some\(\(item\) => item\.replay \|\| item\.kind === "backlog_replay_end"\)/,
   "terminal startup actions should wait until the initial replay has fully drained from the xterm write queue",
 );
 
@@ -148,8 +170,49 @@ assert.match(
 
 assert.match(
   terminalRs,
-  /let mut last_output_seq_sent = live_output_start_seq;[\s\S]*Err\(broadcast::error::RecvError::Lagged\(skipped\)\) => \{[\s\S]*session\.backlog_chunks_after\(last_output_seq_sent\)[\s\S]*send_terminal_output_chunk\(&mut sender, &recovered\)\.await[\s\S]*last_output_seq_sent = recovered\.seq;/,
+  /let mut last_output_seq_sent = replay_last_seq;[\s\S]*Err\(broadcast::error::RecvError::Lagged\(skipped\)\) => \{[\s\S]*session\.backlog_chunks_after\(last_output_seq_sent\)[\s\S]*send_terminal_output_chunk\(&mut sender, &recovered[\s\S]*last_output_seq_sent = recovered\.seq;/,
   "terminal websocket lag should recover missing live output from the session backlog instead of silently skipping chunks",
+);
+
+assert.match(
+  terminalRs,
+  /initial_replay_for_socket\(&session\)\.await[\s\S]*let mut last_output_seq_sent = replay_last_seq;/,
+  "initial replay must hand live output off after the snapshot boundary so dynamic terminal bytes are neither lost nor applied twice",
+);
+assert.match(
+  terminalRs,
+  /let seq_before = session\.current_output_seq\(\);[\s\S]*capture_tmux_initial_pane_snapshot_async\(&session\.id, line_limit\)\.await[\s\S]*session\.backlog_chunks_after\(seq_before\)[\s\S]*request_tmux_client_refresh\(&session\.id\)\.await/,
+  "initial replay should watermark before the tmux capture, append post-watermark live chunks, then force a client redraw",
+);
+assert.match(
+  terminalRs,
+  /TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT\.load\(Ordering::SeqCst\)[\s\S]*capture_tmux_initial_pane_snapshot_async\(&session\.id, line_limit\)/,
+  "the per-connection tmux snapshot should use the configured scrollback line limit",
+);
+assert.match(
+  terminalRs,
+  /session\.backlog_chunks_after\(seq_before\)[\s\S]*bytes\.extend_from_slice\(&chunk\.bytes\)[\s\S]*last_output_seq = chunk\.seq/,
+  "live chunks recorded after the watermark must be appended after the fresh snapshot and advance the live boundary",
+);
+assert.match(
+  terminalRs,
+  /fn initial_replay_for_socket[\s\S]*session\.is_alive\(\)[\s\S]*Ok\(buffered_replay_for_socket\(session\)\)/,
+  "non-alive sessions or failed captures must fall back to the buffered replay",
+);
+assert.match(
+  terminalTmuxRs,
+  /async fn request_tmux_client_refresh\(session_id: &str\)[\s\S]*"list-clients"[\s\S]*"#\{client_name\}"[\s\S]*"refresh-client"[\s\S]*"-t"[\s\S]*client_name/,
+  "the refresh backstop must target each attached client name reported by list-clients",
+);
+assert.match(
+  terminalRs,
+  /fn buffered_replay_for_socket[\s\S]*session\.backlog_tail_snapshot_with_last_seq\(MAX_INITIAL_REPLAY_BYTES\)[\s\S]*last_output_seq/,
+  "the buffered fallback replay must include output recorded after the attach-time snapshot before advancing its live boundary",
+);
+assert.doesNotMatch(
+  terminalRs,
+  /let live_output_start_seq = session\.current_output_seq\(\);\s*let backlog = initial_backlog_for_socket\(&session\);/,
+  "capturing the live sequence before the snapshot duplicates concurrent cursor-control output",
 );
 
 assert.doesNotMatch(
@@ -166,18 +229,86 @@ assert.match(
 
 assert.match(
   terminalTmuxRs,
-  /const INITIAL_TMUX_SNAPSHOT_LINE_LIMIT:\s*u32\s*=\s*800;[\s\S]*pub\(super\) fn capture_tmux_initial_pane_snapshot\(session_id: &str\)[\s\S]*format!\("-\{INITIAL_TMUX_SNAPSHOT_LINE_LIMIT\}"\)/,
-  "initial terminal websocket replay should use a bounded tmux snapshot instead of sending the entire 100000-line history",
+  /pub\(super\) fn capture_tmux_initial_pane_snapshot_with_limit\([\s\S]*line_limit:\s*u32,[\s\S]*format!\("-\{line_limit\}"\)/,
+  "initial terminal websocket replay should use the configured scrollback lines",
 );
 
 assert.match(
   terminalSessionRs,
-  /fn initial_backend_snapshot\(session_id: &str\) -> Option<Vec<u8>> \{[\s\S]*capture_tmux_initial_pane_snapshot\(session_id\)/,
+  /fn initial_backend_snapshot\(session_id: &str\) -> Option<Vec<u8>> \{[\s\S]*capture_tmux_initial_pane_snapshot_with_limit\(session_id, line_limit\)/,
   "attaching a tmux session should seed the browser from the bounded initial snapshot",
 );
 
 assert.match(
   terminalRs,
-  /const MAX_INITIAL_BACKLOG_BYTES:\s*usize\s*=\s*1024\s*\*\s*1024;[\s\S]*capture_tmux_initial_pane_snapshot\(&session\.id\)[\s\S]*unwrap_or_else\(\|\| session\.backlog_tail_snapshot\(MAX_INITIAL_BACKLOG_BYTES\)\)/,
+  /const MAX_INITIAL_REPLAY_BYTES:\s*usize\s*=\s*8\s*\*\s*1024\s*\*\s*1024;[\s\S]*backlog_tail_snapshot_with_last_seq\(MAX_INITIAL_REPLAY_BYTES\)/,
   "websocket reconnect fallback should cap live backlog replay so input echo is not stuck behind a huge initial write",
+);
+
+// ── 断线 seq 水位增量续传（App 切换回来不再清空终端全量重拉） ──────────────
+
+assert.match(
+  terminalRs,
+  /struct TerminalSessionQuery \{[\s\S]*seq_framed[\s\S]*resume_seq:\s*Option<u64>[\s\S]*resume_instance:\s*Option<u64>/,
+  "terminal websocket query should carry the client's seq watermark and stream instance",
+);
+
+assert.match(
+  terminalRs,
+  /fn delta_replay_chunks[\s\S]*resume_instance != session\.output_instance_id\(\)[\s\S]*resume_seq > session\.current_output_seq\(\)[\s\S]*first\.seq == resume_seq \+ 1/,
+  "delta resume must require a matching stream instance, an in-range seq watermark, and a contiguous backlog tail",
+);
+
+assert.match(
+  terminalRs,
+  /fn delta_replay_chunks[\s\S]*if !query\.seq_framed \{\s*return None;/,
+  "delta resume must be gated on seq-frame negotiation so clients without framing never receive framed output",
+);
+
+assert.match(
+  terminalRs,
+  /send_output_framing_control\(&mut sender\)[\s\S]*send_backlog_replay_control\([\s\S]*"start"/,
+  "the seq-framing handshake must precede every binary output frame on the socket",
+);
+
+assert.match(
+  terminalRs,
+  /enum InitialReplayPlan \{[\s\S]*Full\(TerminalInitialReplay\)[\s\S]*Delta \{[\s\S]*chunks: Vec<TerminalOutputChunk>/,
+  "reconnect should choose between a full snapshot replay and a delta chunk resume",
+);
+
+assert.match(
+  terminalSessionRs,
+  /output_instance_id:\s*u64/,
+  "each terminal session must carry a fresh output-stream instance id so rebuilt sessions cannot be mistaken for the old stream",
+);
+
+assert.match(
+  terminalJs,
+  /query\.set\("seq_framed", "1"\)[\s\S]*query\.set\("resume_seq", String\(context\.lastOutputSeq\)\)[\s\S]*query\.set\("resume_instance", String\(context\.outputInstanceId\)\)/,
+  "terminal page should advertise seq framing and pass its applied watermark when reconnecting",
+);
+
+assert.match(
+  terminalJs,
+  /const resumeWanted =[\s\S]*context\.disconnected[\s\S]*context\.hasLoadedOutput[\s\S]*!context\.outputStreamGap[\s\S]*context\.pendingDeltaReplay = resumeWanted/,
+  "terminal reconnect should defer the buffer reset until the server answers whether delta resume is honored",
+);
+
+assert.match(
+  terminalJs,
+  /if \(resumeAttempted && !deltaReplay\) \{[\s\S]*resetTerminalContextInstance\(context\);/,
+  "a refused delta resume must still rebuild the terminal before full replay bytes arrive",
+);
+
+assert.match(
+  terminalJs,
+  /context\.seqFramingActive[\s\S]*new DataView\(bytes\.buffer, bytes\.byteOffset, bytes\.byteLength\)\.getBigUint64\(0, false\)[\s\S]*bytes\.subarray\(8\)/,
+  "framed binary output must strip the 8-byte seq header before writing to xterm",
+);
+
+assert.match(
+  terminalJs,
+  /context\.outputStreamGap = true;[\s\S]*context\.outputQueue = context\.outputQueue\.filter\(\(item\) => !item\.replay\)/,
+  "an interrupted replay must mark the buffer as an invalid delta-resume baseline",
 );

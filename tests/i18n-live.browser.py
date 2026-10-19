@@ -1,8 +1,13 @@
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 from playwright.async_api import async_playwright
 
@@ -13,10 +18,10 @@ CHROMIUM = os.environ.get(
     "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome",
 )
 PAGES = {
-    "workspace": "/",
-    "terminal": "/terminal",
-    "agent": "/agent",
-    "login": "/login",
+    "workspace": ("/", "/workspace"),
+    "terminal": ("/terminal", "/terminal"),
+    "agent": ("/agent", "/agent"),
+    "login": ("/login", "/login"),
 }
 VIEWPORTS = {
     "desktop": {"width": 1440, "height": 900},
@@ -24,7 +29,54 @@ VIEWPORTS = {
 }
 
 
-async def inspect_page(page, name, path, viewport_name, screenshot_dir):
+def local_auth_headers():
+    token_file = os.environ.get("WEBCLX_LOCAL_TOKEN_FILE", "").strip()
+    if not token_file:
+        return {}
+    hostname = (urlparse(BASE_URL).hostname or "").lower()
+    if hostname not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("refusing to send the local API token to a non-loopback URL")
+    token = Path(token_file).read_text(encoding="utf-8").strip()
+    if len(token) != 64 or any(character not in "0123456789abcdefABCDEF" for character in token):
+        raise RuntimeError("WEBCLX_LOCAL_TOKEN_FILE does not contain a valid local API token")
+    return {"X-WebClx-Local-Token": token}
+
+
+def local_session_cookie():
+    secret_file = os.environ.get("WEBCLX_SESSION_SECRET_FILE", "").strip()
+    credentials_file = os.environ.get("WEBCLX_CREDENTIALS_FILE", "").strip()
+    if not secret_file and not credentials_file:
+        return None
+    if not secret_file or not credentials_file:
+        raise RuntimeError("both WEBCLX_SESSION_SECRET_FILE and WEBCLX_CREDENTIALS_FILE are required")
+    hostname = (urlparse(BASE_URL).hostname or "").lower()
+    if hostname not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("refusing to derive a local session cookie for a non-loopback URL")
+    secret_path = Path(secret_file)
+    credentials_path = Path(credentials_file)
+    if secret_path.stat().st_mode & 0o077 or credentials_path.stat().st_mode & 0o077:
+        raise RuntimeError("local session inputs must be owner-only files")
+    secret = secret_path.read_bytes()
+    credentials = json.loads(credentials_path.read_text(encoding="utf-8"))
+    username = str(credentials.get("username", "")).strip()
+    if len(secret) < 32 or not username:
+        raise RuntimeError("local session inputs are invalid")
+    payload = json.dumps(
+        {"user": username, "exp": int(time.time()) + 300},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload_b64 = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    signature = hmac.new(secret, payload_b64.encode("ascii"), hashlib.sha256).hexdigest()
+    return {
+        "name": "webclx_session",
+        "value": f"{payload_b64}.{signature}",
+        "url": BASE_URL,
+        "httpOnly": True,
+        "sameSite": "Strict",
+    }
+
+
+async def inspect_page(page, name, path, expected_path, viewport_name, screenshot_dir):
     console_errors = []
     page_errors = []
     failed_responses = []
@@ -46,10 +98,14 @@ async def inspect_page(page, name, path, viewport_name, screenshot_dir):
 
     response = await page.goto(f"{BASE_URL}{path}", wait_until="domcontentloaded")
     assert response is not None and response.ok, f"{name}: navigation failed"
+    assert urlparse(page.url).path == expected_path, f"{name}: redirected to {page.url}"
     await page.wait_for_selector("#webclx-language-select", state="visible")
     await page.wait_for_timeout(800)
 
     select = page.locator("#webclx-language-select")
+    assert await select.input_value() == "zh-CN"
+    assert await page.locator("html").get_attribute("lang") == "zh-CN"
+    assert await page.evaluate("localStorage.getItem('webclx:locale')") is None
     await select.focus()
     assert await select.evaluate("element => element === document.activeElement")
     await select.select_option("en")
@@ -122,6 +178,9 @@ async def inspect_page(page, name, path, viewport_name, screenshot_dir):
         () => {
           const control = document.querySelector('#webclx-language-control');
           const box = control.getBoundingClientRect();
+          const hostBox = control.parentElement.getBoundingClientRect();
+          const controlStyle = getComputedStyle(control);
+          const hostStyle = getComputedStyle(control.parentElement);
           return {
             pageOverflow: document.documentElement.scrollWidth > innerWidth + 1,
             overflowElements: Array.from(document.querySelectorAll('body *'))
@@ -139,6 +198,12 @@ async def inspect_page(page, name, path, viewport_name, screenshot_dir):
               .slice(0, 30),
             controlVisible: box.width > 0 && box.height > 0,
             controlInViewport: box.left >= 0 && box.right <= innerWidth + 1,
+            controlAtHostTopRight: hostBox.right - box.right <= 16 && box.top - hostBox.top <= 16,
+            controlBox: { left: box.left, top: box.top, right: box.right, bottom: box.bottom },
+            hostBox: { left: hostBox.left, top: hostBox.top, right: hostBox.right, bottom: hostBox.bottom },
+            controlStyle: { alignSelf: controlStyle.alignSelf, justifySelf: controlStyle.justifySelf, margin: controlStyle.margin },
+            hostStyle: { display: hostStyle.display, padding: hostStyle.padding, gridTemplateColumns: hostStyle.gridTemplateColumns },
+            hostClass: control.parentElement.className,
             storedLocale: localStorage.getItem('webclx:locale'),
             documentLocale: document.documentElement.lang,
           };
@@ -147,6 +212,7 @@ async def inspect_page(page, name, path, viewport_name, screenshot_dir):
     )
     assert not layout["pageOverflow"], {name: layout}
     assert layout["controlVisible"] and layout["controlInViewport"], {name: layout}
+    assert layout["controlAtHostTopRight"], {name: layout}
     assert layout["storedLocale"] == "en" and layout["documentLocale"] == "en"
 
     await page.screenshot(
@@ -189,13 +255,21 @@ async def main():
         launch_options["executable_path"] = str(chromium)
 
     results = []
+    auth_headers = local_auth_headers()
+    session_cookie = local_session_cookie()
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**launch_options)
         try:
             for viewport_name, viewport in VIEWPORTS.items():
-                for name, path in PAGES.items():
-                    context = await browser.new_context(viewport=viewport, locale="zh-CN")
+                for name, (path, expected_path) in PAGES.items():
+                    context = await browser.new_context(
+                        viewport=viewport,
+                        locale="zh-CN",
+                        extra_http_headers=auth_headers,
+                    )
                     try:
+                        if session_cookie:
+                            await context.add_cookies([session_cookie])
                         await context.route(
                             "**/api/workspace-icon?*",
                             lambda route: route.fulfill(
@@ -207,7 +281,12 @@ async def main():
                         page = await context.new_page()
                         results.append(
                             await inspect_page(
-                                page, name, path, viewport_name, screenshot_dir
+                                page,
+                                name,
+                                path,
+                                expected_path,
+                                viewport_name,
+                                screenshot_dir,
                             )
                         )
                     finally:

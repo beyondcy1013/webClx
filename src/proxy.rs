@@ -357,15 +357,7 @@ impl ProxyManager {
             active_proxy_id: active_id,
         };
         let encoded = serde_json::to_vec_pretty(&config)?;
-        std::fs::write(self.config_path.as_path(), encoded)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(
-                self.config_path.as_path(),
-                std::fs::Permissions::from_mode(0o600),
-            )?;
-        }
+        crate::private_file::write_atomic(self.config_path.as_path(), &encoded)?;
         Ok(())
     }
 }
@@ -926,7 +918,10 @@ fn build_reqwest_proxy(
     password: Option<&str>,
 ) -> Result<Proxy> {
     let proxy_url = build_proxy_url(proxy_type, server);
-    let proxy = Proxy::all(&proxy_url).with_context(|| format!("无效代理地址: {proxy_url}"))?;
+    let no_proxy = reqwest::NoProxy::from_string("localhost,127.0.0.1,::1");
+    let proxy = Proxy::all(&proxy_url)
+        .with_context(|| format!("无效代理地址: {proxy_url}"))?
+        .no_proxy(no_proxy);
     apply_proxy_credentials(proxy, username, password)
 }
 
@@ -1204,6 +1199,37 @@ mod tests {
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+
+    #[tokio::test]
+    async fn application_proxy_bypasses_loopback_targets() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+        });
+        let proxy = build_reqwest_proxy(&ProxyType::Http, "127.0.0.1:9", None, None).unwrap();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(proxy)
+            .build()
+            .unwrap();
+
+        let response = client
+            .get(format!("http://{address}/health"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.text().await.unwrap(), "ok");
+        server.await.unwrap();
+    }
 
     #[test]
     fn proxy_manager_reorders_and_persists_presets() {

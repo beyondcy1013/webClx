@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use auth_core::*;
 use axum::{
@@ -447,8 +450,46 @@ async fn test_stored_api_preset(
     preset: &StoredApiPreset,
     default_config_pairs: &[(&str, &str)],
 ) -> ApiResult<PresetTestResult> {
-    test_stored_api_preset_with_delay(client, preset, default_config_pairs, PRESET_CHAT_PROBE_DELAY)
-        .await
+    let target = llm::api_preset_llm_target(preset);
+    let endpoint = api_probe_endpoint(preset, &target.base_url);
+    await_api_preset_test_with_timeout(
+        preset,
+        endpoint,
+        Duration::from_secs(PRESET_TEST_TIMEOUT_SECS),
+        test_stored_api_preset_with_delay(
+            client,
+            preset,
+            default_config_pairs,
+            PRESET_CHAT_PROBE_DELAY,
+        ),
+    )
+    .await
+}
+
+pub(crate) async fn await_api_preset_test_with_timeout<F>(
+    preset: &StoredApiPreset,
+    endpoint: String,
+    timeout: Duration,
+    test: F,
+) -> ApiResult<PresetTestResult>
+where
+    F: Future<Output = ApiResult<PresetTestResult>>,
+{
+    match tokio::time::timeout(timeout, test).await {
+        Ok(result) => result,
+        Err(_) => Ok(PresetTestResult {
+            preset_id: preset.id.clone(),
+            name: preset.name.clone(),
+            ok: false,
+            endpoint,
+            status: None,
+            latency_ms: timeout.as_millis(),
+            message: format!(
+                "API 预设测试总耗时超过 {} 秒，已停止等待上游响应。",
+                timeout.as_secs()
+            ),
+        }),
+    }
 }
 
 pub(crate) async fn test_stored_api_preset_with_delay(
@@ -600,6 +641,7 @@ async fn send_api_models_probe_request(
     if let Some(preset_id) = upstream_preset_id {
         request = request.header(UPSTREAM_PRESET_ID_HEADER, preset_id);
     }
+    let request = llm::apply_local_relay_auth_headers(request, &endpoint);
     let response = request.send().await;
     preset_test_result_from_response(
         preset.id.clone(),
@@ -764,6 +806,7 @@ pub(in crate::auth) fn apply_claude_preset_test_headers(
         .header("x-api-key", &target.auth_token)
         .header("anthropic-version", ANTHROPIC_API_VERSION)
         .header(header::ACCEPT, "application/json");
+    let request = llm::apply_local_relay_auth_headers(request, &target.base_url);
     if target.use_local_proxy {
         request.header(UPSTREAM_PRESET_ID_HEADER, &preset.id)
     } else {

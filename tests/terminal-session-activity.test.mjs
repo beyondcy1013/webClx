@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import vm from "node:vm";
 import { readEntryScriptBundle } from "./static-entry-assets.mjs";
 
 const require = createRequire(import.meta.url);
@@ -12,6 +13,10 @@ const terminalSessionActivityJs = readFileSync(
 );
 const terminalSettingsJs = readFileSync(new URL("../static/terminal-settings.js", import.meta.url), "utf8");
 const terminalCoreJs = readFileSync(new URL("../static/terminal.js", import.meta.url), "utf8");
+const terminalFocusSelectionJs = readFileSync(
+  new URL("../static/terminal-focus-selection.js", import.meta.url),
+  "utf8",
+);
 const terminalCommonJs = readFileSync(new URL("../static/terminal-common.js", import.meta.url), "utf8");
 const terminalSessionsJs = readFileSync(
   new URL("../static/terminal-sessions.js", import.meta.url),
@@ -25,7 +30,9 @@ const appJs = readEntryScriptBundle("index.html");
 const indexHtml = readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
 const settingsCore = readFileSync(new URL("../crates/settings_core/src/lib.rs", import.meta.url), "utf8");
 const terminalRoutesRs = readFileSync(new URL("../src/routes/terminal.rs", import.meta.url), "utf8");
-const terminalRs = readFileSync(new URL("../src/terminal.rs", import.meta.url), "utf8");
+const terminalRs =
+  readFileSync(new URL("../src/terminal.rs", import.meta.url), "utf8") +
+  readFileSync(new URL("../src/terminal/websocket.rs", import.meta.url), "utf8");
 const terminalManagerRs = readFileSync(new URL("../src/terminal/manager.rs", import.meta.url), "utf8");
 const terminalManagerErrorDetectionRs = readFileSync(
   new URL("../src/terminal/manager/error_detection.rs", import.meta.url),
@@ -72,6 +79,52 @@ assert.equal(
   ),
   "空闲",
   "idle Claude/Codex process presence should not be shown as pending review",
+);
+
+assert.equal(
+  terminalSessionActivity.sessionActivityLabel({
+    activity_state: "orphaned_agent",
+    activity_agent: "Codex",
+  }),
+  "Agent 异常",
+  "an orphaned agent process must not be presented as an idle terminal",
+);
+
+assert.equal(
+  terminalSessionActivity.isSessionBusy({ activity_state: "orphaned_agent" }),
+  true,
+  "an orphaned agent process should remain visible as an actionable abnormal state",
+);
+
+assert.equal(
+  terminalSessionActivity.sessionActivityLabel({ activity_state: "compacted" }),
+  "已压缩",
+  "an automatically compacted terminal should expose a distinct status",
+);
+
+assert.equal(
+  terminalSessionActivity.sessionActivityLabel({
+    activity_state: "retrying",
+    activity_error_auto_continue_at: "2099-08-21 15:45:55",
+  }),
+  "等待重置",
+  "a quota error with a future wake-up should expose its waiting state instead of generic retrying",
+);
+
+assert.deepEqual(
+  terminalSessionActivity.sessionAfterOutputViewed({
+    id: "s-compacted",
+    activity_state: "compacted",
+    activity_label: "已压缩",
+    activity_agent: "Codex",
+  }),
+  {
+    id: "s-compacted",
+    activity_state: "agent",
+    activity_label: "Codex",
+    activity_agent: "Codex",
+  },
+  "viewing a compacted terminal should clear the status back to idle",
 );
 
 assert.deepEqual(
@@ -126,8 +179,93 @@ assert.match(
 
 assert.match(
   terminalCoreJs,
+  /function sessionActivityLabel\(session\)[\s\S]*state\.activeSessionId[\s\S]*待查看[\s\S]*return "空闲"/,
+  "the active terminal should never display a pending-review label",
+);
+
+const markSessionOpenedLocallySource = terminalCoreJs.slice(
+  terminalCoreJs.indexOf("function markSessionOpenedLocally"),
+  terminalCoreJs.indexOf("function sessionActivityState", terminalCoreJs.indexOf("function markSessionOpenedLocally")),
+);
+assert.match(
+  markSessionOpenedLocallySource,
+  /state\.sessions = state\.sessions\.map/,
+  "selecting a session should update metadata without moving the option",
+);
+assert.doesNotMatch(markSessionOpenedLocallySource, /sortSessionsByRecentActivity/);
+
+const localOpenState = {
+  sessions: [
+    { id: "recent", created_at: 200, last_opened_at: 200 },
+    { id: "selected", created_at: 100, last_opened_at: 100 },
+  ],
+};
+vm.runInNewContext(`${markSessionOpenedLocallySource}\nmarkSessionOpenedLocally("selected");`, {
+  Date,
+  state: localOpenState,
+  sharedSessionAfterOutputViewed: terminalSessionActivity.sessionAfterOutputViewed,
+  sessionTimestamp: terminalSessionActivity.sessionTimestamp,
+  sortSessionsByRecentActivity: terminalSessionActivity.sortSessionsByRecentActivity,
+});
+assert.deepEqual(
+  localOpenState.sessions.map((session) => session.id),
+  ["recent", "selected"],
+  "the terminal selected from a lower dropdown position should keep its option position",
+);
+
+const mergeRecentOpenTimesStart = terminalSessionsJs.indexOf(
+  "function mergeTerminalSessionRecentOpenTimes",
+);
+const mergeRecentOpenTimesEnd = terminalSessionsJs.indexOf(
+  "async function idleCurrentSession",
+  mergeRecentOpenTimesStart,
+);
+assert.ok(
+  mergeRecentOpenTimesStart >= 0 && mergeRecentOpenTimesEnd > mergeRecentOpenTimesStart,
+  "terminal session refreshes should define a local/server recent-open timestamp merge",
+);
+const mergeRecentOpenTimesSource = terminalSessionsJs.slice(
+  mergeRecentOpenTimesStart,
+  mergeRecentOpenTimesEnd,
+);
+const mergeRecentOpenTimesSandbox = {
+  sessionTimestamp: terminalSessionActivity.sessionTimestamp,
+};
+vm.runInNewContext(mergeRecentOpenTimesSource, mergeRecentOpenTimesSandbox);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(mergeRecentOpenTimesSandbox.mergeTerminalSessionRecentOpenTimes(
+    [{ id: "selected", name: "old", last_opened_at: 500 }],
+    [{ id: "selected", name: "fresh metadata", last_opened_at: 100 }],
+  ))),
+  [{ id: "selected", name: "fresh metadata", last_opened_at: 500 }],
+  "a stale refresh should keep the local recent-open time while accepting fresh session metadata",
+);
+
+assert.match(
+  terminalCoreJs,
   /function sortSessionsByRecentActivity\(sessions\) \{[\s\S]*state\.sessionSortMode[\s\S]*sharedSortTerminalSessions\(sessions, state\.sessionSortMode\)[\s\S]*sharedSortSessionsByRecentActivity\(sessions\)/,
   "session metadata refreshes should preserve the terminal-list sort mode selected by the user",
+);
+
+const groupedSessionFixture = [
+  { id: "s-old", last_opened_at: 100, group_token: "pair" },
+  { id: "s-ungrouped", last_opened_at: 200 },
+  { id: "s-follower", last_opened_at: 50, group_token: "pair" },
+];
+assert.deepEqual(
+  terminalSessionActivity.sortSessionsByRecentActivity(groupedSessionFixture).map((session) => session.id),
+  ["s-ungrouped", "s-follower", "s-old"],
+  "opening one grouped terminal should move both paired terminals together",
+);
+assert.deepEqual(
+  terminalSessionActivity.sortTerminalSessions(groupedSessionFixture, "workspace").map((session) => session.id),
+  ["s-follower", "s-old", "s-ungrouped"],
+  "explicit sorting must not split grouped terminal followers",
+);
+assert.deepEqual(
+  [...terminalSessionActivity.terminalGroupedSessionIds(groupedSessionFixture)],
+  ["s-old", "s-follower"],
+  "only terminals sharing a group token should receive follower markers",
 );
 
 assert.match(
@@ -138,7 +276,7 @@ assert.match(
 
 assert.match(
   terminalCommonJs,
-  /function sessionOptionLabel\(session\) \{[\s\S]*`\$\{sessionActivityAgentPrefix\(session\)\}\$\{sessionActivityPrefix\(session\)\}\$\{session\?\.name \|\| session\?\.id \|\| "未命名终端"\}\$\{sessionActivityAgentSuffix\(session\)\}`/,
+  /function sessionOptionLabel\(session\) \{[\s\S]*`\$\{groupBadge\}\$\{sessionActivityAgentPrefix\(session\)\}\$\{sessionActivityPrefix\(session\)\}\$\{session\?\.name \|\| session\?\.id \|\| "未命名终端"\}\$\{sessionActivityAgentSuffix\(session\)\}`/,
   "terminal dropdown should place configured running program labels around the session option label",
 );
 
@@ -162,6 +300,12 @@ assert.match(
 
 assert.match(
   terminalJs,
+  /function scheduleSessionEventRefresh\([\s\S]*mergePendingSessionRefresh\(\{[\s\S]*\.\.\.nextRequest,[\s\S]*preserveCurrentList: true,[\s\S]*\}\);/,
+  "cross-tab and server terminal mutations should refresh metadata without passively reordering the picker",
+);
+
+assert.match(
+  terminalJs,
   /function shouldDeferSessionListRender\(\) \{[\s\S]*return isSessionDropdownInteracting\(\);[\s\S]*\}/,
   "terminal page should identify when native session selects are being used",
 );
@@ -174,14 +318,37 @@ assert.match(
 
 assert.match(
   terminalSessionsJs,
-  /const fetchedSessions = \(response\.sessions \|\| \[\]\)\.slice\(\);[\s\S]*state\.sessions = sortSessionsByRecentActivity\(fetchedSessions\);[\s\S]*if \(shouldDeferSessionListRender\(\)\) \{[\s\S]*mergePendingSessionRefresh\(\{[\s\S]*preserveCurrentList: true,[\s\S]*\}\);[\s\S]*return;[\s\S]*\}[\s\S]*if \(state\.sessions\.length === 0\)/,
-  "terminal session list loading should also defer rendering when a request completes after the select interaction begins",
+  /const fetchedSessions = \(response\.sessions \|\| \[\]\)\.slice\(\);[\s\S]*mergeTerminalSessionRecentOpenTimes\(\s*sessionsBeforeLoad,\s*fetchedSessions,\s*\)[\s\S]*state\.sessions = sortSessionsByRecentActivity\(mergedFetchedSessions\);[\s\S]*if \(shouldDeferSessionListRender\(\)\) \{[\s\S]*mergePendingSessionRefresh\(\{[\s\S]*preserveCurrentList: true,[\s\S]*\}\);[\s\S]*return;[\s\S]*\}[\s\S]*if \(state\.sessions\.length === 0\)/,
+  "terminal session refreshes should apply recent-use order after native select interaction ends",
 );
 
 assert.match(
   terminalJs,
   /function bindSessionActivitySafeSelect\(selectEl\)[\s\S]*pointerdown[\s\S]*markSessionDropdownInteracting[\s\S]*focus[\s\S]*markSessionDropdownInteracting[\s\S]*blur[\s\S]*flushSessionActivityRenderAfterInteraction[\s\S]*change[\s\S]*flushSessionActivityRenderAfterInteraction/,
   "session dropdowns should mark interaction windows and flush pending activity after closing",
+);
+
+assert.match(
+  terminalFocusSelectionJs,
+  /let terminalSessionSwitchFocusInProgress = false;[\s\S]*function focusTerminalAfterSessionSwitch\(sourceSelect\)[\s\S]*sourceSelect\.blur\(\)[\s\S]*terminalSessionSwitchFocusInProgress = true;[\s\S]*term\.focus\(\);[\s\S]*terminalSessionSwitchFocusInProgress = false;[\s\S]*syncTerminalImePolicy\(\);[\s\S]*requestAnimationFrame\(restore\)[\s\S]*setTimeout\(restore, 180\)/,
+  "session switching should release the native select and restore xterm focus without changing the IME mode",
+);
+assert.match(
+  terminalCoreJs,
+  /document\.addEventListener\("focusin", \(event\) => \{[\s\S]*terminalSessionSwitchFocusInProgress[\s\S]*event\.target === helper[\s\S]*helper\.blur\(\)/,
+  "the soft-keyboard focus guard should allow the explicit session-switch focus handoff",
+);
+for (const selectorName of ["sessionSelectEl", "agentSessionSelectEl", "idleSessionSelectEl"]) {
+  assert.match(
+    terminalCoreJs,
+    new RegExp(`focusTerminalAfterSessionSwitch\\(${selectorName}\\)`),
+    `${selectorName} should return focus to terminal input after switching`,
+  );
+}
+assert.match(
+  readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8"),
+  /terminal-focus-selection\.js\?v=\S+[\s\S]*terminal\.js\?v=\S+/,
+  "terminal focus changes should use refreshed browser cache keys",
 );
 
 assert.match(
@@ -210,14 +377,31 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /const bytes = new Uint8Array\(buffer\);\s*queueTerminalOutput\(bytes, token, context\);/,
+  /(?:const|let) bytes = new Uint8Array\(buffer\);[\s\S]*queueTerminalOutput\(bytes, token, context\);/,
   "frontend websocket output should not decide session activity; backend polling owns output detection",
 );
 
 assert.match(
   terminalJs,
-  /function sessionOptionTitle\(session\) \{[\s\S]*sessionActivityLabel\(session\)[\s\S]*option\.title = sessionOptionTitle\(session\)/,
+  /function sessionOptionTitle\(session\) \{[\s\S]*sessionActivityLabel\(session\)/,
   "terminal dropdown option titles should include the activity label",
+);
+assert.match(terminalJs, /title: sessionOptionTitle\(session\)/);
+assert.match(terminalJs, /option\.title = entry\.title/);
+assert.match(
+  terminalJs,
+  /function renderTerminalSessionSelector\([\s\S]*selectEl\.value = includePlaceholder \? "" : sessions\[0\]\?\.id \|\| "";[\s\S]*selectEl\.workspaceIconSelectController\?\.sync\(\);/,
+  "the terminal selector preview should synchronously mirror the reordered native options",
+);
+assert.match(
+  appJs,
+  /function renderSessionsSessionPicker\(\)[\s\S]*state\.sessions\.forEach[\s\S]*sessionsSessionListEl\.workspaceIconSelectController\?\.sync\(\);/,
+  "the home active-terminal preview should mirror the same sorted session array",
+);
+assert.match(
+  appJs,
+  /function syncDirectorySessionControls\(\)[\s\S]*state\.directorySessions\.forEach[\s\S]*directorySessionListEl\.workspaceIconSelectController\?\.sync\(\);/,
+  "the workspace terminal preview should mirror the same sorted directory-session array",
 );
 
 assert.match(
@@ -248,6 +432,12 @@ assert.match(
   terminalManagerRs,
   /fn terminal_activity_snapshot_from_probe_locked\([\s\S]*if probe\.working_status \{[\s\S]*TerminalActivitySnapshot::working\(last_output_at\)\.with_agent\(activity_agent\)[\s\S]*if let Some\(error_match\) = probe\.error_match\.as_ref\(\)/,
   "backend activity should prioritize Codex Working status from the last 10 terminal lines before other states while preserving detected agent names",
+);
+
+assert.match(
+  terminalManagerRs,
+  /fn terminal_activity_snapshot_from_probe_locked\([\s\S]*if probe\.agent_activity\.has_orphaned_agents\(\) \{[\s\S]*TerminalActivitySnapshot::orphaned_agent\(activity_agent, last_output_at\)/,
+  "backend activity should expose an orphaned agent after pending output has been viewed",
 );
 
 assert.match(
@@ -288,8 +478,8 @@ assert.doesNotMatch(
 
 assert.match(
   terminalJs,
-  /const \{[\s\S]*sessionActivityLabel: sharedSessionActivityLabel[\s\S]*\} = globalThis\.WebClxTerminalSessionActivity;[\s\S]*function sessionActivityLabel\(session\) \{[\s\S]*return sharedSessionActivityLabel\(session\);/,
-  "terminal activity labels should use the shared activity helper",
+  /const \{[\s\S]*sessionActivityLabel: sharedSessionActivityLabel[\s\S]*\} = globalThis\.WebClxTerminalSessionActivity;[\s\S]*function sessionActivityLabel\(session\) \{[\s\S]*sharedSessionActivityLabel\(session\)/,
+  "terminal activity labels should extend the shared activity helper",
 );
 
 assert.match(

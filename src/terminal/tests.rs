@@ -1,41 +1,51 @@
 use auth_core::{CurrentClaudeState, StoredApiPreset};
 use portable_pty::{Child, ChildKiller, ExitStatus, PtySize};
+use rusqlite::{Connection, params};
 use settings_core::{SettingsManager, TerminalQuickCommand, build_settings_response};
 use std::{
     fs, io,
     path::Path,
-    process::Command,
     sync::{
-        Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64},
+        Arc, Condvar, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        mpsc,
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use terminal_core::build_tmux_child_env;
 
 use super::activity::TerminalAgentActivity;
+use super::manager::activity_probe::{
+    PROBE_SNAPSHOT_MAX_AGE, ProbeSnapshotCache, ProbeSnapshotCacheEntry,
+};
 use super::manager::{
     TerminalActivityProbe, arm_output_observations_for_restore_locked,
     auto_continue_backoff_interval_millis, auto_continue_retry_at_millis,
-    capture_terminal_input_history, collect_session_infos_from_probes_locked,
-    collect_terminal_auto_continue_schedules, is_terminal_continue_line,
-    load_terminal_pending_build_requests, next_auto_session_start_index_for_create,
+    capture_terminal_input_history, collect_session_activity_probes,
+    collect_session_infos_from_probes_locked, collect_terminal_auto_continue_schedules,
+    is_terminal_continue_line, load_terminal_pending_build_requests,
+    next_auto_session_start_index_for_create, now_within_active_window,
     persist_terminal_pending_build_registry, prepare_restored_output_observation_locked,
-    rebaseline_terminal_output_locked, remove_legacy_codex_command_env_launchers,
-    restore_system_probe_output_observation_locked, terminal_auto_continue_cron_entry,
+    probe_activity_pane_snapshot_with, rebaseline_terminal_output_locked,
+    remove_legacy_codex_command_env_launchers, restore_system_probe_output_observation_locked,
+    terminal_auto_continue_cron_entry, terminal_auto_continue_cron_script,
     terminal_auto_continue_due_millis, terminal_error_has_continue_after,
-    terminal_error_has_queued_input_after, terminal_error_reset_time_from_tail,
-    terminal_reset_time_epoch_millis, terminal_tail_error_keyword,
-    terminal_tail_error_keyword_with_manual_interrupt_policy, terminal_tail_has_worked_status,
-    terminal_tail_has_working_status,
+    terminal_error_has_queued_input_after, terminal_error_keyword_is_quota_like,
+    terminal_error_reset_time_from_tail, terminal_model_family_from_snapshot,
+    terminal_quota_preflight_uses_zhipu_provider, terminal_recent_output_has_quota_error,
+    terminal_recent_output_uses_glm_model, terminal_reset_time_epoch_millis,
+    terminal_tail_error_keyword, terminal_tail_error_keyword_with_manual_interrupt_policy,
+    terminal_tail_has_worked_status, terminal_tail_has_working_status,
+    terminal_worked_status_match_from_snapshot, terminal_working_status_match_from_snapshot,
 };
 use super::session::TerminalOutputBacklog;
 use super::tmux::{
-    capture_tmux_text_pane_snapshot, normalize_tmux_startup_script, split_tmux_input_submit_keys,
-    tmux_client_names, tmux_session_exists,
+    capture_tmux_text_pane_snapshot, isolated_tmux_command, normalize_tmux_startup_script,
+    split_tmux_input_submit_keys, tmux_client_names, tmux_session_exists,
 };
 use super::{
-    SessionNameState, StoredTerminalPendingBuildRegistry, StoredTerminalRegistry,
+    CHILD_PROCESS_ENV_KEYS_TO_CLEAR, SessionNameState, SpecifiedPresetRunCommand,
+    SpecifiedPresetRunKind, StoredTerminalPendingBuildRegistry, StoredTerminalRegistry,
     StoredTerminalSession, TERMINAL_PENDING_BUILD_MAX_AGE_MS, TerminalActivitySnapshot,
     TerminalEnvironmentSnapshot, TerminalInputHistoryCapture, TerminalManager,
     TerminalPendingBuildRequest, TerminalResumeRestoreRecord, TerminalState, TitleTracker,
@@ -44,7 +54,8 @@ use super::{
     default_terminal_user_name, ensure_unique_session_name_locked, is_mouse_only_input,
     parse_terminal_auto_continue_tasks_from_crontab, persist_terminal_shutdown_restore_registry,
     refresh_auto_session_names_for_path_locked, resolve_terminal_quick_command_input,
-    should_notify_session_list_sync, sort_session_ids_by_recent_activity, tmux_session_name,
+    should_notify_session_list_sync, sort_session_ids_by_recent_activity,
+    specified_preset_run_command, tmux_session_name,
 };
 
 fn test_user_profile() -> crate::runtime_paths::UserProfile {
@@ -179,23 +190,26 @@ fn build_live_session_with_redraw_state(
         viewports: Arc::new(Mutex::new(super::session::TerminalViewportRegistry::default())),
         writer: Arc::new(Mutex::new(Box::new(io::sink()))),
         _child: Arc::new(Mutex::new(Box::new(DummyChild))),
+        child_reaped: AtomicBool::new(false),
         broadcaster,
         backlog: Arc::new(Mutex::new(TerminalOutputBacklog::new())),
         next_output_seq: AtomicU64::new(0),
-        initial_snapshot: Arc::new(Mutex::new(None)),
+        output_instance_id: 42,
         attached_at,
         suppressed_initial_redraw: AtomicBool::new(initial_redraw_suppressed),
         last_output_at: AtomicU64::new(0),
         alive: Arc::new(AtomicBool::new(true)),
+        expected_shutdown: AtomicBool::new(false),
     })
 }
 
-fn stored_test_terminal_session(id: &str) -> StoredTerminalSession {
+pub(crate) fn stored_test_terminal_session(id: &str) -> StoredTerminalSession {
     StoredTerminalSession {
         id: id.to_string(),
         path: std::path::PathBuf::from("/tmp/workspace"),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -205,7 +219,62 @@ fn stored_test_terminal_session(id: &str) -> StoredTerminalSession {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     }
+}
+
+#[test]
+fn rename_session_preserves_previous_name_alias() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    let stored = stored_test_terminal_session("s1");
+    let live = build_live_session(&stored);
+    manager.insert_test_live_session(stored, live);
+
+    manager
+        .rename_session(&base_dir, &base_dir, "s1", "renamed_target".to_string())
+        .expect("rename should succeed");
+
+    assert_eq!(
+        manager
+            .resolve_session_target("workspace_1", None)
+            .expect("old name should resolve"),
+        ("s1".to_string(), "renamed_target".to_string())
+    );
+    assert_eq!(
+        manager
+            .resolve_session_target("renamed_target", None)
+            .expect("new name should resolve"),
+        ("s1".to_string(), "renamed_target".to_string())
+    );
+
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn message_response_identifies_renamed_alias_target() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    let stored = stored_test_terminal_session("s1");
+    let live = build_live_session(&stored);
+    manager.insert_test_live_session(stored, live);
+    manager
+        .rename_session(&base_dir, &base_dir, "s1", "renamed_target".to_string())
+        .expect("rename should succeed");
+
+    let (_session_id, terminal_name, renamed_target, current_name) = manager
+        .send_session_message("workspace_1", None, "test".to_string(), 0, false, false)
+        .expect("message should resolve through the old alias");
+
+    assert!(renamed_target);
+    assert_eq!(terminal_name, "renamed_target");
+    assert_eq!(current_name, "renamed_target");
+
+    let _ = std::fs::remove_dir_all(base_dir);
 }
 
 #[test]
@@ -252,10 +321,11 @@ fn classified_terminal_session_persists_origin_and_owner_key() {
 #[test]
 fn requested_api_preset_controls_created_session_metadata() {
     let presets = vec![StoredApiPreset {
+        interchange_source: None,
         id: "api-minimax".to_string(),
         name: "MiniMax3".to_string(),
-        saved_at: 1,
         provider_name: String::new(),
+        saved_at: 1,
         base_url: "https://api.minimax.example/v1".to_string(),
         management_url: None,
         wire_api: None,
@@ -272,6 +342,7 @@ fn requested_api_preset_controls_created_session_metadata() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     }];
 
@@ -312,7 +383,6 @@ fn manager_persists_classified_session_origin_across_restart() {
             &workspace_dir,
             workspace_dir.clone(),
             test_user_profile(),
-            Vec::new(),
             Vec::new(),
             None,
             String::new(),
@@ -356,6 +426,163 @@ fn terminal_input_history_records_entered_command() {
 
     assert_eq!(history.entries.len(), 1);
     assert_eq!(history.entries[0].text, "cargo test");
+}
+
+#[tokio::test]
+async fn initial_terminal_replay_hands_live_output_off_after_snapshot_boundary() {
+    let stored = stored_test_terminal_session("s-replay-boundary");
+    let session = build_live_session(&stored);
+    session.seed_backlog_prefix(b"snapshot\r\n");
+    session.mark_closed(b"live redraw\r\n");
+
+    let replay = super::initial_replay_for_socket(&session).await.unwrap();
+
+    assert_eq!(replay.bytes, b"snapshot\r\nlive redraw\r\n");
+    assert_eq!(replay.last_output_seq, 1);
+}
+
+#[tokio::test]
+async fn expected_shutdown_closes_without_appending_client_exit_output() {
+    let stored = stored_test_terminal_session("s-expected-shutdown");
+    let session = build_live_session(&stored);
+
+    session.prepare_for_shutdown();
+    session.mark_closed(b"");
+
+    let replay = super::initial_replay_for_socket(&session).await.unwrap();
+    assert!(replay.bytes.is_empty());
+    assert_eq!(replay.last_output_seq, 0);
+    assert!(!session.is_alive());
+}
+
+fn resume_query(
+    seq_framed: bool,
+    resume_seq: Option<u64>,
+    resume_instance: Option<u64>,
+) -> super::TerminalSessionQuery {
+    super::TerminalSessionQuery {
+        path: String::new(),
+        session_id: None,
+        visible: true,
+        seq_framed,
+        resume_seq,
+        resume_instance,
+    }
+}
+
+#[test]
+fn terminal_session_query_deserializes_from_lenient_query_string() {
+    use axum::extract::Query;
+    use axum::http::Uri;
+
+    let uri: Uri =
+        "/api/terminal/ws?path=tools%2FwebClx&session_id=s9080&visible=true&seq_framed=1"
+            .parse()
+            .unwrap();
+    let Query(query): Query<super::TerminalSessionQuery> = Query::try_from_uri(&uri).unwrap();
+    assert_eq!(query.path, "tools/webClx");
+    assert_eq!(query.session_id.as_deref(), Some("s9080"));
+    assert!(query.visible);
+    assert!(query.seq_framed);
+
+    let uri_bool: Uri =
+        "/api/terminal/ws?path=tools%2FwebClx&session_id=s9080&visible=false&seq_framed=true"
+            .parse()
+            .unwrap();
+    let Query(query_bool): Query<super::TerminalSessionQuery> =
+        Query::try_from_uri(&uri_bool).unwrap();
+    assert!(!query_bool.visible);
+    assert!(query_bool.seq_framed);
+
+    let uri_zero: Uri = "/api/terminal/ws?path=tools%2FwebClx&visible=0&seq_framed=0"
+        .parse()
+        .unwrap();
+    let Query(query_zero): Query<super::TerminalSessionQuery> =
+        Query::try_from_uri(&uri_zero).unwrap();
+    assert!(!query_zero.visible);
+    assert!(!query_zero.seq_framed);
+
+    let uri_empty: Uri = "/api/terminal/ws".parse().unwrap();
+    let Query(query_empty): Query<super::TerminalSessionQuery> =
+        Query::try_from_uri(&uri_empty).unwrap();
+    assert!(query_empty.visible);
+    assert!(!query_empty.seq_framed);
+}
+
+#[test]
+fn delta_replay_chunks_returns_contiguous_chunks_after_resume_seq() {
+    let stored = stored_test_terminal_session("s-delta-resume");
+    let session = build_live_session(&stored);
+    session.seed_backlog_prefix(b"snapshot\r\n");
+    session.record_output_chunk(b"out-1\r\n");
+    session.record_output_chunk(b"out-2\r\n");
+    session.record_output_chunk(b"out-3\r\n");
+
+    let query = resume_query(true, Some(1), Some(session.output_instance_id()));
+    let chunks = super::websocket::delta_replay_chunks(&session, &query).unwrap();
+
+    assert_eq!(chunks.iter().map(|chunk| chunk.seq).collect::<Vec<_>>(), vec![2, 3]);
+    assert_eq!(chunks[0].bytes, b"out-2\r\n");
+}
+
+#[test]
+fn delta_replay_chunks_resumes_with_empty_tail_when_nothing_missed() {
+    let stored = stored_test_terminal_session("s-delta-empty");
+    let session = build_live_session(&stored);
+    session.record_output_chunk(b"out-1\r\n");
+
+    let query = resume_query(true, Some(1), Some(session.output_instance_id()));
+    let chunks = super::websocket::delta_replay_chunks(&session, &query).unwrap();
+
+    assert!(chunks.is_empty());
+}
+
+#[test]
+fn delta_replay_chunks_rejects_gap_instance_mismatch_and_stale_seq() {
+    let stored = stored_test_terminal_session("s-delta-reject");
+    let session = build_live_session(&stored);
+    session.record_output_chunk(b"out-1\r\n");
+    session.record_output_chunk(b"out-2\r\n");
+    session.record_output_chunk(b"out-3\r\n");
+    let instance = session.output_instance_id();
+
+    // backlog 头部被淘汰后 resume_seq+1 已不在保留范围内：弹掉 seq 1/2，
+    // 以 seq 1 续传时最先保留的是 seq 3 → 缺口 → 拒绝续传。
+    for _ in 0..2 {
+        session
+            .backlog
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .pop_front_for_test();
+    }
+    assert!(
+        super::websocket::delta_replay_chunks(
+            &session,
+            &resume_query(true, Some(1), Some(instance))
+        )
+        .is_none()
+    );
+    // 实例 id 不匹配（会话重建）→ 拒绝续传。
+    assert!(
+        super::websocket::delta_replay_chunks(&session, &resume_query(true, Some(1), Some(999)))
+            .is_none()
+    );
+    // resume_seq 超过当前已分配 seq（会话重建后 seq 重置）→ 拒绝续传。
+    assert!(
+        super::websocket::delta_replay_chunks(
+            &session,
+            &resume_query(true, Some(99), Some(instance))
+        )
+        .is_none()
+    );
+    // 未协商 seq 帧的客户端无法解析带序号的输出帧 → 拒绝续传。
+    assert!(
+        super::websocket::delta_replay_chunks(
+            &session,
+            &resume_query(false, Some(1), Some(instance))
+        )
+        .is_none()
+    );
 }
 
 #[test]
@@ -406,17 +633,52 @@ fn terminal_input_history_handles_backspace_and_escape_sequences() {
 }
 
 #[test]
-fn terminal_input_history_splits_bracketed_paste_lines() {
+fn terminal_input_history_keeps_bracketed_paste_as_single_entry() {
     let mut history = TerminalInputHistoryCapture::default();
 
-    capture_terminal_input_history(&mut history, "\u{1b}[200~line1\nline2\u{1b}[201~\r");
+    // 一次粘贴/投递的多行消息必须保持为一条对话历史，
+    // 不能因为内部换行被拆成多段。
+    capture_terminal_input_history(&mut history, "\u{1b}[200~line1\rline2\nline3\u{1b}[201~\r");
+
+    assert_eq!(history.entries.len(), 1);
+    assert_eq!(history.entries[0].text, "line1\nline2\nline3");
+}
+
+#[test]
+fn terminal_input_history_paste_then_plain_enter_is_separate_entries() {
+    let mut history = TerminalInputHistoryCapture::default();
+
+    capture_terminal_input_history(&mut history, "\u{1b}[200~line1\rline2\u{1b}[201~\r");
+    capture_terminal_input_history(&mut history, "next command\r");
 
     let texts: Vec<&str> = history
         .entries
         .iter()
         .map(|entry| entry.text.as_str())
         .collect();
-    assert_eq!(texts, vec!["line1", "line2"]);
+    assert_eq!(texts, vec!["line1\nline2", "next command"]);
+}
+
+#[test]
+fn terminal_input_history_handles_large_text_paste() {
+    let mut history = TerminalInputHistoryCapture::default();
+
+    // 100KB of mixed Chinese and English text with lines and bracketed paste markers
+    let line = "这是一段用于测试终端粘贴性能的大段文字，包含多种字符和代码：let mut x = 12345;\n";
+    let large_paste = format!("\u{1b}[200~{}\u{1b}[201~\r", line.repeat(1000));
+    assert!(large_paste.len() > 100_000);
+
+    let started = std::time::Instant::now();
+    let committed = capture_terminal_input_history(&mut history, &large_paste);
+    let elapsed = started.elapsed();
+
+    assert!(committed);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "large text paste took too long: {:?}",
+        elapsed
+    );
+    assert!(!history.entries.is_empty());
 }
 
 #[test]
@@ -434,7 +696,7 @@ fn codex_conversation_metadata_extracts_user_title_without_startup_context() {
     let lines = [
         serde_json::json!({
             "type": "session_meta",
-            "payload": { "cwd": "/home/codes/stockJiepan" }
+            "payload": { "cwd": "/home/codes/lyyStock/stockJiepan" }
         }),
         serde_json::json!({
             "type": "response_item",
@@ -442,8 +704,8 @@ fn codex_conversation_metadata_extracts_user_title_without_startup_context() {
                 "type": "message",
                 "role": "user",
                 "content": [
-                    { "type": "input_text", "text": "# AGENTS.md instructions for /home/codes/stockJiepan" },
-                    { "type": "input_text", "text": "<environment_context>\n  <cwd>/home/codes/stockJiepan</cwd>" }
+                    { "type": "input_text", "text": "# AGENTS.md instructions for /home/codes/lyyStock/stockJiepan" },
+                    { "type": "input_text", "text": "<environment_context>\n  <cwd>/home/codes/lyyStock/stockJiepan</cwd>" }
                 ]
             }
         }),
@@ -486,7 +748,7 @@ fn codex_conversation_metadata_extracts_user_title_without_startup_context() {
 
     let metadata = super::codex_conversation_metadata(&path);
 
-    assert_eq!(metadata.cwd.as_deref(), Some("/home/codes/stockJiepan"));
+    assert_eq!(metadata.cwd.as_deref(), Some("/home/codes/lyyStock/stockJiepan"));
     assert_eq!(
         metadata.title,
         "看一下claude优化建议ui.MD，核实一下建议是否有道理\n第二个任务\n更多细节"
@@ -510,7 +772,7 @@ fn codex_conversation_metadata_skips_automation_status_messages() {
     let lines = [
         serde_json::json!({
             "type": "session_meta",
-            "payload": { "cwd": "/home/codes/webClx" }
+            "payload": { "cwd": "/home/codes/tools/webClx" }
         }),
         serde_json::json!({
             "type": "response_item",
@@ -528,7 +790,7 @@ fn codex_conversation_metadata_skips_automation_status_messages() {
                 "type": "message",
                 "role": "user",
                 "content": [
-                    { "type": "input_text", "text": "[from webClx-compile-api] kidsAI 编译失败(status=1)；请求 214525；webClx 集中日志：/home/codes/webClx/.webclx-compile-queue/runs/example/build-1.log。请先查看日志定位编译失败原因。" }
+                    { "type": "input_text", "text": "[from webClx-compile-api] kidsAI 编译失败(status=1)；请求 214525；webClx 集中日志：/home/codes/tools/webClx/.webclx-compile-queue/runs/example/build-1.log。请先查看日志定位编译失败原因。" }
                 ]
             }
         }),
@@ -561,7 +823,7 @@ fn codex_conversation_metadata_skips_automation_status_messages() {
 
     let metadata = super::codex_conversation_metadata(&path);
 
-    assert_eq!(metadata.cwd.as_deref(), Some("/home/codes/webClx"));
+    assert_eq!(metadata.cwd.as_deref(), Some("/home/codes/tools/webClx"));
     assert_eq!(metadata.title, "历史工作区TAB中的对话历史列，不正确");
 
     fs::remove_dir_all(temp_dir).expect("remove temp dir");
@@ -676,7 +938,7 @@ fn codex_conversation_scan_filters_by_workspace_cwd() {
     let other_session_id = "019f8888-5555-7666-8777-888888888888";
     fs::write(
         sessions_dir.join(format!("rollout-2026-07-19T10-00-00-{matching_session_id}.jsonl")),
-        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/home/codes/webClx\"}}\n",
+        "{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"/home/codes/tools/webClx\"}}\n",
     )
     .expect("write matching rollout");
     fs::write(
@@ -687,15 +949,77 @@ fn codex_conversation_scan_filters_by_workspace_cwd() {
 
     let conversations = super::scan_codex_conversations_for_cwd(
         &codex_home,
-        Some(std::path::Path::new("/home/codes/webClx")),
+        Some(std::path::Path::new("/home/codes/tools/webClx")),
     )
     .expect("scan filtered conversations");
 
     assert_eq!(conversations.len(), 1);
     assert_eq!(conversations[0].session_id, matching_session_id);
-    assert_eq!(conversations[0].cwd, "/home/codes/webClx");
+    assert_eq!(conversations[0].cwd, "/home/codes/tools/webClx");
 
     fs::remove_dir_all(temp_dir).expect("remove Codex cwd filter fixture");
+}
+
+#[test]
+fn codex_conversation_scan_uses_state_index_and_recent_cutoff() {
+    let temp_dir = std::env::temp_dir().join(format!(
+        "webclx-codex-conversation-state-index-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let codex_home = temp_dir.join(".codex");
+    let sessions_dir = codex_home.join("sessions/2026/09/18");
+    fs::create_dir_all(&sessions_dir).expect("create indexed Codex fixture");
+    let recent_id = "019f9999-1111-7222-8333-444444444444";
+    let old_id = "019f9999-5555-7666-8777-888888888888";
+    let recent_path = sessions_dir.join(format!("rollout-recent-{recent_id}.jsonl"));
+    let old_path = sessions_dir.join(format!("rollout-old-{old_id}.jsonl"));
+    fs::write(&recent_path, "not parsed by indexed scan\n").expect("write recent rollout");
+    fs::write(&old_path, "not parsed by indexed scan\n").expect("write old rollout");
+
+    let database =
+        Connection::open(codex_home.join("state_5.sqlite")).expect("create Codex state index");
+    database
+        .execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                cwd TEXT NOT NULL,
+                title TEXT NOT NULL
+            );",
+        )
+        .expect("create threads table");
+    database
+        .execute(
+            "INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, title)
+             VALUES (?1, ?2, 100, 200, '/workspace/indexed', 'recent indexed title')",
+            params![recent_id, recent_path.display().to_string()],
+        )
+        .expect("insert recent indexed thread");
+    database
+        .execute(
+            "INSERT INTO threads (id, rollout_path, created_at, updated_at, cwd, title)
+             VALUES (?1, ?2, 50, 60, '/workspace/indexed', 'old indexed title')",
+            params![old_id, old_path.display().to_string()],
+        )
+        .expect("insert old indexed thread");
+    drop(database);
+
+    let conversations = super::scan_codex_conversations_for_cwd_since(
+        &codex_home,
+        Some(std::path::Path::new("/workspace/indexed")),
+        Some(150_000),
+    )
+    .expect("scan indexed recent conversations");
+    assert_eq!(conversations.len(), 1);
+    assert_eq!(conversations[0].session_id, recent_id);
+    assert_eq!(conversations[0].title, "recent indexed title");
+
+    fs::remove_dir_all(temp_dir).expect("remove indexed Codex fixture");
 }
 
 #[test]
@@ -1340,7 +1664,7 @@ mod removed_codex_command_env_tests {
 
     #[test]
     fn codex_command_env_script_preserves_https_proxy_domain() {
-        let proxy_url = "https://test-user:test-password@proxy.example.test:17891";
+        let proxy_url = "https://test-user:test-password@proxy.example.test:PORT";
         let script = render_terminal_command_env_script(
             &[
                 ("HTTP_PROXY".to_string(), proxy_url.to_string()),
@@ -1470,10 +1794,11 @@ fn claude_terminal_unset_env_clears_stale_model_family_values() {
         preset_name: Some("GLM".to_string()),
     };
     let presets = vec![auth_core::StoredClaudePreset {
+        interchange_source: None,
         id: "claude-a".to_string(),
         name: "MiniMax".to_string(),
-        saved_at: 0,
         provider_name: "MiniMax".to_string(),
+        saved_at: 1,
         base_url: "https://api.minimaxi.com/anthropic".to_string(),
         management_url: None,
         config_overrides: vec![auth_core::PresetConfigOverride {
@@ -1559,10 +1884,31 @@ fn terminal_error_queued_input_detection_only_counts_queue_after_error() {
 }
 
 #[test]
+fn terminal_error_matching_detects_retry_limit_429_by_short_signature() {
+    let tail = "■ exceeded retry limit, last status: 429 Too Many Requests";
+
+    assert_eq!(
+        terminal_tail_error_keyword(tail, &["last status: 429".to_string()]).as_deref(),
+        Some("last status: 429")
+    );
+}
+
+#[test]
 fn terminal_error_matching_handles_mid_word_terminal_wraps() {
     let keyword =
         "unexpected status 502 Bad Gateway: Upstream service temporarily unavailable, url:";
     let tail = "unexpected status 502 Bad Gateway: Upstream servi\nce temporarily unavailable, url: https://example.invalid";
+
+    assert_eq!(
+        terminal_tail_error_keyword(tail, &[keyword.to_string()]).as_deref(),
+        Some(keyword)
+    );
+}
+
+#[test]
+fn terminal_error_matching_detects_wrapped_model_busy_529_response() {
+    let keyword = "该模型当前访问量过大，请您稍后再试";
+    let tail = "■ unexpected status 529 <unknown status code>:\n[1305][该模型当前访问量过大，请您稍\n后再试][20260817113955263946d7b0074410], url:\nhttp://127.0.0.1:11111/api/codex-proxy/anthropic/v1/responses";
 
     assert_eq!(
         terminal_tail_error_keyword(tail, &[keyword.to_string()]).as_deref(),
@@ -1603,6 +1949,17 @@ fn terminal_error_matching_detects_openai_cybersecurity_block() {
                 | Some("extra caution with cybersecurity requests")
         ),
         "expected a cybersecurity-block signature to match, got {matched:?}"
+    );
+}
+
+#[test]
+fn terminal_error_matching_detects_openrouter_web_search_failure() {
+    let keyword = "Server tool \\\"openrouter:web_search\\\" failed".to_string();
+    let tail = r#"{"error":{"code":"400","message":"Server tool \"openrouter:web_search\" failed: invalid request (400)","type":"invalid_request_error"}}"#;
+
+    assert_eq!(
+        terminal_tail_error_keyword(tail, &[keyword]).as_deref(),
+        Some("Server tool \\\"openrouter:web_search\\\" failed")
     );
 }
 
@@ -1698,6 +2055,11 @@ fn terminal_auto_continue_cooldown_blocks_until_interval_expires() {
     assert_eq!(auto_continue_retry_at_millis(None, 60_000, 30_000), None);
     assert_eq!(auto_continue_retry_at_millis(Some(1_000), 60_000, 30_000), Some(61_000));
     assert_eq!(auto_continue_retry_at_millis(Some(1_000), 60_000, 61_000), None);
+}
+
+#[test]
+fn terminal_auto_continue_full_day_window_is_always_active() {
+    assert!(now_within_active_window("00:00-24:00"));
 }
 
 #[test]
@@ -1809,6 +2171,7 @@ fn terminal_auto_continue_schedules_retrying_quota_error_with_prior_continue() {
     let sessions = vec![super::TerminalSessionInfo {
         id: "s429".to_string(),
         name: "glm_retry".to_string(),
+        previous_names: Vec::new(),
         title: None,
         user_name: default_terminal_user_name(),
         codex_api_preset_name: "GLM".to_string(),
@@ -1816,6 +2179,7 @@ fn terminal_auto_continue_schedules_retrying_quota_error_with_prior_continue() {
         origin: super::TerminalSessionOrigin::Normal,
         owner_key: String::new(),
         path: "/tmp/workspace".to_string(),
+        icon_project_path: "/tmp/workspace".to_string(),
         display_path: "/tmp/workspace".to_string(),
         alive: true,
         connected: true,
@@ -1823,6 +2187,7 @@ fn terminal_auto_continue_schedules_retrying_quota_error_with_prior_continue() {
         activity_state: "retrying".to_string(),
         activity_label: "重试中".to_string(),
         activity_agent: Some("Codex".to_string()),
+        model_family: String::new(),
         activity_error_keyword: Some("last status: 429".to_string()),
         activity_error_signature: Some("quota-signature".to_string()),
         activity_error_continue_sent: true,
@@ -1832,6 +2197,13 @@ fn terminal_auto_continue_schedules_retrying_quota_error_with_prior_continue() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     }];
 
     let schedules = collect_terminal_auto_continue_schedules(&sessions, 0);
@@ -1840,6 +2212,62 @@ fn terminal_auto_continue_schedules_retrying_quota_error_with_prior_continue() {
     assert_eq!(schedules[0].0, "s429");
     assert_eq!(schedules[0].1.reset_at, reset_at);
     assert_eq!(schedules[0].1.signature, "quota-signature");
+}
+
+#[test]
+fn quota_retry_preflight_detects_glm_from_recent_terminal_model() {
+    let glm_tail = "■ exceeded retry limit, last status: 429 Too Many Requests\n\n›\n\nGLM-5.3 xhigh · Context 0% used";
+    assert!(terminal_recent_output_uses_glm_model(glm_tail));
+
+    let stale_history =
+        "GLM-5.3 was discussed earlier\n1\n2\n3\n4\n5\n6\n7\ngpt-5.6 xhigh · Context 0% used";
+    assert!(!terminal_recent_output_uses_glm_model(stale_history));
+}
+
+#[test]
+fn terminal_model_family_probe_uses_lossy_utf8_last_eight_lines_and_priority() {
+    assert_eq!(terminal_model_family_from_snapshot(None), "");
+    assert_eq!(terminal_model_family_from_snapshot(Some(b"")), "");
+    assert_eq!(terminal_model_family_from_snapshot(Some(b"ordinary output")), "");
+    assert_eq!(
+        terminal_model_family_from_snapshot(Some(b"DEEPSEEK-v3\n1\n2\n3\n4\n5\n6\n7\n")),
+        "deepseek"
+    );
+    assert_eq!(terminal_model_family_from_snapshot(Some(b"GLM-5.3")), "glm");
+    assert_eq!(terminal_model_family_from_snapshot(Some(b"deepseek-v3\nGLM-5.3")), "deepseek");
+    let stale = b"deepseek-old\n1\n2\n3\n4\n5\n6\n7\nGLM-5.3";
+    assert_eq!(terminal_model_family_from_snapshot(Some(stale)), "glm");
+    assert_eq!(
+        terminal_model_family_from_snapshot(Some(&[0xff, b' ', b'G', b'L', b'M', b'-', b'1'])),
+        "glm"
+    );
+}
+
+#[test]
+fn quota_retry_preflight_reads_429_from_tail_not_only_matched_keyword() {
+    let tail = "■ exceeded retry limit, last status: 429 Too Many Requests\n\n›\n\nGLM-5.3 xhigh · Context 6% used";
+    assert!(terminal_recent_output_has_quota_error(tail, 20));
+    assert!(!terminal_recent_output_has_quota_error(
+        "ordinary upstream disconnect\nGLM-5.3 xhigh · Context 6% used",
+        20,
+    ));
+}
+
+#[test]
+fn session_list_uses_shared_glm_reset_when_preset_metadata_is_stale() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    manager
+        .quota_reset_cache
+        .record_latest_zhipu_reset("2026-08-15 16:16:04".to_string());
+
+    assert_eq!(
+        manager.glm_model_quota_reset_from_output(
+            b"exceeded retry limit, last status: 429\nGLM-5.3 xhigh | Context 0% used"
+        ),
+        Some("2026-08-15 16:16:04".to_string())
+    );
+
+    let _ = fs::remove_dir_all(base_dir);
 }
 
 #[test]
@@ -1853,10 +2281,11 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
     );
     manager.update_api_preset_snapshot(vec![
         StoredApiPreset {
+            interchange_source: None,
             id: "api-primary".to_string(),
             name: "智谱5.2 ZCODE API".to_string(),
-            saved_at: 1,
             provider_name: String::new(),
+            saved_at: 1,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
             management_url: None,
             wire_api: None,
@@ -1873,13 +2302,15 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
             access_token: String::new(),
             account_id: String::new(),
             access_mode: None,
+            favorite: false,
             switch_count: 0,
         },
         StoredApiPreset {
+            interchange_source: None,
             id: "api-1m".to_string(),
             name: "智谱5.2 ZCODE API 1M".to_string(),
-            saved_at: 2,
             provider_name: String::new(),
+            saved_at: 2,
             base_url: "https://open.bigmodel.cn/api/coding/paas/v4".to_string(),
             management_url: None,
             wire_api: None,
@@ -1896,12 +2327,14 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
             access_token: String::new(),
             account_id: String::new(),
             access_mode: None,
+            favorite: false,
             switch_count: 0,
         },
     ]);
     let mut sessions = vec![super::TerminalSessionInfo {
         id: "s2018".to_string(),
         name: "ZCode_1".to_string(),
+        previous_names: Vec::new(),
         title: None,
         user_name: default_terminal_user_name(),
         codex_api_preset_name: "智谱5.2 ZCODE API 1M".to_string(),
@@ -1909,6 +2342,7 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
         origin: super::TerminalSessionOrigin::Normal,
         owner_key: String::new(),
         path: "/home/third_party/ZCode".to_string(),
+        icon_project_path: "/home/third_party/ZCode".to_string(),
         display_path: "/home/third_party/ZCode".to_string(),
         alive: true,
         connected: true,
@@ -1916,6 +2350,7 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
         activity_state: "error".to_string(),
         activity_label: "错误".to_string(),
         activity_agent: Some("Codex".to_string()),
+        model_family: String::new(),
         activity_error_keyword: Some("429 Too Many Requests".to_string()),
         activity_error_signature: Some("quota-signature".to_string()),
         activity_error_continue_sent: false,
@@ -1925,6 +2360,13 @@ fn zhipu_quota_reset_backfill_uses_base_url_for_session_list_schedules() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     }];
 
     manager.backfill_zhipu_quota_reset_times_for_sessions(&mut sessions);
@@ -1946,6 +2388,20 @@ fn terminal_auto_continue_cron_entry_preserves_seconds_with_sleep() {
 
     assert_eq!(entry.fields.split_whitespace().count(), 5);
     assert_eq!(entry.sleep_seconds, 11);
+}
+
+#[test]
+fn terminal_auto_continue_cron_uses_the_terminal_socket() {
+    let script = terminal_auto_continue_cron_script(
+        "webclx-auto-continue:s41:test",
+        "s41",
+        "quota",
+        "2026-08-19 18:00:00",
+        0,
+    );
+
+    assert!(script.contains("TMUX_SOCKET=\"webclx_s41\""));
+    assert!(script.contains("tmux -L \"$TMUX_SOCKET\" capture-pane -p -t \"$TMUX_TARGET\" -S -80"));
 }
 
 #[test]
@@ -2042,6 +2498,247 @@ fn terminal_working_status_detection_matches_claude_spinner() {
 }
 
 #[test]
+fn terminal_working_status_detection_matches_codebuddy_progress() {
+    for status in [
+        "∴ Thinking...",
+        "✷ Thinking… (0s)",
+        "✸ 检查终端状态… (31s · waiting for response)",
+        "✻ 执行测试… (120s · tool execution · ctrl+t to show todos)",
+        "✶ 检查结果... (2s · ↑ 1.2k tokens)",
+    ] {
+        assert!(terminal_tail_has_working_status(status), "{status}");
+    }
+    for frame in ['✶', '✸', '✹', '✺', '✹', '✷'] {
+        let status = format!("{frame} 检查结果… (0s)");
+        assert!(terminal_tail_has_working_status(&status), "{status}");
+    }
+    for status in [
+        "∴ Thought",
+        "✔ Worked for 8m 15s",
+        "✸ 检查结果… (completed)",
+        "> 检查结果… (31s)",
+        "The agent is thinking... (31s)",
+    ] {
+        assert!(!terminal_tail_has_working_status(status), "{status}");
+    }
+}
+
+#[test]
+fn terminal_working_status_detection_matches_agy_progress() {
+    for status in [
+        "Thinking...",
+        "⠋ Thinking... (31s)",
+        "Working... (2m 11s, esc to cancel)",
+        "Generating… (esc to cancel)",
+        "esc to cancel",
+        "Press esc to interrupt generation.",
+        "● Running (bash scripts/build-unified-release.sh) (ctrl+o to expand)",
+        "● Running (go test -tags unit ./internal/service ./internal/handler/admin) (ctrl+o to expand)",
+        "● Running (git status -s)",
+        "  ● [19:31:02] bash scripts/build-unified-release.sh running",
+        "● [19:31:02] bash scripts/build-unified-release.sh running",
+        "[19:31:02] bash scripts/build-unified-release.sh running",
+    ] {
+        assert!(terminal_tail_has_working_status(status), "{status}");
+    }
+    for status in [
+        "○ Thought for 7.0s (The deployment is queued...)",
+        "○ Thought for 7.1s (Internal service and admin handler tests passed, as did the frontend account management and scheduling tests. The next step involves reviewing the deployment checklist to ensure all code changes are finalized f...)",
+        "▸ Thought for 3s, 261 tokens",
+        "? for shortcuts    Gemini 3.8 Flash · high",
+        "? for shortcuts",
+        "Working directory: /tmp/project",
+        "Tell the user to press esc to cancel",
+        "> Thinking...",
+        "┃ esc to dismiss",
+        "● Ran (git status -s)",
+        "● Ran (go test -tags unit ./internal/service ./internal/handler/admin) (ctrl+o to expand)",
+        "● Ran (bash scripts/build-unified-release.sh) (ctrl+o to expand)",
+    ] {
+        assert!(!terminal_tail_has_working_status(status), "{status}");
+    }
+}
+
+#[test]
+fn terminal_working_status_detection_matches_agy_tool_execution_and_background_status() {
+    let running_snapshot = r#"
+● Ran (go test -tags unit ./internal/service ./internal/handler/admin) (ctrl+o to expand)
+
+  I will wait for the backend tests to complete.
+
+○ Thought for 7.1s (Internal service and admin handler tests passed, as did the frontend account management and scheduling tests. The next step involves reviewing the deployment checklist to ensure all code changes are finalized f...)
+● Ran (git status -s)
+● Running (bash scripts/build-unified-release.sh) (ctrl+o to expand)
+
+  I will wait for the unified release build to complete.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ● [19:31:02] bash scripts/build-unified-release.sh running
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                       
+"#;
+    assert!(terminal_working_status_match_from_snapshot(running_snapshot.as_bytes(), 10));
+
+    // When the background command finishes, agy removes the bottom statusline
+    // and updates Running to Ran.
+    let finished_snapshot = r#"
+● Ran (go test -tags unit ./internal/service ./internal/handler/admin) (ctrl+o to expand)
+
+  I will wait for the backend tests to complete.
+
+○ Thought for 7.1s (Internal service and admin handler tests passed, as did the frontend account management and scheduling tests. The next step involves reviewing the deployment checklist to ensure all code changes are finalized f...)
+● Ran (git status -s)
+● Ran (bash scripts/build-unified-release.sh) (ctrl+o to expand)
+
+  I will wait for the unified release build to complete.
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+>
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+? for shortcuts                       
+"#;
+    assert!(!terminal_working_status_match_from_snapshot(finished_snapshot.as_bytes(), 10));
+}
+
+#[test]
+fn terminal_working_status_detection_prefers_the_latest_turn_status() {
+    assert!(!terminal_tail_has_working_status("∴ Thinking...\n✔ Worked for 8m 15s\n>"));
+    assert!(terminal_tail_has_working_status(
+        "✔ Worked for 8m 15s\n> Continue\n✻ 检查结果… (31s)"
+    ));
+}
+
+#[test]
+fn terminal_working_status_detection_ignores_unused_pane_rows() {
+    let padding = "\n   \n".repeat(30);
+    let snapshot = format!("∴ Thinking...\n────\n>\n────\npermissions on{padding}");
+    assert!(terminal_working_status_match_from_snapshot(snapshot.as_bytes(), 10));
+
+    let snapshot = format!("✔ Worked for 8m 15s\n────\n>\n────\npermissions on{padding}");
+    assert!(!terminal_working_status_match_from_snapshot(snapshot.as_bytes(), 10));
+    assert!(terminal_worked_status_match_from_snapshot(snapshot.as_bytes(), 10));
+
+    let snapshot = format!("∴ Thinking...\n{}", "newer output\n".repeat(10));
+    assert!(!terminal_working_status_match_from_snapshot(snapshot.as_bytes(), 10));
+}
+
+#[test]
+fn terminal_agent_activity_preserves_working_during_output_pauses() {
+    for (agent, status, completion) in [
+        ("CodeBuddy", "∴ Thinking...", "✔ Worked for 8m 15s"),
+        ("CodeBuddy", "✸ 执行测试… (120s · tool execution)", "✔ Worked for 2m"),
+        ("AGY", "Thinking... (31s)", "○ Thought for 31s\n? for shortcuts"),
+        ("AGY", "esc to cancel", "? for shortcuts    Gemini 3.8 Flash · high"),
+    ] {
+        for last_viewed_output_at in [0, 42] {
+            let stored = stored_test_terminal_session("agent-paused-output");
+            let mut state = TerminalState::default();
+            state
+                .sessions_by_id
+                .insert(stored.id.clone(), stored.clone());
+            state.output_observations.insert(
+                stored.id.clone(),
+                super::TerminalOutputObservation {
+                    fingerprint: Some(7),
+                    last_fingerprint_probe_sequence: 1,
+                    rebaseline_after_restore: false,
+                    last_output_at: 42,
+                    last_viewed_output_at,
+                },
+            );
+            let snapshot = format!("{status}\n────\n>\n────{}", "\n \n".repeat(30));
+            let mut probe = TerminalActivityProbe {
+                session_id: stored.id.clone(),
+                live_last_output_at: 42,
+                snapshot_fingerprint: Some(7),
+                snapshot_probe_sequence: 2,
+                agent_activity: TerminalAgentActivity {
+                    agents: vec![agent.to_string()],
+                    orphaned_agents: Vec::new(),
+                },
+                working_status: terminal_working_status_match_from_snapshot(
+                    snapshot.as_bytes(),
+                    10,
+                ),
+                cline_idle_prompt: false,
+                error_match: None,
+                worked_status: terminal_worked_status_match_from_snapshot(snapshot.as_bytes(), 10),
+                pending_build: false,
+                model_family: String::new(),
+            };
+
+            // Repeated identical probes are already outside the output window;
+            // viewing output must not clear a still-active turn either.
+            for sequence in 2..=4 {
+                probe.snapshot_probe_sequence = sequence;
+                let (sessions, _) = collect_session_infos_from_probes_locked(
+                    &mut state,
+                    &stored.path,
+                    &stored.path,
+                    vec![probe.clone()],
+                );
+                assert_eq!(sessions[0].activity_state, "working", "{agent}: {status}");
+                assert_eq!(sessions[0].activity_agent.as_deref(), Some(agent));
+                assert!(sessions[0].busy);
+                assert_eq!(sessions[0].last_output_at, 42);
+            }
+
+            probe.working_status =
+                terminal_working_status_match_from_snapshot(completion.as_bytes(), 10);
+            probe.worked_status =
+                terminal_worked_status_match_from_snapshot(completion.as_bytes(), 10);
+            probe.snapshot_probe_sequence = 5;
+            let (sessions, _) = collect_session_infos_from_probes_locked(
+                &mut state,
+                &stored.path,
+                &stored.path,
+                vec![probe],
+            );
+            assert_eq!(
+                sessions[0].activity_state,
+                if last_viewed_output_at == 0 {
+                    "completed"
+                } else {
+                    "agent"
+                },
+                "{agent}: {completion}",
+            );
+            assert!(!sessions[0].busy);
+        }
+    }
+}
+
+#[test]
+fn terminal_working_status_detection_recognizes_cline_idle_prompt() {
+    assert!(!terminal_tail_has_working_status(
+        "▶ Thinking: ...处理中...\n\n❯ Plan something..."
+    ));
+    assert!(!terminal_tail_has_working_status("❯ Plan something..."));
+    assert!(!terminal_tail_has_working_status("❯ Ask anything..."));
+    assert!(!terminal_tail_has_working_status("❯ Ask anything…"));
+    assert!(!terminal_tail_has_working_status(
+        "▶ Thinking: 处理中…
+❯ Ask anything...
+Space Bunny Alpha (free) (xhigh) ██████ (44,733) $0.00  ○ Plan ● Act (Tab)
+codes (main) | 410 files +19083 -110717
+⏵⏵ Auto-approve all enabled (Shift+Tab)"
+    ));
+    assert!(!terminal_tail_has_working_status("Thinking about the answer…"));
+    // A visible input placeholder must not suppress real ongoing work.
+    assert!(terminal_tail_has_working_status(
+        "✻ Thinking…
+❯ Ask anything..."
+    ));
+    assert!(terminal_tail_has_working_status(
+        "• Working (12s • esc to interrupt)
+❯ Plan something..."
+    ));
+    assert!(terminal_tail_has_working_status("✻ Thinking..."));
+}
+
+#[test]
 fn terminal_worked_status_detection_matches_codex_completion_line() {
     assert!(terminal_tail_has_worked_status("› Update code\n\n✓ Worked for 7m 10s"));
     assert!(terminal_tail_has_worked_status("Worked for 42s"));
@@ -2077,6 +2774,7 @@ fn duplicate_manual_name_is_rejected_for_other_sessions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2086,6 +2784,13 @@ fn duplicate_manual_name_is_rejected_for_other_sessions() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2095,6 +2800,7 @@ fn duplicate_manual_name_is_rejected_for_other_sessions() {
             path: workspace_dir,
             user_name: default_terminal_user_name(),
             name: "custom".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2104,6 +2810,13 @@ fn duplicate_manual_name_is_rejected_for_other_sessions() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
 
@@ -2112,6 +2825,46 @@ fn duplicate_manual_name_is_rejected_for_other_sessions() {
     assert!(error.to_string().contains("已存在"), "unexpected error: {error}");
     ensure_unique_session_name_locked(&state, "workspace_1", Some("s1"))
         .expect("same session should keep its current name");
+}
+
+#[test]
+fn renamed_terminal_preserves_old_name_alias_and_delivery_notice() {
+    let mut state = TerminalState::default();
+    state.sessions_by_id.insert(
+        "s1".to_string(),
+        StoredTerminalSession {
+            id: "s1".to_string(),
+            path: std::path::PathBuf::from("/tmp/workspace"),
+            user_name: default_terminal_user_name(),
+            name: "old".to_string(),
+            previous_names: Vec::new(),
+            title: String::new(),
+            codex_api_preset_name: String::new(),
+            codex_api_base_url: String::new(),
+            origin: super::TerminalSessionOrigin::Normal,
+            owner_key: String::new(),
+            manually_renamed: false,
+            idle: false,
+            created_at: 1,
+            last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
+        },
+    );
+
+    let renamed = super::manager::rename_session_for_test(&mut state, "s1", "new").unwrap();
+    assert_eq!(renamed.name, "new");
+    assert_eq!(renamed.previous_names, vec!["old".to_string()]);
+    assert_eq!(state.previous_terminal_names.get("old").map(String::as_str), Some("s1"));
+
+    let resolved =
+        super::manager::resolve_session_target_for_test(&mut state, "old", None).unwrap();
+    assert_eq!(resolved, ("s1".to_string(), "new".to_string()));
 }
 
 #[test]
@@ -2125,6 +2878,7 @@ fn duplicate_manual_auto_index_is_rejected_for_other_sessions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1_新想法".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2134,6 +2888,13 @@ fn duplicate_manual_auto_index_is_rejected_for_other_sessions() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2143,6 +2904,7 @@ fn duplicate_manual_auto_index_is_rejected_for_other_sessions() {
             path: workspace_dir,
             user_name: default_terminal_user_name(),
             name: "custom".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2152,6 +2914,13 @@ fn duplicate_manual_auto_index_is_rejected_for_other_sessions() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
 
@@ -2171,6 +2940,7 @@ fn recent_opened_sessions_sort_first() {
             path: path.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2180,6 +2950,13 @@ fn recent_opened_sessions_sort_first() {
             idle: false,
             created_at: 10,
             last_opened_at: 20,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2189,6 +2966,7 @@ fn recent_opened_sessions_sort_first() {
             path: path.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_2".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2198,6 +2976,13 @@ fn recent_opened_sessions_sort_first() {
             idle: false,
             created_at: 11,
             last_opened_at: 40,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2207,6 +2992,7 @@ fn recent_opened_sessions_sort_first() {
             path,
             user_name: default_terminal_user_name(),
             name: "workspace_3".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2216,12 +3002,49 @@ fn recent_opened_sessions_sort_first() {
             idle: false,
             created_at: 30,
             last_opened_at: 40,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
 
     let mut session_ids = vec!["s1".to_string(), "s2".to_string(), "s3".to_string()];
     sort_session_ids_by_recent_activity(&state, &mut session_ids);
     assert_eq!(session_ids, vec!["s3", "s2", "s1"]);
+}
+
+#[test]
+fn grouped_sessions_follow_their_recently_activated_partner() {
+    let mut state = TerminalState::default();
+    let path = std::path::PathBuf::from("/tmp/workspace");
+    let make_session = |state: &mut TerminalState,
+                        id: &str,
+                        created_at: u64,
+                        last_opened_at: u64,
+                        group_token: &str| {
+        let mut session = stored_test_terminal_session(id);
+        session.path = path.clone();
+        session.created_at = created_at;
+        session.last_opened_at = last_opened_at;
+        session.group_token = group_token.to_string();
+        state.sessions_by_id.insert(id.to_string(), session);
+    };
+
+    make_session(&mut state, "s1", 10, 20, "");
+    make_session(&mut state, "s2", 11, 100, "pair-a");
+    make_session(&mut state, "s3", 30, 40, "pair-a");
+
+    let mut session_ids = vec!["s1".to_string(), "s2".to_string(), "s3".to_string()];
+    sort_session_ids_by_recent_activity(&state, &mut session_ids);
+    assert_eq!(
+        session_ids,
+        vec!["s2", "s3", "s1"],
+        "opening s2 should move its grouped follower beside it"
+    );
 }
 
 #[test]
@@ -2234,6 +3057,7 @@ fn opening_an_idle_session_does_not_restore_it() {
             path: std::path::PathBuf::from("/tmp/workspace"),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2243,6 +3067,13 @@ fn opening_an_idle_session_does_not_restore_it() {
             idle: true,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
 
@@ -2274,6 +3105,7 @@ fn collect_session_infos_updates_title_without_structural_notify() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2283,6 +3115,13 @@ fn collect_session_infos_updates_title_without_structural_notify() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
     let live_session = build_live_session(&stored);
     live_session
@@ -2333,6 +3172,7 @@ fn collect_session_infos_applies_precomputed_activity_probe() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2342,6 +3182,13 @@ fn collect_session_infos_applies_precomputed_activity_probe() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
     let live_session = build_live_session(&stored);
     live_session
@@ -2368,9 +3215,11 @@ fn collect_session_infos_applies_precomputed_activity_probe() {
         snapshot_probe_sequence: 1,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: false,
         pending_build: false,
+        model_family: String::new(),
     }];
     let (sessions, updated) = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2387,6 +3236,259 @@ fn collect_session_infos_applies_precomputed_activity_probe() {
 }
 
 #[test]
+fn activity_probe_reuses_cached_snapshot_within_seq_attachment_and_age() {
+    // 假会话 id 用非 `s<digits>` 形式，避免与并行测试创建的真实
+    // `webclx_s{n}` tmux 会话同名导致 capture 拿到真实 pane 字节。
+    let stored = stored_test_terminal_session("probe-fake-a");
+    let live = build_live_session(&stored);
+    live.next_output_seq.store(5, Ordering::SeqCst);
+
+    let cache = Mutex::new(ProbeSnapshotCache::new());
+    cache.lock().expect("probe snapshot cache poisoned").insert(
+        stored.id.clone(),
+        probe_snapshot_cache_entry(5, live.attached_at, Instant::now(), Some(0x5eed)),
+    );
+
+    // seq + attachment + 年龄全部匹配：命中缓存，capture 闭包不得执行。
+    let captures = AtomicUsize::new(0);
+    let (snapshot, fingerprint) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || {
+            captures.fetch_add(1, Ordering::SeqCst);
+            Some(b"fresh pane".to_vec())
+        });
+    assert_eq!(captures.load(Ordering::SeqCst), 0);
+    assert_eq!(snapshot.as_deref(), Some(b"cached pane bytes".as_ref()));
+    assert_eq!(fingerprint, Some(0x5eed));
+
+    // 缓存命中仍每轮重跑 agent_detector 与快照派生匹配（working/error/
+    // worked/model_family）：把缓存快照换成含 Working 行的内容验证派生。
+    cache.lock().unwrap().get_mut(&stored.id).unwrap().snapshot =
+        Some("Working (3s • esc to interrupt)\n".as_bytes().to_vec());
+    let probes = collect_session_activity_probes(
+        vec![(stored.id.clone(), Some(live.clone()))],
+        80,
+        &[],
+        &[],
+        true,
+        &cache,
+    );
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0].snapshot_fingerprint, Some(0x5eed));
+    assert!(probes[0].working_status);
+    assert!(probes[0].error_match.is_none());
+    assert!(!probes[0].worked_status);
+    // agent_detector 无条件执行：假会话无真实 agent 进程，探测结果为空。
+    assert!(probes[0].agent_activity.agents.is_empty());
+}
+
+fn probe_snapshot_cache_entry(
+    live_output_seq: u64,
+    attachment_started_at: Instant,
+    captured_at: Instant,
+    fingerprint: Option<u64>,
+) -> ProbeSnapshotCacheEntry {
+    ProbeSnapshotCacheEntry {
+        live_output_seq,
+        attachment_started_at,
+        captured_at,
+        error_line_limit: 80,
+        snapshot: Some(b"cached pane bytes".to_vec()),
+        snapshot_fingerprint: fingerprint,
+    }
+}
+
+#[test]
+fn activity_probe_snapshot_reuse_is_bounded_and_per_session() {
+    let stored = stored_test_terminal_session("probe-fake-b");
+    let live = build_live_session(&stored);
+    live.next_output_seq.store(7, Ordering::SeqCst);
+
+    let cache = Mutex::new(ProbeSnapshotCache::new());
+    let captures = AtomicUsize::new(0);
+    let probe = |live_session: Option<&Arc<super::TerminalSession>>, limit: u32| {
+        probe_activity_pane_snapshot_with(&cache, &stored.id, live_session, limit, || {
+            captures.fetch_add(1, Ordering::SeqCst);
+            Some(b"fresh pane".to_vec())
+        })
+    };
+
+    // 条目年龄超过上限：重新抓取。
+    let expired = Instant::now()
+        .checked_sub(PROBE_SNAPSHOT_MAX_AGE + Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    cache.lock().unwrap().insert(
+        stored.id.clone(),
+        probe_snapshot_cache_entry(7, live.attached_at, expired, Some(1)),
+    );
+    let (snapshot, _) = probe(Some(&live), 80);
+    assert_eq!(captures.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot.as_deref(), Some(b"fresh pane".as_ref()));
+
+    // seq 推进：重新抓取。
+    live.next_output_seq.store(8, Ordering::SeqCst);
+    let _ = probe(Some(&live), 80);
+    assert_eq!(captures.load(Ordering::SeqCst), 2);
+
+    // attachment 更换（同 id 新实例）：重新抓取。
+    let replaced = build_live_session_with_redraw_state(
+        &stored,
+        live.attached_at + Duration::from_millis(1),
+        true,
+    );
+    replaced.next_output_seq.store(8, Ordering::SeqCst);
+    let _ = probe(Some(&replaced), 80);
+    assert_eq!(captures.load(Ordering::SeqCst), 3);
+
+    // error_line_limit 变化：重新抓取（它同时决定 capture 深度）。
+    let _ = probe(Some(&replaced), 200);
+    assert_eq!(captures.load(Ordering::SeqCst), 4);
+
+    // 其它会话的条目按 session_id 隔离：本会话命中自己的新条目（不再
+    // capture），probe-fake-c 的同名 attachment/seq 条目不被命中也不被改写。
+    cache.lock().unwrap().insert(
+        "probe-fake-c".to_string(),
+        probe_snapshot_cache_entry(8, replaced.attached_at, Instant::now(), Some(9)),
+    );
+    let (snapshot, fingerprint) = probe(Some(&replaced), 200);
+    assert_eq!(captures.load(Ordering::SeqCst), 4);
+    assert_eq!(snapshot.as_deref(), Some(b"fresh pane".as_ref()));
+    assert!(fingerprint.is_some());
+    assert!(
+        cache
+            .lock()
+            .unwrap()
+            .get("probe-fake-c")
+            .is_some_and(|entry| entry.snapshot_fingerprint == Some(9))
+    );
+}
+
+#[test]
+fn activity_probe_snapshot_seq_change_during_capture_is_not_cached() {
+    let stored = stored_test_terminal_session("probe-fake-d");
+    let live = build_live_session(&stored);
+    live.next_output_seq.store(5, Ordering::SeqCst);
+    let cache = Mutex::new(ProbeSnapshotCache::new());
+
+    let live_for_capture = live.clone();
+    let (snapshot, _) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || {
+            // 抓取期间 PTY 又产生输出：seq 推进意味着快照不再是当前 pane。
+            live_for_capture.next_output_seq.store(6, Ordering::SeqCst);
+            Some(b"raced pane".to_vec())
+        });
+    assert_eq!(snapshot.as_deref(), Some(b"raced pane".as_ref()));
+    assert!(
+        cache.lock().unwrap().get(&stored.id).is_none(),
+        "seq moved during capture must not populate the cache"
+    );
+
+    // seq 稳定后再次抓取正常写入缓存。
+    let (snapshot, _) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || {
+            Some(b"stable pane".to_vec())
+        });
+    assert_eq!(snapshot.as_deref(), Some(b"stable pane".as_ref()));
+    assert!(cache.lock().unwrap().get(&stored.id).is_some());
+}
+
+#[test]
+fn activity_probe_failed_capture_clears_stale_entry_and_retries() {
+    let stored = stored_test_terminal_session("probe-fake-e");
+    let live = build_live_session(&stored);
+    live.next_output_seq.store(3, Ordering::SeqCst);
+    let cache = Mutex::new(ProbeSnapshotCache::new());
+    // seq 不一致的旧条目：不可命中，但抓取失败时必须清除。
+    cache.lock().unwrap().insert(
+        stored.id.clone(),
+        probe_snapshot_cache_entry(9, live.attached_at, Instant::now(), Some(2)),
+    );
+
+    let (snapshot, fingerprint) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || None);
+    assert!(snapshot.is_none());
+    assert_eq!(fingerprint, None);
+    // 失败清除旧条目：下一轮必须重试，不得复用更旧的快照。
+    assert!(cache.lock().unwrap().get(&stored.id).is_none());
+
+    let attempts = AtomicUsize::new(0);
+    let (snapshot, _) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Some(b"recovered pane".to_vec())
+        });
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert!(snapshot.is_some());
+    assert!(cache.lock().unwrap().get(&stored.id).is_some());
+}
+
+#[test]
+fn activity_probe_snapshot_never_reuses_for_detached_or_zero_seq() {
+    let stored = stored_test_terminal_session("probe-fake-f");
+    // seq=0 的 live attachment：无有效水位线，永不复用也不写缓存。
+    let live = build_live_session(&stored);
+    let cache = Mutex::new(ProbeSnapshotCache::new());
+    cache.lock().unwrap().insert(
+        stored.id.clone(),
+        probe_snapshot_cache_entry(0, live.attached_at, Instant::now(), Some(4)),
+    );
+
+    let captures = AtomicUsize::new(0);
+    let (snapshot, _) =
+        probe_activity_pane_snapshot_with(&cache, &stored.id, Some(&live), 80, || {
+            captures.fetch_add(1, Ordering::SeqCst);
+            Some(b"fresh pane".to_vec())
+        });
+    assert_eq!(captures.load(Ordering::SeqCst), 1);
+    assert_eq!(snapshot.as_deref(), Some(b"fresh pane".as_ref()));
+    // seq=0 不写缓存：条目未被命中，抓取结果为新快照。
+    assert!(
+        cache
+            .lock()
+            .unwrap()
+            .get(&stored.id)
+            .is_none_or(|entry| entry.snapshot.as_deref() != Some(b"fresh pane".as_ref()))
+    );
+
+    // detached（live=None）不复用并清掉可能过期的条目。
+    cache.lock().unwrap().insert(
+        stored.id.clone(),
+        probe_snapshot_cache_entry(0, Instant::now(), Instant::now(), Some(5)),
+    );
+    let (snapshot, _) = probe_activity_pane_snapshot_with(&cache, &stored.id, None, 80, || {
+        captures.fetch_add(1, Ordering::SeqCst);
+        Some(b"detached pane".to_vec())
+    });
+    assert_eq!(captures.load(Ordering::SeqCst), 2);
+    assert_eq!(snapshot.as_deref(), Some(b"detached pane".as_ref()));
+    assert!(cache.lock().unwrap().get(&stored.id).is_none());
+}
+
+#[test]
+fn purge_session_runtime_state_drops_probe_snapshot_cache_entry() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    manager
+        .probe_snapshot_cache
+        .lock()
+        .expect("probe snapshot cache poisoned")
+        .insert(
+            "probe-fake-a".to_string(),
+            probe_snapshot_cache_entry(0, Instant::now(), Instant::now(), Some(1)),
+        );
+
+    manager.purge_session_runtime_state("probe-fake-a");
+
+    assert!(
+        manager
+            .probe_snapshot_cache
+            .lock()
+            .expect("probe snapshot cache poisoned")
+            .get("probe-fake-a")
+            .is_none()
+    );
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
 fn pending_build_overrides_unviewed_agent_completion() {
     let workspace_dir = std::path::PathBuf::from("/tmp/webclx-terminal-pending-build-test");
     let stored = StoredTerminalSession {
@@ -2394,6 +3496,7 @@ fn pending_build_overrides_unviewed_agent_completion() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2403,6 +3506,13 @@ fn pending_build_overrides_unviewed_agent_completion() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
     let mut state = TerminalState::default();
     state
@@ -2419,9 +3529,11 @@ fn pending_build_overrides_unviewed_agent_completion() {
         snapshot_probe_sequence: 1,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: true,
         pending_build: true,
+        model_family: "deepseek".to_string(),
     }];
     let (sessions, _) = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2432,7 +3544,228 @@ fn pending_build_overrides_unviewed_agent_completion() {
 
     assert_eq!(sessions[0].activity_state, "building");
     assert_eq!(sessions[0].activity_label, "编译中");
+    assert_eq!(sessions[0].model_family, "");
     assert!(sessions[0].busy);
+}
+
+#[test]
+fn orphaned_agent_remains_abnormal_after_output_is_viewed() {
+    let workspace_dir = std::path::PathBuf::from("/tmp/webclx-terminal-orphaned-agent-test");
+    let stored = StoredTerminalSession {
+        id: "s1".to_string(),
+        path: workspace_dir.clone(),
+        user_name: default_terminal_user_name(),
+        name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
+        title: String::new(),
+        codex_api_preset_name: String::new(),
+        codex_api_base_url: String::new(),
+        origin: super::TerminalSessionOrigin::Normal,
+        owner_key: String::new(),
+        manually_renamed: false,
+        idle: false,
+        created_at: 1,
+        last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
+    };
+    let mut state = TerminalState::default();
+    state
+        .sessions_by_id
+        .insert(stored.id.clone(), stored.clone());
+    state
+        .sessions_by_path
+        .insert(workspace_dir.clone(), vec![stored.id.clone()]);
+    state.output_observations.insert(
+        stored.id.clone(),
+        super::TerminalOutputObservation {
+            fingerprint: Some(7),
+            last_fingerprint_probe_sequence: 1,
+            rebaseline_after_restore: false,
+            last_output_at: 42,
+            last_viewed_output_at: 42,
+        },
+    );
+
+    let probes = vec![TerminalActivityProbe {
+        session_id: stored.id.clone(),
+        live_last_output_at: 42,
+        snapshot_fingerprint: Some(7),
+        snapshot_probe_sequence: 2,
+        agent_activity: TerminalAgentActivity {
+            agents: vec!["Codex".to_string()],
+            orphaned_agents: vec!["Codex".to_string()],
+        },
+        working_status: false,
+        cline_idle_prompt: false,
+        error_match: None,
+        worked_status: false,
+        pending_build: false,
+        model_family: "glm".to_string(),
+    }];
+    let (sessions, _) = collect_session_infos_from_probes_locked(
+        &mut state,
+        &workspace_dir,
+        &workspace_dir,
+        probes,
+    );
+
+    assert_eq!(sessions[0].activity_state, "orphaned_agent");
+    assert_eq!(sessions[0].activity_label, "Agent 异常");
+    assert_eq!(sessions[0].activity_agent.as_deref(), Some("Codex"));
+    assert_eq!(sessions[0].model_family, "");
+    assert!(sessions[0].busy);
+}
+
+#[test]
+fn idle_agent_process_does_not_report_running_or_busy() {
+    let workspace_dir = std::path::PathBuf::from("/tmp/webclx-terminal-idle-agent-test");
+    let stored = StoredTerminalSession {
+        id: "s1".to_string(),
+        path: workspace_dir.clone(),
+        user_name: default_terminal_user_name(),
+        name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
+        title: String::new(),
+        codex_api_preset_name: String::new(),
+        codex_api_base_url: String::new(),
+        origin: super::TerminalSessionOrigin::Normal,
+        owner_key: String::new(),
+        manually_renamed: false,
+        idle: false,
+        created_at: 1,
+        last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
+    };
+    let mut state = TerminalState::default();
+    state
+        .sessions_by_id
+        .insert(stored.id.clone(), stored.clone());
+    state
+        .sessions_by_path
+        .insert(workspace_dir.clone(), vec![stored.id.clone()]);
+    state.output_observations.insert(
+        stored.id.clone(),
+        super::TerminalOutputObservation {
+            fingerprint: Some(7),
+            last_fingerprint_probe_sequence: 1,
+            rebaseline_after_restore: false,
+            last_output_at: 42,
+            last_viewed_output_at: 42,
+        },
+    );
+
+    let probes = vec![TerminalActivityProbe {
+        session_id: stored.id.clone(),
+        live_last_output_at: 42,
+        snapshot_fingerprint: Some(7),
+        snapshot_probe_sequence: 2,
+        agent_activity: TerminalAgentActivity {
+            agents: vec!["Cline".to_string()],
+            orphaned_agents: Vec::new(),
+        },
+        working_status: false,
+        cline_idle_prompt: false,
+        error_match: None,
+        worked_status: false,
+        pending_build: false,
+        model_family: String::new(),
+    }];
+    let (sessions, _) = collect_session_infos_from_probes_locked(
+        &mut state,
+        &workspace_dir,
+        &workspace_dir,
+        probes,
+    );
+
+    assert_eq!(sessions[0].activity_state, "agent");
+    assert_eq!(sessions[0].activity_label, "空闲");
+    assert_eq!(sessions[0].activity_agent.as_deref(), Some("Cline"));
+    assert!(!sessions[0].busy);
+}
+
+#[test]
+fn cline_idle_prompt_suppresses_pending_review_after_output_window() {
+    let workspace_dir = std::path::PathBuf::from("/tmp/webclx-terminal-cline-idle-test");
+    let stored = StoredTerminalSession {
+        id: "s1".to_string(),
+        path: workspace_dir.clone(),
+        user_name: default_terminal_user_name(),
+        name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
+        title: String::new(),
+        codex_api_preset_name: String::new(),
+        codex_api_base_url: String::new(),
+        origin: super::TerminalSessionOrigin::Normal,
+        owner_key: String::new(),
+        manually_renamed: false,
+        idle: false,
+        created_at: 1,
+        last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
+    };
+    let mut state = TerminalState::default();
+    state
+        .sessions_by_id
+        .insert(stored.id.clone(), stored.clone());
+    state
+        .sessions_by_path
+        .insert(workspace_dir.clone(), vec![stored.id.clone()]);
+
+    let probes = vec![TerminalActivityProbe {
+        session_id: stored.id.clone(),
+        live_last_output_at: 42,
+        snapshot_fingerprint: Some(7),
+        snapshot_probe_sequence: 1,
+        agent_activity: TerminalAgentActivity {
+            agents: vec!["Cline".to_string()],
+            orphaned_agents: Vec::new(),
+        },
+        working_status: false,
+        cline_idle_prompt: true,
+        error_match: None,
+        worked_status: false,
+        pending_build: false,
+        model_family: String::new(),
+    }];
+    let (sessions, _) = collect_session_infos_from_probes_locked(
+        &mut state,
+        &workspace_dir,
+        &workspace_dir,
+        probes,
+    );
+
+    assert_eq!(sessions[0].activity_state, "agent");
+    assert_eq!(sessions[0].activity_label, "空闲");
+    assert_eq!(sessions[0].activity_agent.as_deref(), Some("Cline"));
+    assert_eq!(sessions[0].last_output_at, 42);
+    assert!(!sessions[0].busy);
+    assert_eq!(
+        state
+            .output_observations
+            .get(&stored.id)
+            .expect("output observation should exist")
+            .last_viewed_output_at,
+        42,
+        "the idle Cline prompt is itself evidence that its latest output was observed"
+    );
 }
 
 #[test]
@@ -2480,6 +3813,7 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2489,6 +3823,13 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
 
     let mut state = TerminalState::default();
@@ -2506,9 +3847,11 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         snapshot_probe_sequence: 1,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: false,
         pending_build: false,
+        model_family: String::new(),
     };
     let _ = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2529,9 +3872,11 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         snapshot_probe_sequence: 2,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: false,
         pending_build: false,
+        model_family: "glm".to_string(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2541,6 +3886,7 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
     );
 
     assert_eq!(sessions[0].activity_state, "idle");
+    assert_eq!(sessions[0].model_family, "glm");
     assert_eq!(sessions[0].last_output_at, 100);
 }
 
@@ -2552,6 +3898,7 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2561,6 +3908,13 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
 
     let mut state = TerminalState::default();
@@ -2591,9 +3945,11 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         snapshot_probe_sequence: 2,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: false,
         pending_build: false,
+        model_family: String::new(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2619,9 +3975,11 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         snapshot_probe_sequence: 3,
         agent_activity: TerminalAgentActivity::default(),
         working_status: false,
+        cline_idle_prompt: false,
         error_match: None,
         worked_status: false,
         pending_build: false,
+        model_family: String::new(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(
         &mut state,
@@ -2731,6 +4089,7 @@ fn refresh_auto_names_avoids_manual_name_collisions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2740,6 +4099,13 @@ fn refresh_auto_names_avoids_manual_name_collisions() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2749,6 +4115,7 @@ fn refresh_auto_names_avoids_manual_name_collisions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2758,6 +4125,13 @@ fn refresh_auto_names_avoids_manual_name_collisions() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -2794,6 +4168,7 @@ fn refresh_auto_names_avoids_manual_auto_index_collisions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2803,6 +4178,13 @@ fn refresh_auto_names_avoids_manual_auto_index_collisions() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2812,6 +4194,7 @@ fn refresh_auto_names_avoids_manual_auto_index_collisions() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1 codex".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2821,6 +4204,13 @@ fn refresh_auto_names_avoids_manual_auto_index_collisions() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -2857,6 +4247,7 @@ fn refresh_auto_names_preserves_existing_auto_index_gaps() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2866,6 +4257,13 @@ fn refresh_auto_names_preserves_existing_auto_index_gaps() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -2875,6 +4273,7 @@ fn refresh_auto_names_preserves_existing_auto_index_gaps() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_3".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2884,6 +4283,13 @@ fn refresh_auto_names_preserves_existing_auto_index_gaps() {
             idle: false,
             created_at: 3,
             last_opened_at: 3,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -2913,6 +4319,7 @@ fn refresh_auto_names_updates_live_session_state() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2922,6 +4329,13 @@ fn refresh_auto_names_updates_live_session_state() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     let duplicate = StoredTerminalSession {
@@ -2929,6 +4343,7 @@ fn refresh_auto_names_updates_live_session_state() {
         path: workspace_dir.clone(),
         user_name: default_terminal_user_name(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -2938,6 +4353,13 @@ fn refresh_auto_names_updates_live_session_state() {
         idle: false,
         created_at: 2,
         last_opened_at: 2,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
     state
         .sessions_by_id
@@ -2985,6 +4407,7 @@ fn refresh_auto_names_avoids_cross_path_name_collisions() {
             path: first_workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -2994,6 +4417,13 @@ fn refresh_auto_names_avoids_cross_path_name_collisions() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -3003,6 +4433,7 @@ fn refresh_auto_names_avoids_cross_path_name_collisions() {
             path: second_workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3012,6 +4443,13 @@ fn refresh_auto_names_avoids_cross_path_name_collisions() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -3052,6 +4490,7 @@ fn refresh_auto_names_preserves_cross_path_auto_name() {
             path: first_workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "alpha_1".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3061,6 +4500,13 @@ fn refresh_auto_names_preserves_cross_path_auto_name() {
             idle: false,
             created_at: 1,
             last_opened_at: 1,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -3070,6 +4516,7 @@ fn refresh_auto_names_preserves_cross_path_auto_name() {
             path: second_workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "beta_9".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3079,6 +4526,13 @@ fn refresh_auto_names_preserves_cross_path_auto_name() {
             idle: false,
             created_at: 2,
             last_opened_at: 2,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -3119,6 +4573,7 @@ fn create_auto_name_start_index_uses_max_remaining_auto_index_for_path() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace_5".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3128,6 +4583,13 @@ fn create_auto_name_start_index_uses_max_remaining_auto_index_for_path() {
             idle: false,
             created_at: 5,
             last_opened_at: 5,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state.sessions_by_id.insert(
@@ -3137,6 +4599,7 @@ fn create_auto_name_start_index_uses_max_remaining_auto_index_for_path() {
             path: other_workspace_dir,
             user_name: default_terminal_user_name(),
             name: "workspace_12".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3146,6 +4609,13 @@ fn create_auto_name_start_index_uses_max_remaining_auto_index_for_path() {
             idle: false,
             created_at: 12,
             last_opened_at: 12,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -3166,6 +4636,7 @@ fn create_auto_name_start_index_respects_legacy_hash_names() {
             path: workspace_dir.clone(),
             user_name: default_terminal_user_name(),
             name: "workspace#5".to_string(),
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name: String::new(),
             codex_api_base_url: String::new(),
@@ -3175,6 +4646,13 @@ fn create_auto_name_start_index_respects_legacy_hash_names() {
             idle: false,
             created_at: 5,
             last_opened_at: 5,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
+            hidden: false,
         },
     );
     state
@@ -3212,7 +4690,6 @@ fn deleting_session_preserves_remaining_automatic_name() {
             workspace_dir.clone(),
             test_user_profile(),
             Vec::new(),
-            Vec::new(),
             None,
             String::new(),
             String::new(),
@@ -3224,7 +4701,6 @@ fn deleting_session_preserves_remaining_automatic_name() {
             &workspace_dir,
             workspace_dir.clone(),
             test_user_profile(),
-            Vec::new(),
             Vec::new(),
             None,
             String::new(),
@@ -3288,7 +4764,6 @@ fn tmux_backed_sessions_survive_manager_restart() {
             &workspace_dir,
             workspace_dir.clone(),
             test_user_profile(),
-            Vec::new(),
             Vec::new(),
             None,
             "Example API".to_string(),
@@ -3393,7 +4868,7 @@ fn creating_session_replaces_orphan_tmux_with_same_id() {
         .expect("write registry");
 
     kill_tmux_session(&session_id);
-    let output = Command::new("tmux")
+    let output = isolated_tmux_command(&session_id)
         .arg("new-session")
         .arg("-d")
         .arg("-s")
@@ -3403,7 +4878,7 @@ fn creating_session_replaces_orphan_tmux_with_same_id() {
         .output()
         .expect("create orphan tmux session");
     assert_tmux_command_succeeded(output, "create orphan tmux session");
-    let output = Command::new("tmux")
+    let output = isolated_tmux_command(&session_id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&session_id))
@@ -3412,7 +4887,7 @@ fn creating_session_replaces_orphan_tmux_with_same_id() {
         .output()
         .expect("send orphan marker");
     assert_tmux_command_succeeded(output, "send orphan marker");
-    let output = Command::new("tmux")
+    let output = isolated_tmux_command(&session_id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&session_id))
@@ -3432,7 +4907,6 @@ fn creating_session_replaces_orphan_tmux_with_same_id() {
             &workspace_dir,
             workspace_dir.clone(),
             test_user_profile(),
-            Vec::new(),
             Vec::new(),
             None,
             String::new(),
@@ -3477,7 +4951,6 @@ fn requested_session_recreates_missing_tmux_session() {
             workspace_dir.clone(),
             user_profile.clone(),
             Vec::new(),
-            Vec::new(),
             None,
             String::new(),
             String::new(),
@@ -3504,7 +4977,6 @@ fn requested_session_recreates_missing_tmux_session() {
             Some(&created.id),
             user_profile,
             Vec::new(),
-            Vec::new(),
             None,
             String::new(),
             String::new(),
@@ -3526,6 +4998,7 @@ fn terminal_resume_restore_record_persists_resume_command_and_source() {
         path: std::path::PathBuf::from("/tmp/workspace"),
         user_name: "root".to_string(),
         name: "webClx#1".to_string(),
+        program: "claude".to_string(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -3535,10 +5008,15 @@ fn terminal_resume_restore_record_persists_resume_command_and_source() {
         idle: false,
         created_at: 1,
         last_opened_at: 1,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
         input_history: Vec::new(),
         resume_id: "019d1ba6-f772-7452-a391-6553ccbc0a50".to_string(),
         command: "claude --resume 019d1ba6-f772-7452-a391-6553ccbc0a50".to_string(),
-        program: "claude".to_string(),
         source: "terminal_buffer".to_string(),
         updated_at: 2,
     };
@@ -3588,6 +5066,12 @@ async fn deferred_initial_restore_does_not_attach_sessions_before_returning() {
                 idle: false,
                 created_at: stored.created_at,
                 last_opened_at: stored.last_opened_at,
+                group_token: String::new(),
+                group_color: String::new(),
+                group_name: String::new(),
+                group_role: String::new(),
+                group_order: 0,
+                group_fixed_order: false,
                 input_history: Vec::new(),
                 resume_id: format!("resume-{unique}"),
                 command: "printf deferred-restore".to_string(),
@@ -3605,7 +5089,6 @@ async fn deferred_initial_restore_does_not_attach_sessions_before_returning() {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: test_user_profile(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -3636,6 +5119,7 @@ fn shutdown_restore_recreates_missing_tmux_session_and_runs_saved_command() {
         path: workspace_dir.clone(),
         user_name: user_profile.name.clone(),
         name: "workspace_1".to_string(),
+        previous_names: Vec::new(),
         title: String::new(),
         codex_api_preset_name: String::new(),
         codex_api_base_url: String::new(),
@@ -3645,6 +5129,13 @@ fn shutdown_restore_recreates_missing_tmux_session_and_runs_saved_command() {
         idle: false,
         created_at: unique,
         last_opened_at: unique,
+        group_token: String::new(),
+        group_color: String::new(),
+        group_name: String::new(),
+        group_role: String::new(),
+        group_order: 0,
+        group_fixed_order: false,
+        hidden: false,
     };
     let registry = StoredTerminalRegistry {
         next_ordinal: unique.saturating_add(1),
@@ -3674,6 +5165,12 @@ fn shutdown_restore_recreates_missing_tmux_session_and_runs_saved_command() {
             idle: false,
             created_at: unique,
             last_opened_at: unique,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
             input_history: vec![
                 super::TerminalInputHistoryEntry {
                     text: "first saved user prompt".to_string(),
@@ -3701,7 +5198,6 @@ fn shutdown_restore_recreates_missing_tmux_session_and_runs_saved_command() {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: user_profile.clone(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -3760,7 +5256,6 @@ fn save_shutdown_restore_registry_persists_input_history() {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: user_profile.clone(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -3771,7 +5266,6 @@ fn save_shutdown_restore_registry_persists_input_history() {
             &workspace_dir,
             workspace_dir.clone(),
             user_profile,
-            Vec::new(),
             Vec::new(),
             None,
             String::new(),
@@ -3784,7 +5278,6 @@ fn save_shutdown_restore_registry_persists_input_history() {
             Some(&created.id),
             connection_user_profile,
             Vec::new(),
-            Vec::new(),
             None,
             String::new(),
             String::new(),
@@ -3794,14 +5287,14 @@ fn save_shutdown_restore_registry_persists_input_history() {
     let resume_id = "ad08e570-051b-4b66-8c7a-7b20e434b168";
     manager.record_session_input(&created.id, "first saved user prompt\n");
     manager.record_session_input(&created.id, "second saved user prompt\n");
-    Command::new("tmux")
+    isolated_tmux_command(&created.id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&created.id))
         .arg(format!("echo 'Resume this session with: codex resume {resume_id}'"))
         .output()
         .expect("echo codex resume prompt");
-    Command::new("tmux")
+    isolated_tmux_command(&created.id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&created.id))
@@ -3842,6 +5335,316 @@ fn save_shutdown_restore_registry_persists_input_history() {
     let _ = fs::remove_dir_all(base_dir);
 }
 
+/// 信号触发的自动保存（SIGTERM/SIGINT 路径）必须与菜单命令写入同一份恢复注册表：
+/// 终端里可见 resume 提示时，`save_shutdown_restore_registry_for_signal` 也要落盘记录。
+#[test]
+fn signal_shutdown_save_persists_resume_records() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos() as u64;
+    let base_dir = std::env::temp_dir().join(format!("webclx-signal-save-resume-{unique}"));
+    let workspace_dir = base_dir.join("workspace");
+    fs::create_dir_all(&workspace_dir).expect("create test workspace");
+    let state_file = base_dir.join("terminal-sessions.json");
+    let registry = StoredTerminalRegistry {
+        next_ordinal: unique.max(1),
+        sessions: Vec::new(),
+        input_histories: std::collections::HashMap::new(),
+        output_observations: std::collections::HashMap::new(),
+    };
+    fs::write(&state_file, serde_json::to_vec_pretty(&registry).expect("encode registry"))
+        .expect("write registry");
+    let user_profile = test_user_profile();
+    let connection_user_profile = user_profile.clone();
+    let manager = TerminalManager::new_with_environment(
+        state_file.clone(),
+        TerminalEnvironmentSnapshot {
+            workspace_root: base_dir.clone(),
+            display_root: base_dir.clone(),
+            user_profile: user_profile.clone(),
+            proxy_env: Vec::new(),
+        },
+        crate::quota_reset_cache::QuotaResetCache::new(),
+    );
+    let created = manager
+        .create_session(
+            &workspace_dir,
+            &workspace_dir,
+            workspace_dir.clone(),
+            user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+        )
+        .expect("create tmux-backed session");
+    let _live_session = manager
+        .get_for_connection(
+            workspace_dir.clone(),
+            Some(&created.id),
+            connection_user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+            true,
+        )
+        .expect("attach live browser session");
+    let resume_id = "5f0e2b41-8c1d-4f29-9f2f-91e7df2a3b70";
+    isolated_tmux_command(&created.id)
+        .arg("send-keys")
+        .arg("-t")
+        .arg(tmux_session_name(&created.id))
+        .arg(format!("echo 'Resume this session with: codex resume {resume_id}'"))
+        .output()
+        .expect("echo codex resume prompt");
+    isolated_tmux_command(&created.id)
+        .arg("send-keys")
+        .arg("-t")
+        .arg(tmux_session_name(&created.id))
+        .arg("C-m")
+        .output()
+        .expect("submit echo");
+
+    let mut detected = None;
+    for _ in 0..30 {
+        if let Ok(Some(value)) = manager.current_resume_session(&created.id)
+            && value.info.resume_id == resume_id
+        {
+            detected = Some(value);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    detected.expect("resume command should be detected from terminal buffer");
+    assert_eq!(
+        manager
+            .save_shutdown_restore_registry_for_signal()
+            .expect("signal-triggered shutdown save"),
+        1
+    );
+
+    let restore_file = state_file.with_file_name(super::TERMINAL_SHUTDOWN_RESTORE_FILE_NAME);
+    let restore_registry =
+        super::load_terminal_shutdown_restore_registry(&restore_file).expect("load restore file");
+    assert_eq!(restore_registry.records.len(), 1);
+    assert_eq!(restore_registry.records[0].resume_id, resume_id);
+    assert_eq!(restore_registry.records[0].session_id, created.id);
+
+    let _ = manager.delete_session(&workspace_dir, &workspace_dir, &created.id);
+    let _ = fs::remove_dir_all(base_dir);
+}
+
+/// tmux scope 是为了服务重启时保住终端；但在整机关机事务里，它必须晚于
+/// webclx.service 停止，否则信号保存会先失去 tmux/agent 进程。这里做源码
+/// 回归，不额外创建 systemd transient unit。
+#[test]
+fn tmux_scope_is_ordered_after_webclx_service_for_shutdown_save() {
+    let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/terminal/tmux.rs"))
+        .expect("read tmux source");
+    assert!(
+        source.contains(".arg(\"--property=After=webclx.service\")"),
+        "tmux transient scope must be ordered after webclx.service"
+    );
+}
+
+/// 关机竞态中 tmux 后端可能先于本进程停止，信号保存探测不到任何会话；此时不能
+/// 用空结果覆盖恢复文件，否则会清掉上一次成功保存的记录。
+#[test]
+fn signal_shutdown_save_preserves_records_when_tmux_backends_unreachable() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos() as u64;
+    let base_dir = std::env::temp_dir().join(format!("webclx-signal-save-dead-{unique}"));
+    let workspace_dir = base_dir.join("workspace");
+    fs::create_dir_all(&workspace_dir).expect("create test workspace");
+    let state_file = base_dir.join("terminal-sessions.json");
+    let registry = StoredTerminalRegistry {
+        next_ordinal: unique.max(1),
+        sessions: Vec::new(),
+        input_histories: std::collections::HashMap::new(),
+        output_observations: std::collections::HashMap::new(),
+    };
+    fs::write(&state_file, serde_json::to_vec_pretty(&registry).expect("encode registry"))
+        .expect("write registry");
+    let user_profile = test_user_profile();
+    let connection_user_profile = user_profile.clone();
+    let manager = TerminalManager::new_with_environment(
+        state_file.clone(),
+        TerminalEnvironmentSnapshot {
+            workspace_root: base_dir.clone(),
+            display_root: base_dir.clone(),
+            user_profile: user_profile.clone(),
+            proxy_env: Vec::new(),
+        },
+        crate::quota_reset_cache::QuotaResetCache::new(),
+    );
+    let created = manager
+        .create_session(
+            &workspace_dir,
+            &workspace_dir,
+            workspace_dir.clone(),
+            user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+        )
+        .expect("create tmux-backed session");
+    let _live_session = manager
+        .get_for_connection(
+            workspace_dir.clone(),
+            Some(&created.id),
+            connection_user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+            true,
+        )
+        .expect("attach live browser session");
+
+    let legacy_resume_id = "11111111-2222-3333-4444-555555555555";
+    let restore_file = state_file.with_file_name(super::TERMINAL_SHUTDOWN_RESTORE_FILE_NAME);
+    let legacy_record = TerminalResumeRestoreRecord {
+        session_id: "legacy-shutdown-session".to_string(),
+        path: workspace_dir.clone(),
+        user_name: crate::runtime_paths::resolve_current_user_profile()
+            .map(|profile| profile.name)
+            .unwrap_or_else(|| default_terminal_user_name()),
+        name: "legacy session".to_string(),
+        resume_id: legacy_resume_id.to_string(),
+        command: format!("codex resume {legacy_resume_id}"),
+        program: "codex".to_string(),
+        ..TerminalResumeRestoreRecord::default()
+    };
+    persist_terminal_shutdown_restore_registry(
+        &restore_file,
+        &super::TerminalShutdownRestoreRegistry {
+            records: vec![legacy_record],
+        },
+    )
+    .expect("pre-write legacy restore records");
+
+    // 模拟关机竞态：tmux server 先于信号保存停止，探测必然失败。
+    isolated_tmux_command(&created.id)
+        .arg("kill-server")
+        .output()
+        .expect("kill per-session tmux server");
+
+    assert_eq!(
+        manager
+            .save_shutdown_restore_registry_for_signal()
+            .expect("signal-triggered shutdown save"),
+        0
+    );
+    let restore_registry =
+        super::load_terminal_shutdown_restore_registry(&restore_file).expect("load restore file");
+    assert_eq!(restore_registry.records.len(), 1, "legacy records must survive");
+    assert_eq!(restore_registry.records[0].resume_id, legacy_resume_id);
+
+    let _ = manager.delete_session(&workspace_dir, &workspace_dir, &created.id);
+    let _ = fs::remove_dir_all(base_dir);
+}
+
+/// 后端仍可达但没有任何可探测的 agent 会话时，空结果是真实的；信号保存应照常
+/// 写盘清掉陈旧记录，避免下次启动复活早已关闭的终端。
+#[test]
+fn signal_shutdown_save_clears_stale_records_when_backends_reachable() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before unix epoch")
+        .as_nanos() as u64;
+    let base_dir = std::env::temp_dir().join(format!("webclx-signal-save-clear-{unique}"));
+    let workspace_dir = base_dir.join("workspace");
+    fs::create_dir_all(&workspace_dir).expect("create test workspace");
+    let state_file = base_dir.join("terminal-sessions.json");
+    let registry = StoredTerminalRegistry {
+        next_ordinal: unique.max(1),
+        sessions: Vec::new(),
+        input_histories: std::collections::HashMap::new(),
+        output_observations: std::collections::HashMap::new(),
+    };
+    fs::write(&state_file, serde_json::to_vec_pretty(&registry).expect("encode registry"))
+        .expect("write registry");
+    let user_profile = test_user_profile();
+    let connection_user_profile = user_profile.clone();
+    let manager = TerminalManager::new_with_environment(
+        state_file.clone(),
+        TerminalEnvironmentSnapshot {
+            workspace_root: base_dir.clone(),
+            display_root: base_dir.clone(),
+            user_profile: user_profile.clone(),
+            proxy_env: Vec::new(),
+        },
+        crate::quota_reset_cache::QuotaResetCache::new(),
+    );
+    let created = manager
+        .create_session(
+            &workspace_dir,
+            &workspace_dir,
+            workspace_dir.clone(),
+            user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+        )
+        .expect("create tmux-backed session");
+    let _live_session = manager
+        .get_for_connection(
+            workspace_dir.clone(),
+            Some(&created.id),
+            connection_user_profile,
+            Vec::new(),
+            None,
+            String::new(),
+            String::new(),
+            true,
+        )
+        .expect("attach live browser session");
+
+    let legacy_resume_id = "99999999-8888-7777-6666-555555555555";
+    let restore_file = state_file.with_file_name(super::TERMINAL_SHUTDOWN_RESTORE_FILE_NAME);
+    let legacy_record = TerminalResumeRestoreRecord {
+        session_id: "stale-shutdown-session".to_string(),
+        path: workspace_dir.clone(),
+        user_name: crate::runtime_paths::resolve_current_user_profile()
+            .map(|profile| profile.name)
+            .unwrap_or_else(|| default_terminal_user_name()),
+        name: "stale session".to_string(),
+        resume_id: legacy_resume_id.to_string(),
+        command: format!("codex resume {legacy_resume_id}"),
+        program: "codex".to_string(),
+        ..TerminalResumeRestoreRecord::default()
+    };
+    persist_terminal_shutdown_restore_registry(
+        &restore_file,
+        &super::TerminalShutdownRestoreRegistry {
+            records: vec![legacy_record],
+        },
+    )
+    .expect("pre-write stale restore records");
+
+    assert_eq!(
+        manager
+            .save_shutdown_restore_registry_for_signal()
+            .expect("signal-triggered shutdown save"),
+        0
+    );
+    let restore_registry =
+        super::load_terminal_shutdown_restore_registry(&restore_file).expect("load restore file");
+    assert!(
+        restore_registry.records.is_empty(),
+        "stale records should be cleared when backends are reachable"
+    );
+
+    let _ = manager.delete_session(&workspace_dir, &workspace_dir, &created.id);
+    let _ = fs::remove_dir_all(base_dir);
+}
+
 /// "保存会话并关机" 必须能把 Claude 会话也恢复出来，不能只认 Codex。
 /// 这里覆盖 buffer 兜底路径：当终端里能看到 `claude --resume <id>` 的退出提示时，
 /// `current_resume_session` 应返回 `program="claude"` 与完整命令，而非退化成 codex。
@@ -3872,7 +5675,6 @@ fn current_resume_session_detects_claude_from_terminal_buffer() {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: user_profile.clone(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -3883,7 +5685,6 @@ fn current_resume_session_detects_claude_from_terminal_buffer() {
             &workspace_dir,
             workspace_dir.clone(),
             user_profile.clone(),
-            Vec::new(),
             Vec::new(),
             None,
             String::new(),
@@ -3896,7 +5697,6 @@ fn current_resume_session_detects_claude_from_terminal_buffer() {
             Some(&created.id),
             connection_user_profile,
             Vec::new(),
-            Vec::new(),
             None,
             String::new(),
             String::new(),
@@ -3906,14 +5706,14 @@ fn current_resume_session_detects_claude_from_terminal_buffer() {
 
     let resume_id = "ad08e570-051b-4b66-8c7a-7b20e434b168";
     // 模拟 Claude 退出时打印的恢复提示。
-    Command::new("tmux")
+    isolated_tmux_command(&created.id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&created.id))
         .arg(format!("echo 'Resume this session with: claude --resume {resume_id}'"))
         .output()
         .expect("echo claude resume prompt");
-    Command::new("tmux")
+    isolated_tmux_command(&created.id)
         .arg("send-keys")
         .arg("-t")
         .arg(tmux_session_name(&created.id))
@@ -4000,7 +5800,7 @@ fn mouse_only_input_rejects_non_mouse_input() {
 }
 
 fn kill_tmux_session(session_id: &str) {
-    let _ = Command::new("tmux")
+    let _ = isolated_tmux_command(session_id)
         .arg("kill-session")
         .arg("-t")
         .arg(tmux_session_name(session_id))
@@ -4026,7 +5826,6 @@ fn build_test_terminal_manager() -> (TerminalManager, std::path::PathBuf) {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: user_profile.clone(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -4053,10 +5852,12 @@ fn scheduled_input_persists_across_manager_reload() {
             due_at,
             "1 分钟后".to_string(),
             true,
-            "paste".to_string(),
             String::new(),
+            String::new(),
+            0,
         )
         .expect("scheduled input should be created");
+    assert_eq!(created.task_type, "agent_message");
 
     let reloaded = TerminalManager::new_with_environment(
         base_dir.join("terminal-state.json"),
@@ -4064,7 +5865,6 @@ fn scheduled_input_persists_across_manager_reload() {
             workspace_root: base_dir.clone(),
             display_root: base_dir.clone(),
             user_profile: test_user_profile(),
-            terminal_default_env: Vec::new(),
             proxy_env: Vec::new(),
         },
         crate::quota_reset_cache::QuotaResetCache::new(),
@@ -4124,9 +5924,267 @@ fn send_session_input_records_input_history_by_default() {
 }
 
 #[test]
+fn agent_message_refuses_live_terminal_without_agent_process() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    let stored = stored_test_terminal_session("s1");
+    let live = build_live_session(&stored);
+    manager.insert_test_live_session(stored, live);
+
+    let error = manager
+        .send_session_message(
+            "s1",
+            None,
+            "[from webClx-compile-api] build completed".to_string(),
+            1,
+            true,
+            true,
+        )
+        .expect_err("agent callback must not be written into an idle shell");
+
+    assert!(
+        error.to_string().contains("agent process is not active"),
+        "unexpected error: {error:#}"
+    );
+
+    let history = manager
+        .session_input_history("s1")
+        .expect("session should be present");
+    assert!(history.is_empty(), "refused callback must not reach the PTY");
+
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn parses_lexically_safe_specified_preset_run_commands() {
+    assert_eq!(
+        specified_preset_run_command("webclx run api 'api-1' -- codex"),
+        Some(SpecifiedPresetRunCommand {
+            kind: SpecifiedPresetRunKind::Api,
+            preset_id: "api-1".to_string(),
+        })
+    );
+    assert_eq!(
+        specified_preset_run_command("/usr/bin/webclx run claude 'claude-1' -- claude"),
+        Some(SpecifiedPresetRunCommand {
+            kind: SpecifiedPresetRunKind::Claude,
+            preset_id: "claude-1".to_string(),
+        })
+    );
+    assert_eq!(
+        specified_preset_run_command("webclx run oauth oauth-1 -- codex"),
+        Some(SpecifiedPresetRunCommand {
+            kind: SpecifiedPresetRunKind::OAuth,
+            preset_id: "oauth-1".to_string(),
+        })
+    );
+    assert_eq!(specified_preset_run_command("codex"), None);
+    assert_eq!(specified_preset_run_command("webclx run api"), None);
+    assert_eq!(
+        specified_preset_run_command("webclx run api api-1 codex"),
+        None,
+        "only the generator's explicit separator form is recognized"
+    );
+    assert_eq!(
+        specified_preset_run_command("webclx run api $PRESET -- codex"),
+        None,
+        "variable expansion is not inspected"
+    );
+}
+
+#[test]
+fn terminal_output_identifies_glm_model_for_quota_preflight_across_proxies() {
+    let glm_output = "GLM-5.3-Flash medium";
+    let non_glm_output = "gpt-5.6-sol high";
+
+    assert!(terminal_quota_preflight_uses_zhipu_provider(
+        "",
+        Some("http://HOST:PORT/v1"),
+        glm_output,
+    ));
+    assert!(!terminal_quota_preflight_uses_zhipu_provider(
+        "",
+        Some("http://HOST:PORT/v1"),
+        non_glm_output,
+    ));
+    assert!(terminal_quota_preflight_uses_zhipu_provider(
+        "",
+        Some("https://zcode.z.ai/api/v1/ultra/anthropic"),
+        non_glm_output,
+    ));
+    assert!(terminal_quota_preflight_uses_zhipu_provider("", None, glm_output));
+}
+
+#[test]
+fn quota_error_matching_recognizes_503_and_glm_status_line() {
+    assert!(terminal_error_keyword_is_quota_like("503 Service Unavailable"));
+    assert!(terminal_error_keyword_is_quota_like(
+        "unexpected status 503 service unavailable"
+    ));
+    assert!(terminal_error_keyword_is_quota_like("service temporarily unavailable"));
+    assert!(terminal_error_keyword_is_quota_like("exceeded retry limit"));
+    assert!(terminal_error_keyword_is_quota_like("429 Too Many Requests"));
+
+    let pane_with_blanks = "Reconnecting... 3/5 (21s • esc to interrupt)\n  └ Unexpected status 503 Service Unavailable: 继续Service temporarily unavailable, url: http://HOST:PORT/v1/responses\n\n› Ask Codex to do anything\n\n  GLM-5.3 xhigh · Context 27% used · Fast off\n\n\n\n\n\n\n\n\n\n\n\n";
+    assert!(terminal_recent_output_uses_glm_model(pane_with_blanks));
+    assert!(terminal_recent_output_has_quota_error(pane_with_blanks, 20));
+}
+
+#[test]
+fn temporary_api_run_metadata_updates_and_persists() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    let state_file = base_dir.join("terminal-state.json");
+    let mut stored = stored_test_terminal_session("s1");
+    stored.path = base_dir.clone();
+    stored.codex_api_preset_name = "Default".to_string();
+    stored.codex_api_base_url = "https://default.example/v1".to_string();
+    let live = build_live_session(&stored);
+    manager.insert_test_live_session(stored, live);
+
+    manager
+        .update_session_api_preset(
+            "s1",
+            "Selected".to_string(),
+            "https://selected.example/v1".to_string(),
+        )
+        .expect("update selected API preset metadata");
+    manager
+        .update_session_api_preset(
+            "s1",
+            "Selected".to_string(),
+            "https://selected.example/v1".to_string(),
+        )
+        .expect("unchanged metadata remains idempotent");
+
+    // 状态加载（stored_session_survives_process_restart）按隔离 tmux 套接字
+    // 探测存续：没有真实 tmux 会话的夹具在装有 tmux 的主机上会被判定为
+    // Missing，在 TerminalManager::new 加载阶段即被丢弃。测试语义是元数据
+    // 持久化，因此给 s1 提供真实 tmux 后端并在结束时销毁。
+    kill_tmux_session("s1");
+    let output = isolated_tmux_command("s1")
+        .arg("new-session")
+        .arg("-d")
+        .arg("-s")
+        .arg(tmux_session_name("s1"))
+        .arg("-c")
+        .arg(&base_dir)
+        .output()
+        .expect("create fixture tmux session");
+    assert_tmux_command_succeeded(output, "create fixture tmux session");
+
+    drop(manager);
+    let restarted = TerminalManager::new(state_file.clone());
+    // 用轻量列表验证元数据持久化：list_sessions 会先用真实隔离 tmux 套接字
+    // 探测并清理失效会话，而测试夹具没有真实 tmux 会话，在任何装有 tmux 的
+    // 主机上都会被当作 Missing 清掉，与本测试关心的持久化语义无关。
+    let sessions = restarted.list_sessions_lightweight(&base_dir, &base_dir, &base_dir);
+    let restored = sessions
+        .iter()
+        .find(|item| item.id == "s1")
+        .expect("terminal should survive restart");
+    assert_eq!(restored.codex_api_preset_name, "Selected");
+    assert_eq!(restored.codex_api_base_url, "https://selected.example/v1");
+
+    drop(restarted);
+    kill_tmux_session("s1");
+    fs::remove_dir_all(&base_dir).expect("remove test fixture");
+}
+
+#[test]
+fn terminal_message_delivery_claim_is_idempotent_and_send_failure_stays_deduplicated() {
+    let (manager, base_dir) = build_test_terminal_manager();
+
+    assert!(
+        manager
+            .claim_terminal_message_delivery("s1", "delivery-1", "message-1")
+            .unwrap()
+    );
+    assert!(
+        !manager
+            .claim_terminal_message_delivery("s1", "delivery-1", "message-1")
+            .unwrap()
+    );
+    assert!(
+        manager
+            .claim_terminal_message_delivery("s2", "delivery-1", "message-1")
+            .unwrap()
+    );
+
+    // 发送失败路径调用 release：记录改为 Failed 且保留——正文是否到达
+    // 终端不确定，同一 delivery_id 不得被自动重发。
+    manager.release_terminal_message_delivery("s1", "delivery-1");
+    assert_eq!(
+        manager
+            .terminal_message_delivery_record("s1", "delivery-1")
+            .unwrap()
+            .state,
+        crate::terminal::manager::message_ledger::DeliveryState::Failed
+    );
+    assert!(
+        !manager
+            .claim_terminal_message_delivery("s1", "delivery-1", "message-1")
+            .unwrap()
+    );
+
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn terminal_message_delivery_claim_recovers_after_persist_failure() {
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let (mut manager, base_dir) = build_test_terminal_manager();
+    let _guard = TempDirGuard(base_dir.clone());
+
+    // 换成文件后端账本：父目录先是合法目录，文件缺失=健康空账本。
+    let blocked = base_dir.join("ledger-parent");
+    std::fs::create_dir(&blocked).unwrap();
+    let ledger_path = blocked.join("terminal-message-deliveries.json");
+    manager.terminal_message_ledger = std::sync::Arc::new(std::sync::Mutex::new(
+        crate::terminal::manager::message_ledger::TerminalMessageLedger::load(Some(
+            ledger_path.clone(),
+        )),
+    ));
+
+    // 父目录换成普通文件后落盘必然失败：manager 认领路径报错，不放行发送。
+    std::fs::remove_dir(&blocked).unwrap();
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    assert!(
+        manager
+            .claim_terminal_message_delivery("s1", "delivery-1", "message-1")
+            .is_err()
+    );
+
+    // 修复父路径后准入重试成功：同一 id 因保守 Claimed 记录去重为 false，
+    // 不同 id 正常认领——证明生产路由能到达恢复点。
+    std::fs::remove_file(&blocked).unwrap();
+    std::fs::create_dir(&blocked).unwrap();
+    assert!(
+        !manager
+            .claim_terminal_message_delivery("s1", "delivery-1", "message-1")
+            .unwrap()
+    );
+    assert!(
+        manager
+            .claim_terminal_message_delivery("s1", "delivery-2", "message-2")
+            .unwrap()
+    );
+    assert!(
+        !fs::read(&ledger_path).unwrap().is_empty(),
+        "ledger file must exist after recovery"
+    );
+}
+
+#[test]
 fn scheduled_input_body_single_line() {
     use super::TerminalScheduledInputTask;
     let task = TerminalScheduledInputTask {
+        status: String::new(),
+        last_error: String::new(),
         id: "t1".to_string(),
         session_id: "s1".to_string(),
         terminal_name: String::new(),
@@ -4137,6 +6195,8 @@ fn scheduled_input_body_single_line() {
         send_enter: true,
         task_type: String::new(),
         working_dir: String::new(),
+        repeat_interval_millis: 0,
+        parent_task_id: String::new(),
     };
     // Body never includes the submit CR; fire_scheduled_input_task emits it as
     // a separate write so the raw-mode TUI treats it as a distinct key event.
@@ -4147,6 +6207,8 @@ fn scheduled_input_body_single_line() {
 fn scheduled_input_body_plain_text() {
     use super::TerminalScheduledInputTask;
     let task = TerminalScheduledInputTask {
+        status: String::new(),
+        last_error: String::new(),
         id: "t2".to_string(),
         session_id: "s1".to_string(),
         terminal_name: String::new(),
@@ -4157,6 +6219,8 @@ fn scheduled_input_body_plain_text() {
         send_enter: false,
         task_type: String::new(),
         working_dir: String::new(),
+        repeat_interval_millis: 0,
+        parent_task_id: String::new(),
     };
     assert_eq!(super::manager::scheduled_input_body(&task), "hello");
 }
@@ -4168,6 +6232,8 @@ fn scheduled_input_body_multiline_uses_cr_inside_bracketed_paste() {
     // (Codex/Claude) treats them as line separators inside the bracketed paste
     // region. The submit CR is NOT part of the body.
     let task = TerminalScheduledInputTask {
+        status: String::new(),
+        last_error: String::new(),
         id: "t3".to_string(),
         session_id: "s1".to_string(),
         terminal_name: String::new(),
@@ -4178,6 +6244,8 @@ fn scheduled_input_body_multiline_uses_cr_inside_bracketed_paste() {
         send_enter: true,
         task_type: String::new(),
         working_dir: String::new(),
+        repeat_interval_millis: 0,
+        parent_task_id: String::new(),
     };
     let body = super::manager::scheduled_input_body(&task);
     assert_eq!(
@@ -4191,6 +6259,8 @@ fn scheduled_input_body_multiline_uses_cr_inside_bracketed_paste() {
 fn scheduled_input_body_crlf_source_collapses_to_cr() {
     use super::TerminalScheduledInputTask;
     let task = TerminalScheduledInputTask {
+        status: String::new(),
+        last_error: String::new(),
         id: "t4".to_string(),
         session_id: "s1".to_string(),
         terminal_name: String::new(),
@@ -4201,10 +6271,484 @@ fn scheduled_input_body_crlf_source_collapses_to_cr() {
         send_enter: true,
         task_type: String::new(),
         working_dir: String::new(),
+        repeat_interval_millis: 0,
+        parent_task_id: String::new(),
     };
     let body = super::manager::scheduled_input_body(&task);
     assert_eq!(body, "\u{1b}[200~a\rb\rc\u{1b}[201~");
     assert!(!body.contains('\n'));
+}
+
+#[cfg(test)]
+mod scheduled_input_batch {
+    use super::*;
+    use crate::terminal::manager::TerminalScheduledInputOneSender;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    #[test]
+    fn scheduled_unconfirmed_history_does_not_block_new_messages() {
+        let (manager, base_dir) = build_test_terminal_manager();
+        for status in ["pending_confirmation", "unknown"] {
+            let mut old = test_scheduled_input_task(status, "session-1", "old body");
+            old.status = status.into();
+            old.task_type = "agent_message".into();
+            old.last_error = "original diagnostic".into();
+            manager
+                .scheduled_input_tasks
+                .lock()
+                .unwrap()
+                .insert(old.id.clone(), old);
+        }
+        let tasks = vec![
+            test_scheduled_input_task("new-1", "session-1", "first"),
+            test_scheduled_input_task("new-2", "session-1", "second"),
+        ];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let attempts = attempted.clone();
+        let send_one: TerminalScheduledInputOneSender = Arc::new(move |_, task| {
+            attempts.lock().unwrap().push(task.id.clone());
+            Ok(())
+        });
+        manager.fire_scheduled_input_task_batch(tasks, &send_one);
+        assert_eq!(*attempted.lock().unwrap(), vec!["new-1", "new-2"]);
+        let stored = manager.scheduled_input_tasks.lock().unwrap();
+        for status in ["pending_confirmation", "unknown"] {
+            assert_eq!(stored[status].status, status);
+            assert_eq!(stored[status].last_error, "original diagnostic");
+        }
+        drop(stored);
+        let _ = std::fs::remove_dir_all(base_dir);
+    }
+
+    #[test]
+    fn batch_sender_preserves_order_continues_after_errors() {
+        let (manager, _base_dir) = build_test_terminal_manager();
+        let tasks = vec![
+            test_scheduled_input_task("task-1", "session-1", "fail"),
+            test_scheduled_input_task("task-2", "session-2", "ok"),
+            test_scheduled_input_task("task-3", "session-3", "fail"),
+            test_scheduled_input_task("task-4", "session-4", "ok"),
+        ];
+        let attempted = Arc::new(Mutex::new(Vec::new()));
+        let attempted_for_sender = attempted.clone();
+        let failure_text = Arc::new(Mutex::new("fail".to_string()));
+        let failure_text_for_sender = failure_text.clone();
+        let send_one: TerminalScheduledInputOneSender = Arc::new(
+            move |manager: &TerminalManager, task: &crate::terminal::TerminalScheduledInputTask| {
+                attempted_for_sender
+                    .lock()
+                    .expect("attempt log lock")
+                    .push(task.id.clone());
+                let _ = manager; // no terminal IO needed for this injectable sender
+                let failure_text = failure_text_for_sender
+                    .lock()
+                    .expect("failure text lock")
+                    .clone();
+                if task.text == failure_text {
+                    Err(anyhow::anyhow!("injected failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+
+        // Exercise the production batch helper, not a test-local copy of its loop.
+        manager.fire_scheduled_input_task_batch(tasks, &send_one);
+        assert_eq!(
+            attempted.lock().expect("attempt log lock").clone(),
+            vec!["task-1", "task-2", "task-3", "task-4"],
+            "sender must attempt tasks in batch order and continue after injected failures"
+        );
+
+        // Stop failures and run another batch to prove the production helper is reusable.
+        *failure_text.lock().expect("failure text lock") = "\u{0}no-failure-marker".to_string();
+        attempted.lock().expect("attempt log lock").clear();
+        let same_tasks = vec![
+            test_scheduled_input_task("task-1", "session-1", "ok"),
+            test_scheduled_input_task("task-2", "session-2", "ok"),
+            test_scheduled_input_task("task-3", "session-3", "ok"),
+            test_scheduled_input_task("task-4", "session-4", "ok"),
+        ];
+        manager.fire_scheduled_input_task_batch(same_tasks, &send_one);
+        assert_eq!(
+            attempted.lock().expect("attempt log lock").clone(),
+            vec!["task-1", "task-2", "task-3", "task-4"],
+            "the production helper must remain reusable and continue after failures"
+        );
+    }
+
+    #[test]
+    fn agent_messages_are_not_deferred_by_scheduled_input_avoid_window() {
+        let (manager, _base_dir) = build_test_terminal_manager();
+        let now = terminal_core::current_timestamp_millis();
+        let mut msg_task = test_scheduled_input_task("agent-1", "session-1", "hello agent");
+        msg_task.task_type = "agent_message".into();
+        msg_task.due_at_millis = now.saturating_sub(1000);
+
+        let mut normal_task = test_scheduled_input_task("normal-1", "session-1", "normal input");
+        normal_task.task_type = "paste".into();
+        normal_task.due_at_millis = now.saturating_sub(1000);
+
+        {
+            let mut tasks = manager.scheduled_input_tasks.lock().unwrap();
+            tasks.insert(msg_task.id.clone(), msg_task);
+            tasks.insert(normal_task.id.clone(), normal_task);
+        }
+
+        let end_millis = now.saturating_add(3600_000);
+        {
+            let mut tasks = manager.scheduled_input_tasks.lock().unwrap();
+            for task in tasks.values_mut() {
+                if task.status.is_empty()
+                    && task.task_type != "agent_message"
+                    && task.due_at_millis <= now
+                {
+                    task.due_at_millis = end_millis;
+                }
+            }
+            let due_ids = tasks
+                .values()
+                .filter(|task| {
+                    task.status.is_empty()
+                        && task.due_at_millis <= now
+                        && task.task_type == "agent_message"
+                })
+                .map(|t| t.id.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(due_ids, vec!["agent-1"]);
+            assert_eq!(tasks["normal-1"].due_at_millis, end_millis);
+            assert!(tasks["agent-1"].due_at_millis <= now);
+        }
+    }
+
+    #[test]
+    fn completed_scheduled_tasks_are_bounded_and_pruned() {
+        let mut tasks = std::collections::HashMap::new();
+        // Add 40 completed tasks
+        for i in 0..40 {
+            let mut task = test_scheduled_input_task(&format!("done-{i}"), "session-1", "msg");
+            task.status = "confirmed".into();
+            task.due_at_millis = 1000 + i;
+            tasks.insert(task.id.clone(), task);
+        }
+        // Add 2 pending tasks
+        let mut pending1 = test_scheduled_input_task("pending-1", "session-1", "pending");
+        pending1.status = "".into();
+        pending1.due_at_millis = 500;
+        let mut pending2 = test_scheduled_input_task("pending-2", "session-1", "pending");
+        pending2.status = "".into();
+        pending2.due_at_millis = 600;
+        tasks.insert(pending1.id.clone(), pending1);
+        tasks.insert(pending2.id.clone(), pending2);
+
+        super::super::manager::scheduled_input::prune_completed_scheduled_input_tasks(&mut tasks);
+
+        // Should retain all 2 pending tasks
+        assert!(tasks.contains_key("pending-1"));
+        assert!(tasks.contains_key("pending-2"));
+        // Should retain at most 30 completed tasks (total tasks = 32)
+        assert_eq!(tasks.len(), 32);
+        // The oldest completed tasks (done-0 .. done-9) should have been pruned
+        assert!(!tasks.contains_key("done-0"));
+        assert!(!tasks.contains_key("done-9"));
+        // The newest completed tasks (done-10 .. done-39) should remain
+        assert!(tasks.contains_key("done-10"));
+        assert!(tasks.contains_key("done-39"));
+    }
+
+    #[test]
+    fn batch_sender_blocking_does_not_block_current_thread_worker() {
+        let (manager, _base_dir) = build_test_terminal_manager();
+        let (batch_started_tx, batch_started_rx) = tokio::sync::oneshot::channel();
+        let batch_started_tx = Arc::new(Mutex::new(Some(batch_started_tx)));
+        let (batch_completed_tx, batch_completed_rx) =
+            tokio::sync::oneshot::channel::<&'static str>();
+        let batch_completed_tx = Arc::new(Mutex::new(Some(batch_completed_tx)));
+        let batch_release_state = Arc::new((Mutex::new(false), Condvar::new()));
+        let batch_release_state_for_sender = batch_release_state.clone();
+
+        // The loop only dispatches due tasks, so seed one task that is already due.
+        // Mark it agent_message so the peak-hour avoid window (default 14:00-18:00)
+        // never defers it: this test asserts blocking-pool scheduling, not the window.
+        let mut due_task = test_scheduled_input_task("task-1", "session-1", "block");
+        due_task.task_type = "agent_message".into();
+        manager
+            .scheduled_input_tasks
+            .lock()
+            .expect("scheduled input tasks lock")
+            .insert("task-1".to_string(), due_task);
+
+        let send_batch: crate::terminal::manager::TerminalScheduledInputBatchSender =
+            Arc::new(move |_manager, batch| {
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].text, "block");
+                let sender = batch_started_tx
+                    .lock()
+                    .expect("batch start sender lock")
+                    .take()
+                    .expect("batch start sender should be available exactly once");
+                sender
+                    .send(())
+                    .expect("batch start signal receiver should remain alive");
+
+                // The barrier has a hard timeout. Return the causal check to
+                // the async side because a panic would become a JoinError in
+                // the production loop and would look like a false pass here.
+                let (released, condition) = &*batch_release_state_for_sender;
+                let (released_guard, wait_result) = condition
+                    .wait_timeout_while(
+                        released.lock().expect("release state lock"),
+                        Duration::from_secs(2),
+                        |released| !*released,
+                    )
+                    .expect("release condition lock should not be poisoned");
+                let result = if *released_guard && !wait_result.timed_out() {
+                    "ok"
+                } else {
+                    "blocking batch timed out or was not released"
+                };
+                drop(released_guard);
+                let completed_sender = batch_completed_tx
+                    .lock()
+                    .expect("batch completion sender lock")
+                    .take()
+                    .expect("batch completion sender should be available exactly once");
+                completed_sender
+                    .send(result)
+                    .expect("batch completion receiver should remain alive");
+            });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should start");
+
+        let collection_wait_started = Instant::now();
+        runtime.block_on(async move {
+            let notify = manager.scheduled_input_notify.clone();
+            let heartbeat = tokio::spawn(async move {
+                loop {
+                    notify.notify_one();
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            });
+
+            // Hold a release guard for every assertion in this test. If an
+            // assertion fails or the runtime unwinds, Drop still releases the
+            // blocking closure so runtime teardown cannot hang.
+            let guard = BlockingBatchReleaseGuard::new(batch_release_state.clone());
+
+            let loop_task =
+                tokio::spawn(manager.run_scheduled_input_loop_with_batch_sender(send_batch));
+            tokio::time::timeout(Duration::from_secs(2), batch_started_rx)
+                .await
+                .expect("batch should start on the blocking pool")
+                .expect("batch start signal should be sent");
+
+            for _ in 0..10 {
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    tokio::time::sleep(Duration::from_millis(1)),
+                )
+                .await
+                .expect("async worker should remain responsive while batch blocks");
+            }
+
+            // Proactive normal release; guard Drop remains the failure backstop.
+            {
+                let (released, condition) = &*batch_release_state;
+                let mut released_guard = released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *released_guard = true;
+                condition.notify_all();
+            }
+
+            // The scheduler itself runs forever; assert the batch result, not
+            // completion of the loop. Then abort and await the stale handle.
+            let result = tokio::time::timeout(Duration::from_secs(2), batch_completed_rx)
+                .await
+                .expect("batch completion should be signaled")
+                .expect("batch completion channel should remain open");
+            assert_eq!(result, "ok", "blocking batch must be released before timeout");
+
+            heartbeat.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), heartbeat).await;
+            loop_task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), loop_task).await;
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn scheduled_collection_blocking_does_not_block_current_thread_worker() {
+        let (manager, _base_dir) = build_test_terminal_manager();
+        // Mark it agent_message so the peak-hour avoid window (default 14:00-18:00)
+        // never defers it: this test asserts collection-lock scheduling, not the window.
+        let mut due_task = test_scheduled_input_task("task-1", "session-1", "queued");
+        due_task.task_type = "agent_message".into();
+        manager
+            .scheduled_input_tasks
+            .lock()
+            .expect("scheduled input tasks lock")
+            .insert("task-1".to_string(), due_task);
+
+        let (lock_ready_tx, lock_ready_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let tasks = manager.scheduled_input_tasks.clone();
+        let lock_holder = std::thread::spawn(move || {
+            let guard = tasks.lock().expect("scheduled input tasks lock");
+            lock_ready_tx
+                .send(())
+                .expect("lock-ready receiver should remain alive");
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            drop(guard);
+        });
+        let release_guard = ScheduledCollectionReleaseGuard(Some(release_tx));
+        lock_ready_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("collection lock holder should start");
+
+        let (batch_started_tx, mut batch_started_rx) = tokio::sync::oneshot::channel();
+        let batch_started_tx = Arc::new(Mutex::new(Some(batch_started_tx)));
+        let send_batch: crate::terminal::manager::TerminalScheduledInputBatchSender =
+            Arc::new(move |_manager, batch| {
+                assert_eq!(batch.len(), 1);
+                batch_started_tx
+                    .lock()
+                    .expect("batch start sender lock")
+                    .take()
+                    .expect("batch start sender should be available once")
+                    .send(())
+                    .expect("batch start receiver should remain alive");
+            });
+
+        let heartbeat_count = Arc::new(AtomicUsize::new(0));
+        let heartbeat_count_for_task = heartbeat_count.clone();
+        let (heartbeat_second_tx, heartbeat_second_rx) = tokio::sync::oneshot::channel();
+        let heartbeat_second_tx = Arc::new(Mutex::new(Some(heartbeat_second_tx)));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should start");
+        let collection_wait_started = Instant::now();
+        runtime.block_on(async move {
+            let notify = manager.scheduled_input_notify.clone();
+            let heartbeat = tokio::spawn(async move {
+                loop {
+                    let count = heartbeat_count_for_task.fetch_add(1, Ordering::SeqCst) + 1;
+                    if count == 2 {
+                        if let Some(sender) = heartbeat_second_tx
+                            .lock()
+                            .expect("heartbeat sender lock")
+                            .take()
+                        {
+                            let _ = sender.send(());
+                        }
+                    }
+                    notify.notify_one();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            });
+            let loop_task =
+                tokio::spawn(manager.run_scheduled_input_loop_with_batch_sender(send_batch));
+
+            tokio::time::timeout(Duration::from_secs(1), heartbeat_second_rx)
+                .await
+                .expect("current-thread worker should keep heartbeats while collection blocks")
+                .expect("heartbeat signal should remain connected");
+            assert!(heartbeat_count.load(Ordering::SeqCst) >= 2);
+            assert!(
+                collection_wait_started.elapsed() < Duration::from_secs(1),
+                "heartbeat must run before the lock holder's safety timeout"
+            );
+            assert!(batch_started_rx.try_recv().is_err(), "batch must wait for collection lock");
+
+            drop(release_guard);
+            tokio::time::timeout(Duration::from_secs(2), batch_started_rx)
+                .await
+                .expect("batch should start after collection lock release")
+                .expect("batch start signal should remain connected");
+
+            heartbeat.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), heartbeat).await;
+            loop_task.abort();
+            let _ = tokio::time::timeout(Duration::from_secs(1), loop_task).await;
+        });
+        lock_holder
+            .join()
+            .expect("lock holder should exit after release");
+    }
+
+    struct ScheduledCollectionReleaseGuard(Option<mpsc::SyncSender<()>>);
+
+    impl Drop for ScheduledCollectionReleaseGuard {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn blocking_batch_release_guard_releases_on_unwind() {
+        let batch_release_state = Arc::new((Mutex::new(false), Condvar::new()));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = BlockingBatchReleaseGuard::new(batch_release_state.clone());
+            panic!("simulated assertion failure while guard is held");
+        }));
+
+        assert!(result.is_err(), "the simulated failure must unwind");
+        let (released, condition) = &*batch_release_state;
+        let released_guard = released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(*released_guard, "guard Drop must release the blocking barrier after unwind");
+        drop(released_guard);
+        condition.notify_all();
+    }
+
+    struct BlockingBatchReleaseGuard(Arc<(Mutex<bool>, Condvar)>);
+
+    impl BlockingBatchReleaseGuard {
+        fn new(state: Arc<(Mutex<bool>, Condvar)>) -> Self {
+            Self(state)
+        }
+    }
+
+    impl Drop for BlockingBatchReleaseGuard {
+        fn drop(&mut self) {
+            let (released, condition) = &*self.0;
+            let mut released_guard = released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *released_guard = true;
+            condition.notify_all();
+        }
+    }
+}
+
+fn test_scheduled_input_task(
+    id: &str,
+    session_id: &str,
+    text: &str,
+) -> super::TerminalScheduledInputTask {
+    super::TerminalScheduledInputTask {
+        status: String::new(),
+        last_error: String::new(),
+        id: id.to_string(),
+        session_id: session_id.to_string(),
+        terminal_name: String::new(),
+        due_at_millis: 0,
+        created_at_millis: 0,
+        label: String::new(),
+        text: text.to_string(),
+        send_enter: false,
+        task_type: String::new(),
+        working_dir: String::new(),
+        repeat_interval_millis: 0,
+        parent_task_id: String::new(),
+    }
 }
 
 #[test]
@@ -4243,7 +6787,7 @@ fn terminal_message_bracketed_paste_waits_for_tui_settle() {
 fn terminal_message_submission_timing_is_bounded() {
     let verification_window_ms =
         super::TERMINAL_MESSAGE_VERIFY_POLLS as u64 * super::TERMINAL_MESSAGE_VERIFY_POLL_MS;
-    assert_eq!(verification_window_ms, 2_000);
+    assert_eq!(verification_window_ms, 6_000);
     assert!(
         (super::TERMINAL_MESSAGE_VERIFY_POLLS.saturating_sub(1) as u64)
             * super::TERMINAL_MESSAGE_VERIFY_POLL_MS
@@ -4423,4 +6967,857 @@ fn delete_codex_conversation_rejects_invalid_session_id() {
         super::delete_codex_conversation_files(Path::new("/tmp/.codex"), "../history.jsonl")
             .expect_err("invalid Codex session id should be rejected");
     assert!(error.to_string().contains("session ID"));
+}
+
+#[test]
+fn grouped_sessions_atomic_membership_and_persistence() {
+    let mut state = TerminalState::default();
+    for id in ["s1", "s2", "s3", "s4", "s5"] {
+        state
+            .sessions_by_id
+            .insert(id.into(), stored_test_terminal_session(id));
+    }
+    let ids = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s2",
+        &ids(&["s3"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    let token = state.sessions_by_id["s2"].group_token.clone();
+    assert!(!token.is_empty());
+    assert_eq!(state.sessions_by_id["s3"].group_token, token);
+    assert!(!state.sessions_by_id["s2"].group_color.is_empty());
+    assert_eq!(state.sessions_by_id["s3"].group_color, state.sessions_by_id["s2"].group_color);
+    // Invalid selection fails before any member is changed.
+    assert!(
+        super::manager::update_session_group_locked(
+            &mut state,
+            "s2",
+            &ids(&["missing"]),
+            &[],
+            false,
+            None,
+            None,
+        )
+        .is_err()
+    );
+    assert_eq!(state.sessions_by_id["s2"].group_token, token);
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s2",
+        &ids(&["s3"]),
+        &[],
+        false,
+        Some("#ABCDEF".to_string()),
+        None,
+    )
+    .unwrap();
+    assert_eq!(state.sessions_by_id["s2"].group_color, "#abcdef");
+    assert_eq!(state.sessions_by_id["s3"].group_color, "#abcdef");
+
+    // A color change is atomic with the same membership payload.
+    assert!(
+        super::manager::update_session_group_locked(
+            &mut state,
+            "s2",
+            &ids(&["missing"]),
+            &[],
+            false,
+            Some("#111111".to_string()),
+            None,
+        )
+        .is_err()
+    );
+    assert_eq!(state.sessions_by_id["s2"].group_color, "#abcdef");
+    assert_eq!(state.sessions_by_id["s3"].group_color, "#abcdef");
+
+    // If the color is omitted, the existing group color is inherited.
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s2",
+        &ids(&["s3"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(state.sessions_by_id["s2"].group_color, "#abcdef");
+    assert_eq!(state.sessions_by_id["s3"].group_color, "#abcdef");
+
+    let encoded = serde_json::to_vec(&state.sessions_by_id["s2"]).unwrap();
+    let restored: StoredTerminalSession = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(restored.group_token, token);
+    assert_eq!(restored.group_color, "#abcdef");
+    assert!(!restored.manually_renamed);
+    for active in ["s2", "s3"] {
+        state.sessions_by_id.get_mut(active).unwrap().last_opened_at += 100;
+        let mut order = ids(&["s5", "s3", "s1", "s2", "s4"]);
+        sort_session_ids_by_recent_activity(&state, &mut order);
+        assert_eq!(&order[..2], &["s2", "s3"]);
+    }
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s4",
+        &ids(&["s5"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    state.sessions_by_id.get_mut("s5").unwrap().last_opened_at = 500;
+    state.sessions_by_id.get_mut("s1").unwrap().last_opened_at = 400;
+    let mut order = ids(&["s1", "s2", "s3", "s4", "s5"]);
+    sort_session_ids_by_recent_activity(&state, &mut order);
+    assert_eq!(order, ids(&["s4", "s5", "s1", "s2", "s3"]));
+    // Moving one partner leaves no stale singleton marker in its former group.
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s2",
+        &ids(&["s4"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(state.sessions_by_id["s3"].group_token.is_empty());
+    assert!(state.sessions_by_id["s3"].group_color.is_empty());
+    assert!(state.sessions_by_id["s5"].group_token.is_empty());
+    assert!(state.sessions_by_id["s5"].group_color.is_empty());
+    super::manager::update_session_group_locked(&mut state, "s2", &[], &[], false, None, None)
+        .unwrap();
+    assert!(
+        state
+            .sessions_by_id
+            .values()
+            .all(|s| s.group_token.is_empty())
+    );
+}
+
+#[test]
+fn grouped_sessions_preserve_manual_order() {
+    let mut state = TerminalState::default();
+    for id in ["s1", "s2", "s3", "s4", "s5"] {
+        state
+            .sessions_by_id
+            .insert(id.into(), stored_test_terminal_session(id));
+    }
+    let ids = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s1",
+        &ids(&["s3", "s1", "s2"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    let _ = state.sessions_by_id["s1"].group_token.clone();
+    let mut order = ids(&["s4", "s5", "s1", "s2", "s3"]);
+    sort_session_ids_by_recent_activity(&state, &mut order);
+    assert_eq!(order, ids(&["s5", "s4", "s3", "s1", "s2"]));
+
+    state.sessions_by_id.get_mut("s2").unwrap().last_opened_at = 100;
+    let mut order = ids(&["s1", "s2", "s3", "s4", "s5"]);
+    sort_session_ids_by_recent_activity(&state, &mut order);
+    assert_eq!(order, ids(&["s3", "s1", "s2", "s5", "s4"]));
+
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s1",
+        &ids(&["s3", "s1"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(state.sessions_by_id["s2"].group_token.is_empty());
+}
+
+#[test]
+fn new_group_default_color_skips_colors_already_used_by_other_groups() {
+    let mut state = TerminalState::default();
+    for id in ["s1", "s2", "s3", "s4"] {
+        state
+            .sessions_by_id
+            .insert(id.into(), stored_test_terminal_session(id));
+    }
+    let ids = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s1",
+        &ids(&["s2"]),
+        &[],
+        false,
+        Some(super::manager::default_terminal_group_color("group-2")),
+        None,
+    )
+    .unwrap();
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s3",
+        &ids(&["s4"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(state.sessions_by_id["s3"].group_token, "group-2");
+    assert_ne!(state.sessions_by_id["s3"].group_color, state.sessions_by_id["s1"].group_color);
+}
+
+#[test]
+fn grouped_session_activation_promotes_member_unless_order_is_fixed() {
+    let mut state = TerminalState::default();
+    for id in ["s1", "s2", "s3", "s4"] {
+        state
+            .sessions_by_id
+            .insert(id.into(), stored_test_terminal_session(id));
+    }
+    let ids = |values: &[&str]| values.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s1",
+        &ids(&["s1", "s2", "s3"]),
+        &[],
+        false,
+        None,
+        None,
+    )
+    .unwrap();
+    state.sessions_by_id.get_mut("s1").unwrap().group_order = 1;
+    state.sessions_by_id.get_mut("s2").unwrap().group_order = 2;
+    state.sessions_by_id.get_mut("s3").unwrap().group_order = 3;
+    super::manager::mark_session_opened_locked(&mut state, "s3");
+    assert_eq!(state.sessions_by_id["s3"].group_order, 1);
+    assert_eq!(state.sessions_by_id["s1"].group_order, 2);
+    assert_eq!(state.sessions_by_id["s2"].group_order, 3);
+
+    super::manager::update_session_group_locked(
+        &mut state,
+        "s1",
+        &ids(&["s1", "s2", "s3"]),
+        &[],
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    state.sessions_by_id.get_mut("s1").unwrap().group_order = 1;
+    state.sessions_by_id.get_mut("s2").unwrap().group_order = 2;
+    state.sessions_by_id.get_mut("s3").unwrap().group_order = 3;
+    state.sessions_by_id.get_mut("s3").unwrap().last_opened_at = 0;
+    super::manager::mark_session_opened_locked(&mut state, "s3");
+    assert_eq!(state.sessions_by_id["s1"].group_order, 1);
+    assert_eq!(state.sessions_by_id["s2"].group_order, 2);
+    assert_eq!(state.sessions_by_id["s3"].group_order, 3);
+}
+
+#[test]
+fn codex_scan_slot_shares_inflight_scan_between_requests() {
+    let key = super::CodexScanKey {
+        codex_home: std::env::temp_dir().join(format!(
+            "webclx-scan-slot-share-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        )),
+        cwd_filter: None,
+        since_ms: None,
+    };
+    let (leader_slot, is_leader) = super::register_codex_scan_slot(&key);
+    assert!(is_leader, "first registration should lead the scan");
+    let (follower_slot, follower_is_leader) = super::register_codex_scan_slot(&key);
+    assert!(!follower_is_leader, "second identical request should follow");
+    assert_eq!(leader_slot.id, follower_slot.id);
+
+    let shared: super::CodexScanShared = Arc::new(Ok(Vec::new()));
+    super::complete_codex_scan_slot(&key, &leader_slot, shared);
+
+    let (next_slot, next_is_leader) = super::register_codex_scan_slot(&key);
+    assert!(next_is_leader, "completed scan must not block a fresh scan");
+    assert_ne!(next_slot.id, leader_slot.id);
+    assert!(
+        follower_slot.result_rx.borrow().is_some(),
+        "follower must observe the published shared result"
+    );
+    super::complete_codex_scan_slot(&key, &next_slot, Arc::new(Ok(Vec::new())));
+}
+
+#[test]
+fn codex_scan_slot_takes_over_stale_leader() {
+    let key = super::CodexScanKey {
+        codex_home: std::env::temp_dir().join(format!(
+            "webclx-scan-slot-stale-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time should be after epoch")
+                .as_nanos()
+        )),
+        cwd_filter: None,
+        since_ms: None,
+    };
+    let (stale_slot, is_leader) = super::register_codex_scan_slot(&key);
+    assert!(is_leader);
+    {
+        let mut slots = crate::lock_or_recover!(super::codex_scan_slots().lock());
+        let stored = slots.get_mut(&key).expect("stored scan slot");
+        stored.created_at =
+            Instant::now() - Duration::from_secs(super::TERMINAL_TASK_TIMEOUT_SECS + 3);
+    }
+    let (replacement_slot, takeover_is_leader) = super::register_codex_scan_slot(&key);
+    assert!(takeover_is_leader, "stale leader slot must be taken over");
+    assert_ne!(replacement_slot.id, stale_slot.id);
+
+    super::complete_codex_scan_slot(&key, &stale_slot, Arc::new(Ok(Vec::new())));
+    let (after_stale, still_registered) = super::register_codex_scan_slot(&key);
+    assert!(
+        !still_registered,
+        "replacement slot must stay registered after a stale leader completes"
+    );
+    assert_eq!(after_stale.id, replacement_slot.id);
+    super::complete_codex_scan_slot(&key, &replacement_slot, Arc::new(Ok(Vec::new())));
+}
+
+#[tokio::test]
+async fn codex_scan_slot_waiter_receives_ok_and_error_results() {
+    let base = std::env::temp_dir().join(format!(
+        "webclx-scan-slot-wait-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let ok_key = super::CodexScanKey {
+        codex_home: base.join("ok"),
+        cwd_filter: None,
+        since_ms: None,
+    };
+    let (ok_slot, is_leader) = super::register_codex_scan_slot(&ok_key);
+    assert!(is_leader);
+    let ok_waiter = super::wait_codex_scan_result(ok_slot.result_rx.clone());
+    super::complete_codex_scan_slot(&ok_key, &ok_slot, Arc::new(Ok(Vec::new())));
+    assert!(ok_waiter.await.is_ok(), "waiter should receive Ok result");
+
+    let error_key = super::CodexScanKey {
+        codex_home: base.join("error"),
+        cwd_filter: None,
+        since_ms: None,
+    };
+    let (error_slot, error_is_leader) = super::register_codex_scan_slot(&error_key);
+    assert!(error_is_leader);
+    let error_waiter = super::wait_codex_scan_result(error_slot.result_rx.clone());
+    let shared: super::CodexScanShared = Arc::new(Err("扫描失败原因".to_string()));
+    super::complete_codex_scan_slot(&error_key, &error_slot, shared);
+    let error = error_waiter
+        .await
+        .expect_err("waiter must surface the scan error instead of faking success");
+    assert!(
+        error.to_string().contains("扫描失败原因"),
+        "error detail must propagate to the follower"
+    );
+}
+#[test]
+fn stored_hsl_group_colors_convert_to_hex_for_group_api() {
+    assert_eq!(
+        super::manager::hsl_terminal_group_color("hsl(120.000 76% 52%)").as_deref(),
+        Some("#28e228")
+    );
+    assert_eq!(super::manager::hsl_terminal_group_color("#28e228"), None);
+
+    let mut session = stored_test_terminal_session("s1");
+    session.group_token = "group-1".to_string();
+    session.group_color = "hsl(0.000 76% 52%)".to_string();
+    assert!(super::manager::normalize_stored_terminal_group_color(&mut session));
+    assert_eq!(session.group_color, "#e22828");
+
+    session.group_color = "#123ABC".to_string();
+    assert!(!super::manager::normalize_stored_terminal_group_color(&mut session));
+    assert_eq!(session.group_color, "#123ABC");
+}
+
+#[test]
+fn scheduled_submission_retries_only_enter_until_rollout_confirms() {
+    use std::cell::Cell;
+    let enters = Cell::new(0);
+    let waits = Cell::new(0);
+    let result = super::manager::submit_scheduled_message(
+        || Ok(false),
+        || {
+            enters.set(enters.get() + 1);
+            Ok(())
+        },
+        || Ok(enters.get() == 2),
+        || waits.set(waits.get() + 1),
+    )
+    .unwrap();
+    assert_eq!(result, "confirmed");
+    assert_eq!(enters.get(), 2);
+    assert_eq!(waits.get(), 21);
+}
+
+#[test]
+fn scheduled_submission_unconfirmed_is_bounded_and_never_success() {
+    use std::cell::Cell;
+    let enters = Cell::new(0);
+    let waits = Cell::new(0);
+    assert_eq!(
+        super::manager::submit_scheduled_message(
+            || Ok(false),
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || Ok(false),
+            || waits.set(waits.get() + 1),
+        )
+        .unwrap(),
+        "pending_confirmation"
+    );
+    assert_eq!(enters.get(), 3);
+    assert_eq!(waits.get(), 60);
+}
+
+#[test]
+fn scheduled_submission_already_confirmed_never_sends_enter() {
+    assert_eq!(
+        super::manager::submit_scheduled_message(
+            || Ok(false),
+            || panic!("confirmed message must not receive another Enter"),
+            || Ok(true),
+            || panic!("no wait needed"),
+        )
+        .unwrap(),
+        "confirmed"
+    );
+}
+
+#[test]
+fn scheduled_submission_stops_on_unknown_history_or_write_error() {
+    let error = super::manager::submit_scheduled_message(
+        || Ok(false),
+        || panic!("unknown history must stop before Enter"),
+        || anyhow::bail!("rollout unavailable"),
+        || panic!("no wait needed"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("rollout unavailable"));
+    let error = super::manager::submit_scheduled_message(
+        || Ok(false),
+        || anyhow::bail!("partial write"),
+        || Ok(false),
+        || panic!("no wait needed"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("partial write"));
+}
+
+#[test]
+fn scheduled_dispatching_survives_reload_as_unknown_without_resend() {
+    let (manager, base_dir) = build_test_terminal_manager();
+    let mut task = test_scheduled_input_task("scheduled-restart", "s1", "body");
+    task.status = "dispatching".into();
+    let registry = super::StoredTerminalScheduledInputRegistry { tasks: vec![task] };
+    std::fs::write(manager.scheduled_input_file.as_ref(), serde_json::to_vec(&registry).unwrap())
+        .unwrap();
+    let reloaded = super::TerminalManager::new(base_dir.join("terminal-state.json"));
+    let rows = reloaded.list_scheduled_inputs();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "unknown");
+    assert!(rows[0].last_error.contains("restarted"));
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+// ===== 终端注入红线源码扫描 =====
+//
+// AGENTS.md 最高优先级规则：webClx 不得向终端、shell、Agent 或其子进程注入
+// 环境变量、启动参数或配置。下面的回归测试不启动任何进程，只读取本 crate
+// 自身的源码（`env!("CARGO_MANIFEST_DIR")` 指向 crate 根目录）做静态扫描，
+// 覆盖三道防线：
+//
+// 1. `CHILD_PROCESS_ENV_KEYS_TO_CLEAR` 仍覆盖全部禁入变量（直接断言常量）；
+// 2. src/terminal/ 源码树（含模块根 src/terminal.rs）里每个含
+//    `Command::new(` / `CommandBuilder::new(` 的非测试文件，剥离
+//    `#[cfg(test)]` 条目后必须仍出现 `sanitize_child_command(&mut` 或
+//    `sanitize_pty_command(&mut`——即「新文件裸 spawn 必被拦」。例外的
+//    OS 工具 spawn 只能登记进 SOURCE_SCAN_UNWASHED_SPAWN_ALLOWLIST，条目
+//    附带当时的 spawn 计数，往豁免文件里再加一个裸 spawn 会因计数失配
+//    而失败。真正的进程执行器 process_exec 在 src/process_exec.rs，不在
+//    本扫描范围内；
+// 3. 剥离测试代码后任何文件不得出现 "--login"，且 `arg("runuser")` 只允许
+//    在 src/terminal/tmux.rs 的 append_runuser_login_shell 出现一次。
+
+/// `CHILD_PROCESS_ENV_KEYS_TO_CLEAR` 必须覆盖的禁入变量全集。新增可旁路
+/// 终端身份的变量时，先加进 terminal.rs 的常量，再补进这份期望清单。
+const SOURCE_SCAN_EXPECTED_CLEARED_ENV_KEYS: &[&str] = &[
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "LIBRARY_PATH",
+    "HOME",
+    "WEBCLX_USER_HOME",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "WEBCLX_LOCAL_API_TOKEN",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
+/// 允许不经 sanitize_* 就 spawn 子进程的源码文件。每项的 `&str` 原因必须
+/// 说明为什么这里起的进程不是用户终端/shell/Agent；`usize` 锁定登记时的
+/// `Command::new(` + `CommandBuilder::new(` 总数，新增或删除 spawn 都必须
+/// 回来更新本清单，从而强制人工复核。
+const SOURCE_SCAN_UNWASHED_SPAWN_ALLOWLIST: &[(&str, usize, &str)] = &[
+    (
+        "src/terminal.rs",
+        1,
+        "模块根 read_terminal_auto_continue_crontab 只经 \
+         process_exec::bounded_output 起 `crontab -l`，属服务自身 OS 工具",
+    ),
+    (
+        "src/terminal/manager.rs",
+        4,
+        "systemctl stop webclx-tmux-*.scope 与 date 的 cron 时间换算都经 \
+         process_exec::bounded_output，属服务自身 OS 工具",
+    ),
+    (
+        "src/terminal/manager/crontab.rs",
+        2,
+        "crontab -l / crontab - 读写系统 crontab，经 \
+         process_exec::bounded_output，不是用户终端",
+    ),
+];
+
+/// `#[cfg(test)]` 与 `#[cfg(all(test, ...))]` 标记的是仅测试期存在的条目；
+/// `any(...)`、`not(test)`、`cfg_attr` 不保证只在测试编译出现，保持原样。
+fn source_scan_attr_is_test_only(line: &str) -> bool {
+    let Some(inner) = line.trim_start().strip_prefix("#[cfg(") else {
+        return false;
+    };
+    if inner.trim_end() == "test)]" {
+        return true;
+    }
+    inner.trim_start().starts_with("all(") && inner.contains("test") && !inner.contains("not(test")
+}
+
+/// 消费一个被 cfg(test) 属性装饰的条目：先跳过空行与同一条目上的叠加
+/// 属性行，再对条目做字符级扫描——顶层 `;` 或行尾顶层 `,`（cfg(test) 的
+/// struct 字段）即条目结束；顶层 `{` 进入块模式，花括号归零结束。圆/方
+/// 括号内的 `,`/`;` 不算顶层。这是面向本 crate 源码的启发式扫描。
+fn source_scan_skip_gated_item<'a>(lines: &mut impl Iterator<Item = &'a str>) {
+    let mut current: &str = loop {
+        match lines.next() {
+            Some(line) if line.trim().is_empty() || line.trim_start().starts_with('#') => {
+                continue;
+            }
+            Some(line) => break line,
+            None => return,
+        }
+    };
+
+    let (mut round, mut square, mut curly) = (0_i32, 0_i32, 0_i32);
+    let mut in_body = false;
+    loop {
+        for ch in current.chars() {
+            if in_body {
+                match ch {
+                    '{' => curly += 1,
+                    '}' => curly -= 1,
+                    _ => {}
+                }
+                if curly == 0 {
+                    return;
+                }
+                continue;
+            }
+            match ch {
+                '(' => round += 1,
+                ')' => round -= 1,
+                '[' => square += 1,
+                ']' => square -= 1,
+                '{' => {
+                    curly += 1;
+                    if round == 0 && square == 0 {
+                        in_body = true;
+                    }
+                }
+                '}' => curly -= 1,
+                ';' if curly == 0 && round == 0 && square == 0 => return,
+                _ => {}
+            }
+        }
+        if !in_body && curly == 0 && round == 0 && square == 0 && current.trim_end().ends_with(',')
+        {
+            return;
+        }
+        match lines.next() {
+            Some(next) => current = next,
+            None => return,
+        }
+    }
+}
+
+/// 返回去掉全部 cfg(test)/cfg(all(test, ...)) 条目后的源码，使测试专用
+/// helper（如 `Command::new` fixture）不被计成生产 spawn 点。
+fn source_scan_strip_test_items(source: &str) -> String {
+    let mut kept = String::with_capacity(source.len());
+    let mut lines = source.lines();
+    while let Some(line) = lines.next() {
+        if source_scan_attr_is_test_only(line) {
+            source_scan_skip_gated_item(&mut lines);
+            continue;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    kept
+}
+
+/// 终端模块的生产源码集合：模块根 `src/terminal.rs` 加上 `src/terminal/`
+/// 下递归找到的全部 `.rs` 文件（`tests.rs` 即本文件除外）。目录条目逐个
+/// 遍历、不写死文件清单，新增文件自动纳入扫描。返回按仓库相对路径排序的
+/// `(相对路径, 源码文本)`。
+fn source_scan_terminal_sources() -> Vec<(String, String)> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src_dir = manifest_dir.join("src");
+    let mut paths = vec![src_dir.join("terminal.rs")];
+    let mut stack = vec![src_dir.join("terminal")];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir)
+            .unwrap_or_else(|error| panic!("无法读取源码目录 {}: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let source = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("无法读取源码文件 {}: {error}", path.display()));
+            let rel = path
+                .strip_prefix(manifest_dir)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            (rel, source)
+        })
+        .collect()
+}
+
+#[test]
+fn terminal_injection_redline_source_scan() {
+    // 1) 禁入变量全集仍在清除清单内。直接断言常量本身，不依赖源码文本。
+    for key in SOURCE_SCAN_EXPECTED_CLEARED_ENV_KEYS {
+        assert!(
+            CHILD_PROCESS_ENV_KEYS_TO_CLEAR.contains(key),
+            "CHILD_PROCESS_ENV_KEYS_TO_CLEAR 缺少禁入变量 {key}"
+        );
+    }
+    assert_eq!(
+        auth_core::WEBCLX_LOCAL_API_TOKEN_ENV,
+        "WEBCLX_LOCAL_API_TOKEN",
+        "本地 API token 环境变量名变更时同步更新 SOURCE_SCAN_EXPECTED_CLEARED_ENV_KEYS"
+    );
+
+    // 2)+3) spawn-site 与 runuser/--login 扫描。
+    let mut violations: Vec<String> = Vec::new();
+    let mut runuser_sites: Vec<String> = Vec::new();
+    for (rel_path, source) in source_scan_terminal_sources() {
+        let stripped = source_scan_strip_test_items(&source);
+        let spawn_count = stripped.matches("Command::new(").count()
+            + stripped.matches("CommandBuilder::new(").count();
+        match SOURCE_SCAN_UNWASHED_SPAWN_ALLOWLIST
+            .iter()
+            .find(|entry| entry.0 == rel_path)
+        {
+            Some(&(_, expected, _)) if spawn_count != expected => violations.push(format!(
+                "{rel_path}: Command::new/CommandBuilder::new 计数 {spawn_count} 与豁免记录 \
+                 {expected} 不一致；新增裸 spawn 请改用 sanitize_child_command / \
+                 sanitize_pty_command，确属非终端 OS 工具时更新本测试的豁免清单"
+            )),
+            Some(_) => {}
+            None if spawn_count > 0
+                && !stripped.contains("sanitize_child_command(&mut")
+                && !stripped.contains("sanitize_pty_command(&mut") =>
+            {
+                violations.push(format!(
+                    "{rel_path}: 含 {spawn_count} 处 Command::new/CommandBuilder::new 但没有任何 \
+                     sanitize_*(&mut …) 调用；新子进程必须先按 \
+                     CHILD_PROCESS_ENV_KEYS_TO_CLEAR 清环境，或把文件登记进豁免清单"
+                ));
+            }
+            None => {}
+        }
+        if stripped.contains("--login") {
+            violations.push(format!(
+                "{rel_path}: 出现 \"--login\"；AGENTS.md 要求新终端登录启动只走 \
+                 `runuser -u USER -- SHELL -l`，禁止与 -u 并用 --login"
+            ));
+        }
+        let runuser_count = stripped.matches("arg(\"runuser\")").count();
+        if runuser_count > 0 {
+            runuser_sites.push(format!("{rel_path} x{runuser_count}"));
+        }
+    }
+    if runuser_sites != ["src/terminal/tmux.rs x1".to_string()] {
+        violations.push(format!(
+            "runuser argv 只允许在 src/terminal/tmux.rs 的 append_runuser_login_shell \
+             构造一次，实际命中: {runuser_sites:?}"
+        ));
+    }
+    assert!(violations.is_empty(), "终端注入红线源码扫描失败:\n{}", violations.join("\n"));
+}
+
+#[test]
+fn terminal_close_rate_limit_throttles_rapid_bulk_destructions() {
+    let test_ip = std::net::Ipv4Addr::new(127, 0, 0, 88).into();
+    if let Ok(mut tracker) = super::TERMINAL_CLOSE_TRACKER.lock() {
+        tracker.remove(&test_ip);
+    }
+    for i in 1..=5 {
+        assert!(
+            super::check_terminal_close_rate_limit(test_ip).is_ok(),
+            "attempt {i} should pass"
+        );
+    }
+    let err =
+        super::check_terminal_close_rate_limit(test_ip).expect_err("6th attempt must be throttled");
+    assert_eq!(err.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[test]
+fn message_submission_queue_suppresses_extra_enter() {
+    let sample = "■ Conversation interrupted - use /feedback if something went wrong\n\nCompacting context (9s • esc to interrupt)\n  └ Making room to continue.\n\n• Messages to be submitted at end of turn\n  ↳ 我现在使用sub2api正在测上游sub2freeApi，结果日志并没有体现\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol high · Context 45% used · Fast off";
+    let agy = "> 软链接当前啥情况\n\n● Ran 3 commands (ctrl+o to expand)\n\n⣟  Running command...\n▸ 你知道吗 (alt+m to send immediately)\n──────────────────────\n>\n──────────────────────\n  Press up to edit queued messages";
+    // CodeBuddy v2.168.2: captured from a real 80-column interactive PTY
+    // while Bash sleep 40 was running, after submitting a follow-up with Enter.
+    let codebuddy = "● REPL · sleep 40 seconds for terminal display test\n  └ ...running 5s ago → Bash · sleep 40\n\n✺ Locating… (10s · running REPL · ⚒ 9 tokens)\n\n Messages to be submitted after next tool call (press esc to interrupt and send\n immediately)\n ↳ QUEUE_PROBE_ONE 请只回复 QUEUE_ACK\n──────────────────────\n>\n──────────────────────";
+    for snapshot in [
+        sample,
+        "• Queued follow-up inputs\n  ↳ 下一条消息",
+        agy,
+        codebuddy,
+        "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+        "Messages to be submitted after next tool call\n(press esc to interrupt and send immediately)",
+        "▸ 你知道吗 (alt+m to send immediately)",
+        "  Press up to edit queued messages",
+    ] {
+        assert!(
+            !super::manager::submit_message_enter_unless_queued(snapshot, || {
+                panic!("Agent queue must suppress retry Enter")
+            })
+            .unwrap()
+        );
+        let enters = std::cell::Cell::new(0);
+        assert_eq!(
+            super::manager::submit_scheduled_message(
+                || Ok(true),
+                || {
+                    enters.set(enters.get() + 1);
+                    Ok(())
+                },
+                || Ok(false),
+                || {},
+            )
+            .unwrap(),
+            "confirmed"
+        );
+        assert_eq!(
+            enters.get(),
+            1,
+            "an existing queue must not swallow the new body's first Enter"
+        );
+    }
+    for snapshot in [
+        "⣟  Running command...\n> 用户正在输入",
+        "> 请解释 Press up to edit queued messages",
+        "▸ 普通输出文字",
+        "> Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+        "● REPL · sleep 40 seconds for terminal display test\n✺ Locating… (10s · running REPL)\n> QUEUE_PROBE_ONE 草稿",
+        "Messages to be submitted after next tool callback",
+    ] {
+        let mut enters = 0;
+        assert!(
+            super::manager::submit_message_enter_unless_queued(snapshot, || {
+                enters += 1;
+                Ok(())
+            })
+            .unwrap()
+        );
+        assert_eq!(enters, 1);
+    }
+    let mut enters = 0;
+    assert!(
+        super::manager::submit_message_enter_unless_queued(
+            "› 未提交草稿\nGPT-6.1-Sol high",
+            || {
+                enters += 1;
+                Ok(())
+            }
+        )
+        .unwrap()
+    );
+    assert_eq!(enters, 1);
+    assert!(
+        super::manager::submit_message_enter_unless_queued("› 草稿", || anyhow::bail!(
+            "write failed"
+        ))
+        .is_err()
+    );
+}
+
+#[test]
+fn scheduled_submission_queue_appearing_after_enter_stops_retry() {
+    use std::cell::Cell;
+    let enters = Cell::new(0);
+    assert_eq!(
+        super::manager::submit_scheduled_message(
+            || Ok(enters.get() > 0),
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || Ok(false),
+            || {},
+        )
+        .unwrap(),
+        "confirmed"
+    );
+    assert_eq!(enters.get(), 1);
 }

@@ -4,7 +4,8 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const terminalSessionActivity = require("../static/terminal-session-activity.js");
-const terminalRs = readFileSync(new URL("../src/terminal.rs", import.meta.url), "utf8");
+const terminalRs = ["../src/terminal.rs", "../src/terminal/websocket.rs"]
+  .map((file) => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
 const terminalInputTransport = readFileSync(
   new URL("../static/terminal-input-transport.js", import.meta.url),
   "utf8",
@@ -14,6 +15,9 @@ const terminalManagerRs = readFileSync(new URL("../src/terminal/manager.rs", imp
 const socketLoopStart = terminalRs.indexOf("async fn handle_socket(");
 const socketLoopEnd = terminalRs.indexOf("async fn send_terminal_output_chunk", socketLoopStart);
 const socketLoop = terminalRs.slice(socketLoopStart, socketLoopEnd);
+const getForConnectionStart = terminalManagerRs.indexOf("pub(super) fn get_for_connection");
+const getForConnectionEnd = terminalManagerRs.indexOf("fn create_session_inner", getForConnectionStart);
+const getForConnectionSource = terminalManagerRs.slice(getForConnectionStart, getForConnectionEnd);
 
 assert.ok(socketLoopStart >= 0 && socketLoopEnd > socketLoopStart, "terminal socket loop should exist");
 assert.match(
@@ -23,12 +27,12 @@ assert.match(
 );
 assert.match(
   socketLoop,
-  /send_terminal_output_chunk\(&mut sender, &chunk\)\.await\.is_err\(\)[\s\S]{0,320}if output_visible\.load\([\s\S]*pending_output_viewed_mark = true;/,
+  /send_terminal_output_chunk\(&mut sender, &chunk[^)]*\)\.await\.is_err\(\)[\s\S]{0,320}if output_visible\.load\([\s\S]*pending_output_viewed_mark = true;/,
   "successfully delivered live output should schedule a viewed acknowledgement only for a visible socket",
 );
 assert.match(
   socketLoop,
-  /send_terminal_output_chunk\(&mut sender, &recovered\)\.await\.is_err\(\)[\s\S]{0,320}if output_visible\.load\([\s\S]*pending_output_viewed_mark = true;/,
+  /send_terminal_output_chunk\(&mut sender, &recovered[^)]*\)\.await\.is_err\(\)[\s\S]{0,320}if output_visible\.load\([\s\S]*pending_output_viewed_mark = true;/,
   "successfully delivered recovered output should schedule a viewed acknowledgement only for a visible socket",
 );
 assert.match(
@@ -48,8 +52,13 @@ assert.match(
 );
 assert.match(
   terminalRs,
-  /ClientMessage::Visibility \{ visible \} => \{[\s\S]{0,400}output_visible\.swap\(visible,[\s\S]{0,400}if visible \{[\s\S]{0,260}manager\.mark_session_opened\(&session\.id\);[\s\S]{0,260}manager\.mark_session_output_viewed\(&session\.id\)[\s\S]{0,400}else if was_visible \{[\s\S]{0,260}manager\.mark_session_output_viewed\(&session\.id\)/,
+  /ClientMessage::Visibility \{ visible \} => \{[\s\S]{0,900}output_visible\.swap\(visible,[\s\S]{0,900}if visible \{[\s\S]{0,500}manager\.mark_session_opened\(&session_id\);[\s\S]{0,500}manager\.mark_session_output_viewed\(&session_id\)[\s\S]{0,900}else if was_visible \{[\s\S]{0,500}manager\.mark_session_output_viewed\(&session_id\)/,
   "visibility transitions should acknowledge newly foregrounded output and persist output viewed before switching away",
+);
+assert.match(
+  getForConnectionSource,
+  /self\.get_session\([\s\S]*output_visible,[\s\S]*self\.get_or_create_latest\([\s\S]*output_visible,[\s\S]*fn get_session\([\s\S]*output_visible: bool[\s\S]*let opened = output_visible && mark_session_opened_locked\(&mut state, &stored\.id\)[\s\S]*fn get_or_create_latest\([\s\S]*output_visible: bool[\s\S]*let opened = output_visible && mark_session_opened_locked\(&mut state, &stored\.id\)/,
+  "background preconnect sockets must not update recent-use timestamps until they become visible",
 );
 assert.match(
   socketLoop,

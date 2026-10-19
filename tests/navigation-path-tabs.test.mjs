@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
-const agentHtml = readFileSync(new URL("../static/agent.html", import.meta.url), "utf8");
+const agentHtml = readFileSync(new URL("../static/agent-profiles.html", import.meta.url), "utf8");
 const terminalJs = readFileSync(new URL("../static/terminal.js", import.meta.url), "utf8");
 const terminalNavigationJs = readFileSync(
   new URL("../static/terminal-navigation-layout.js", import.meta.url),
@@ -50,10 +50,12 @@ assert.match(
   /id="top-nav-api"[^>]+href="\/codex_api"[^>]+data-home-path="\/codex_api"/,
   "terminal Codex_API link should expose its path route to the navigation synchronizer",
 );
+assert.match(terminalHtml, /id="top-nav-api"[^>]*>LLM_API<\/a>/);
+assert.match(appHtml, /id="tab-api"[^>]*>[\s\S]*?LLM_API[\s\S]*?<\/button>/);
+assert.match(agentHtml, /href="\/codex_api"[^>]*>LLM_API<\/a>/);
 for (const [id, path] of [
   ["workspace", "/workspace"],
   ["workspace-history", "/workspace_history"],
-  ["auth", "/codex_oauth"],
   ["claude", "/claude_api"],
   ["settings", "/settings"],
 ]) {
@@ -63,7 +65,7 @@ for (const [id, path] of [
     `terminal ${id} link should use its semantic path`,
   );
 }
-for (const path of ["/workspace", "/codex_api", "/claude_api", "/settings", "/desktop"]) {
+for (const path of ["/workspace", "/codex_api", "/claude_api", "/settings"]) {
   assert.match(agentHtml, new RegExp(`href="${path}"`), `Agent navigation should link to ${path}`);
 }
 for (const [name, html] of [
@@ -80,7 +82,7 @@ for (const [name, html] of [
 assert.match(
   agentHtml,
   /href="\/workspace_history"[^>]*>历史工作区<\/a>/,
-  "Agent navigation should expose the same workspace history entry as other top-level pages",
+  "Agent profile navigation should expose the same workspace history entry as other top-level pages",
 );
 assert.match(
   terminalJs,
@@ -94,7 +96,7 @@ assert.doesNotMatch(
 );
 assert.match(
   terminalHtml,
-  /terminal-navigation-layout\.js\?v=20260803b/,
+  /terminal-navigation-layout\.js\?v=20260924llm-subtabs/,
   "terminal navigation changes should use a fresh asset version",
 );
 
@@ -134,7 +136,6 @@ assert.equal(
 );
 for (const [tab, path] of [
   ["workspace-history", "/workspace_history"],
-  ["auth", "/codex_oauth"],
   ["claude", "/claude_api"],
 ]) {
   assert.equal(
@@ -150,7 +151,7 @@ assert.match(
 );
 assert.match(
   appHtml,
-  /app-navigation-tabs\.js\?v=20260725e/,
+  /app-navigation-tabs\.js\?v=20260924-llm-subtabs/,
   "app navigation changes should use a fresh asset version",
 );
 
@@ -183,13 +184,14 @@ function initialSettingsTab(pathname, hash = "") {
 
 assert.equal(initialTab("/codex_api"), "api", "new Codex_API paths should open the API tab");
 assert.equal(initialTab("/api"), "api", "legacy Codex_API paths should remain compatible");
+assert.equal(initialTab("/codex_api/api"), "api", "LLM_API API subpaths should select the API account list");
 assert.equal(initialTab("/workspace"), "workspace", "workspace paths should open the workspace tab");
 assert.equal(
   initialTab("/workspace_history"),
   "workspace-history",
   "workspace history paths should open the history tab",
 );
-assert.equal(initialTab("/codex_oauth"), "auth", "Codex OAuth paths should open the OAuth tab");
+assert.equal(initialTab("/codex_oauth"), "api", "legacy Codex OAuth paths should open the unified LLM_API tab");
 assert.equal(initialTab("/claude_api"), "claude", "Claude API paths should open the Claude tab");
 
 for (const tab of [

@@ -34,6 +34,14 @@ const manifest = readFileSync(
   new URL("../android/app/src/main/AndroidManifest.xml", import.meta.url),
   "utf8",
 );
+const terminalHtml = readFileSync(
+  new URL("../static/terminal.html", import.meta.url),
+  "utf8",
+);
+const terminalJs = readFileSync(
+  new URL("../static/terminal.js", import.meta.url),
+  "utf8",
+);
 const networkPolicy = readFileSync(
   new URL("../android/app/src/main/res/xml/network_security_config.xml", import.meta.url),
   "utf8",
@@ -62,16 +70,20 @@ const buildScript = readFileSync(
   new URL("../scripts/build-android-apk.sh", import.meta.url),
   "utf8",
 );
+const serverProbeSource = readFileSync(
+  new URL("../static/terminal-server-probe.js", import.meta.url),
+  "utf8",
+);
 
 test("Android client races every configured source and selects the fastest healthy result", () => {
   for (const source of [
     "http://HOST:PORT/",
-    "http://HOST:PORT/",
+    "http://PUBLIC_DOMAIN:PORT/",
   ]) {
     assert.match(sourceRegistry, new RegExp(`"${source.replaceAll(".", "\\.")}"`));
   }
   assert.doesNotMatch(sourceRegistry, /"http:\/\/fpsq\.xyz:11111\/"/);
-  assert.doesNotMatch(sourceRegistry, /webclx\.739964\.xyz/);
+  assert.doesNotMatch(sourceRegistry, /webclx\.example\.invalid/);
   assert.match(sourceRegistry, /PROBE_PATH = "api\/auth\/session"/);
   assert.match(activity, /Executors\.newFixedThreadPool\(SourceRegistry\.URLS\.length\)/);
   assert.match(activity, /CompletionService<Integer>/);
@@ -129,19 +141,151 @@ test("Android runtime source selection stays in the background and ignores stale
   );
   assert.match(
     activity,
-    /if \(foreground\) \{\s*showConnectionFailure\(\);\s*\} else \{\s*sourceResolutionInProgress = false;/,
+    /if \(foreground\) \{\s*showConnectionFailure\(\);\s*\} else \{\s*finishSourceResolution\(\);/,
   );
+});
+
+test("Android replays network changes that arrive during source probing", () => {
+  assert.match(activity, /private boolean sourceReevaluationPending;/);
+  assert.match(
+    activity,
+    /requestSourceReevaluation\(\)[\s\S]*sourceResolutionInProgress \|\| sourceReevaluationInProgress[\s\S]*sourceReevaluationPending = true;/,
+  );
+  assert.match(
+    activity,
+    /private void replayPendingSourceReevaluation\(\)[\s\S]*sourceReevaluationPending = false;[\s\S]*mainHandler\.post\(this::requestSourceReevaluation\)/,
+  );
+  assert.match(activity, /private void finishSourceResolution\(\)[\s\S]*replayPendingSourceReevaluation\(\)/);
+  assert.match(activity, /loadSource\(int source\)[\s\S]*finishSourceResolution\(\)/);
+  assert.match(activity, /showConnectionFailure\(\)[\s\S]*finishSourceResolution\(\)/);
 });
 
 test("Android WebView keeps navigation and cleartext access on known data sources", () => {
   assert.match(activity, /isTrustedOrigin\(uri\)/);
+  assert.match(activity, /isHarnessOrigin\(uri\)/);
+  assert.match(activity, /HARNESS_PORT = 3080/);
+  assert.match(
+    activity,
+    /isHarnessOrigin\(Uri uri\)[\s\S]*selectedSourceOrigin[\s\S]*effectivePort\(uri\) == HARNESS_PORT/,
+  );
+  assert.doesNotMatch(activity, /onReceivedHttpAuthRequest|HARNESS_CREDENTIALS/);
+  assert.match(activity, /CookieManager\.getInstance\(\)[\s\S]*setAcceptCookie\(true\)/);
   assert.match(activity, /Intent\.ACTION_VIEW/);
   assert.match(networkPolicy, /<base-config cleartextTrafficPermitted="false"/);
-  assert.match(networkPolicy, />192\.168\.3\.2</);
-  assert.match(networkPolicy, />fpsq\.xyz</);
+  assert.match(networkPolicy, />HOST</);
+  assert.match(networkPolicy, />PUBLIC_DOMAIN</);
   assert.doesNotMatch(manifest, /android:usesCleartextTraffic="true"/);
   assert.match(manifest, /android\.permission\.INTERNET/);
   assert.match(manifest, /android:networkSecurityConfig="@xml\/network_security_config"/);
+});
+
+test("Android WebView resumes without reloading and refreshes via pageshow", () => {
+  assert.match(activity, /private boolean webViewPausedSinceResume;/);
+  assert.match(
+    activity,
+    /protected void onPause\(\)[\s\S]*webViewPausedSinceResume = true;[\s\S]*webView\.onPause\(\)/,
+  );
+  const onResume = activity.match(
+    /protected void onResume\(\) \{([\s\S]*?)\n    \}\n\n    @Override\n    protected void onDestroy/,
+  )?.[1] ?? "";
+  assert.ok(onResume, "onResume body must be extractable");
+  assert.doesNotMatch(onResume, /webView\.reload\(\)/, "an ordinary resume must not reload the page");
+  assert.match(
+    onResume,
+    /webViewPausedSinceResume = false;[\s\S]*dispatchEvent\(new Event\('pageshow'\)\)[\s\S]*requestSourceReevaluation\(\)/,
+    "returning from pause should dispatch pageshow and re-probe the current origin",
+  );
+  assert.match(
+    terminalJs,
+    /function refreshSessionsAfterPageResume\(\)[\s\S]*window\.addEventListener\("pageshow", refreshSessionsAfterPageResume\)/,
+    "terminal.js keeps the pageshow resume handler",
+  );
+});
+
+test("Android exposes the real system-keyboard visibility to terminal focus policy", () => {
+  assert.match(activity, /private volatile boolean systemKeyboardVisible;/);
+  assert.match(
+    activity,
+    /VERSION_CODES\.R[\s\S]*setOnApplyWindowInsetsListener[\s\S]*WindowInsets\.Type\.ime\(\)/,
+    "API 30+ should read IME visibility from WindowInsets",
+  );
+  assert.match(
+    activity,
+    /getViewTreeObserver\(\)\.addOnGlobalLayoutListener[\s\S]*getWindowVisibleDisplayFrame\(visibleFrame\)[\s\S]*rootHeight - visibleFrame\.bottom[\s\S]*systemKeyboardVisible = rootHeight > 0 && obscuredHeight > rootHeight \* 0\.15/,
+    "older APIs keep the geometry-based keyboard fallback",
+  );
+  assert.match(
+    activity,
+    /@JavascriptInterface\s+public boolean isSystemKeyboardVisible\(\) \{\s*return systemKeyboardVisible;\s*\}/,
+  );
+});
+
+test("Android recreates the WebView after a render process crash", () => {
+  assert.match(activity, /import android\.webkit\.RenderProcessGoneDetail;/);
+  assert.match(
+    activity,
+    /onRenderProcessGone\(WebView view, RenderProcessGoneDetail detail\)[\s\S]*return handleRenderProcessGone\(view\)/,
+  );
+  assert.match(
+    activity,
+    /handleRenderProcessGone[\s\S]*fileChooserCallback\.onReceiveValue\(null\)[\s\S]*removeView\(failedView\)[\s\S]*failedView\.destroy\(\)/,
+    "the crashed view must be detached and destroyed, never reused",
+  );
+  assert.match(
+    activity,
+    /MAX_RENDER_PROCESS_RETRIES[\s\S]*renderProcessFailures > MAX_RENDER_PROCESS_RETRIES[\s\S]*showConnectionFailure\(\)/,
+    "repeated crashes before a successful load must stop auto-respawn",
+  );
+  assert.match(
+    activity,
+    /renderProcessFailures = 0;/,
+    "a successful page load resets the crash counter",
+  );
+  assert.match(
+    activity,
+    /onPageStarted[\s\S]*isSelectedSourceUrl\(url\) \|\| isHarnessOrigin\(uri\)[\s\S]*lastLoadedUrl = url;/,
+    "only selected-source or harness URLs may be restored after a crash",
+  );
+  assert.doesNotMatch(activity, /failedView\.reload\(\)/);
+});
+
+test("Android terminal exposes a one-way portrait recovery without accidental rotation", () => {
+  assert.match(appPreferences, /KEY_SCREEN_ORIENTATION = "display\.screen_orientation"/);
+  assert.match(appPreferences, /ORIENTATION_PORTRAIT = "portrait"/);
+  assert.match(appPreferences, /ORIENTATION_LANDSCAPE = "landscape"/);
+  assert.match(appPreferences, /ORIENTATION_SYSTEM = "system"/);
+  assert.match(appPreferences, /static String screenOrientation\(Context context\)/);
+  assert.match(activity, /applyScreenOrientation\(AppPreferences\.screenOrientation\(this\)\)/);
+  assert.match(activity, /ActivityInfo\.SCREEN_ORIENTATION_PORTRAIT/);
+  assert.match(activity, /ActivityInfo\.SCREEN_ORIENTATION_LANDSCAPE/);
+  assert.match(activity, /ActivityInfo\.SCREEN_ORIENTATION_UNSPECIFIED/);
+  assert.match(
+    activity,
+    /@JavascriptInterface\s+public boolean setScreenOrientation\(String mode\)/,
+  );
+  assert.match(
+    terminalHtml,
+    /id="terminal-orientation-toggle"[\s\S]*data-action="restore_portrait"[\s\S]*hidden/,
+  );
+  // The orientation recovery lives in terminal.js; assert the module is
+  // actually loaded (any cache key) rather than pinning a stale date token.
+  assert.match(terminalHtml, /terminal\.js\?v=[A-Za-z0-9_-]+/);
+  assert.match(terminalJs, /function restoreTerminalPortraitOrientation\(\)/);
+  assert.match(terminalJs, /bridge\.setScreenOrientation\("portrait"\)/);
+  assert.match(
+    terminalJs,
+    /const needsRecovery = mode !== "portrait";[\s\S]*terminalOrientationToggleButton\.hidden = !bridge \|\| !needsRecovery/,
+  );
+  assert.doesNotMatch(terminalJs, /current === "portrait"[\s\S]*\? "landscape"/);
+});
+
+test("Android exposes a native clipboard writer for WebView copy actions", () => {
+  assert.match(activity, /import android\.content\.ClipData;/);
+  assert.match(activity, /import android\.content\.ClipboardManager;/);
+  assert.match(
+    activity,
+    /@JavascriptInterface\s+public boolean copyText\(String text\)[\s\S]*text == null[\s\S]*text\.length\(\) > 1_048_576[\s\S]*ClipboardManager\.class[\s\S]*setPrimaryClip\(ClipData\.newPlainText\("webClx", text\)\)/,
+  );
 });
 
 test("Android client follows system light and dark mode", () => {
@@ -160,7 +304,7 @@ test("Android WebView resize surface uses the current theme background", () => {
   );
   assert.match(
     activity,
-    /root\.setBackgroundColor\(contentBackgroundColor\);[\s\S]*webView = new WebView\(this\);[\s\S]*webView\.setBackgroundColor\(contentBackgroundColor\);/,
+    /contentRoot\.setBackgroundColor\(contentBackgroundColor\);[\s\S]*webView = createWebView\(contentBackgroundColor\);[\s\S]*view\.setBackgroundColor\(backgroundColor\);/,
   );
   assert.match(
     activity,
@@ -172,7 +316,7 @@ test("Android WebView resize surface uses the current theme background", () => {
 test("Android client gives the WebView the full content height", () => {
   assert.match(
     activity,
-    /root\.addView\(webView, new FrameLayout\.LayoutParams\(\s*ViewGroup\.LayoutParams\.MATCH_PARENT,\s*ViewGroup\.LayoutParams\.MATCH_PARENT\s*\)\)/,
+    /contentRoot\.addView\(webView, new FrameLayout\.LayoutParams\(\s*ViewGroup\.LayoutParams\.MATCH_PARENT,\s*ViewGroup\.LayoutParams\.MATCH_PARENT\s*\)\)/,
   );
   assert.doesNotMatch(activity, /createAppBar\(\)/);
   assert.doesNotMatch(activity, /R\.drawable\.ic_download_tasks/);
@@ -195,6 +339,16 @@ test("Android client installs only its own completed APK downloads", () => {
   assert.match(activity, /long downloadId = manager\.enqueue\(request\)/);
   assert.match(activity, /isApkDownload\(filename, download\.mimeType\)/);
   assert.match(activity, /DownloadManager\.ACTION_DOWNLOAD_COMPLETE/);
+  assert.match(
+    activity,
+    /ContextCompat\.registerReceiver\(\s*this,\s*downloadCompleteReceiver,\s*filter,\s*ContextCompat\.RECEIVER_EXPORTED\s*\)/,
+    "the download receiver must register through ContextCompat as EXPORTED",
+  );
+  assert.doesNotMatch(
+    activity,
+    /registerReceiver\(downloadCompleteReceiver, filter/,
+    "the legacy flag-less registerReceiver overload must be gone",
+  );
   assert.match(activity, /DownloadManager\.EXTRA_DOWNLOAD_ID/);
   assert.match(activity, /downloadId != pendingApkDownloadId\(\)/);
   assert.match(activity, /new DownloadManager\.Query\(\)\.setFilterById\(downloadId\)/);
@@ -278,6 +432,50 @@ test("Android checks for updates once on every app start", () => {
   assert.match(automaticCheck, /automaticUpdateCheckStarted/);
   assert.match(automaticCheck, /UpdateManager\.check\(this, selectedSource/);
   assert.doesNotMatch(automaticCheck, /KEY_LAST_UPDATE_CHECK/);
+});
+
+test("Android update transactions stay scoped to their own download id", () => {
+  assert.match(updateManager, /static Future<\?> check\(Context context/);
+  assert.match(updateManager, /context\.getApplicationContext\(\)/);
+  assert.match(updateManager, /static boolean clearPending\(Context context, long downloadId\)/);
+  assert.match(
+    updateManager,
+    /static boolean commitVerifiedApk\(Context context, long downloadId, String stagedPath\)[\s\S]*isCurrentPending\(context, downloadId\)[\s\S]*putLong\(VERIFIED_DOWNLOAD_ID, downloadId\)[\s\S]*putString\(VERIFIED_APK_PATH, stagedPath\)/,
+  );
+  assert.match(updateManager, /synchronized \(PREFERENCES_LOCK\)/);
+  assert.match(
+    activity,
+    /File\.createTempFile\(\s*"verified-webclx-update-" \+ snapshot\.downloadId \+ "-"[\s\S]*"\.apk"[\s\S]*updateDir/,
+    "each verification stages a unique file so stale results cannot collide",
+  );
+  assert.match(
+    activity,
+    /!UpdateManager\.isCurrentPending\(this, snapshot\.downloadId\)/,
+    "a late verification result must not commit or clear a newer pending download",
+  );
+  assert.match(
+    activity,
+    /verifiedDownloadId == downloadId\s*\? preferences\.getString\(UpdateManager\.VERIFIED_APK_PATH/,
+    "the staged APK path is only trusted for the download it was verified for",
+  );
+  assert.doesNotMatch(activity, /UpdateManager\.clearPending\(this\)/);
+  assert.match(activity, /updateVerifyExecutor/);
+  assert.doesNotMatch(
+    activity,
+    /resolverExecutor\.execute\(\(\) -> \{\s*int error = validatePendingUpdate/,
+    "APK verification must not share the source-resolution executor",
+  );
+});
+
+test("Android probes servers via fetch only — no synchronous native bridge", () => {
+  assert.doesNotMatch(activity, /probeHost/);
+  assert.match(serverProbeSource, /async function probeHostViaFetch\(host\)/);
+  assert.doesNotMatch(serverProbeSource, /probeHostViaNative|WebClxAndroid/);
+  assert.match(
+    serverProbeSource,
+    /finally \{\s*clearTimeout\(timer\);\s*\}/,
+    "the abort timer must be released on success and failure",
+  );
 });
 
 test("Android update installer is launched only once automatically per download", () => {

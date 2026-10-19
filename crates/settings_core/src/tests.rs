@@ -7,30 +7,33 @@ use super::{
     DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY, DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
     DEFAULT_TERMINAL_TOUCH_SELECTION_LONG_PRESS_MS, FavoritePath, FavoritePathKind,
     OPENAI_CYBERSECURITY_BLOCK_PHRASE_KEYWORD, OPENAI_CYBERSECURITY_BLOCK_TITLE_KEYWORD,
-    SettingsFile, TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE,
-    TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE, TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY,
-    TerminalActivityAgentDisplay, TerminalDefaultEnvVar, TerminalErrorKeywordAction,
-    TerminalFunctionCommand, TerminalQuickCommand, TerminalToolAction, TerminalToolEntry,
-    ThemeMode, WorkspaceHistoryItem, default_desktop_terminal_soft_keyboard_enabled,
-    default_show_all_workspace_sessions, default_show_dot_entries,
-    default_terminal_error_keyword_actions, default_terminal_fab_action_color,
-    default_terminal_fab_action_opacity, default_terminal_floating_button_offset_vh,
-    default_terminal_tool_entries, default_terminal_touch_selection_long_press_ms,
-    default_terminal_workspace_icon_path, default_theme_mode, default_workspace_browser_icon_path,
-    default_workspace_dir_candidates, is_within_workspace_limit, load_saved_settings,
-    merge_builtin_terminal_error_keyword_actions, normalize_compile_max_concurrency,
-    normalize_favorite_path, normalize_font_size_tiers, normalize_project_icon_relative_path,
+    OPENROUTER_WEB_SEARCH_ERROR_KEYWORD, SettingsFile,
+    TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE, TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE,
+    TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY, TerminalActivityAgentDisplay, TerminalAgentCommand,
+    TerminalDefaultEnvVar, TerminalErrorKeywordAction, TerminalFunctionCommand,
+    TerminalQuickCommand, TerminalToolAction, TerminalToolEntry, ThemeMode, WorkspaceHistoryItem,
+    default_desktop_terminal_soft_keyboard_enabled, default_show_all_workspace_sessions,
+    default_show_dot_entries, default_terminal_error_keyword_actions,
+    default_terminal_fab_action_color, default_terminal_fab_action_opacity,
+    default_terminal_floating_button_offset_vh, default_terminal_tool_entries,
+    default_terminal_touch_selection_long_press_ms, default_terminal_workspace_icon_path,
+    default_theme_mode, default_workspace_browser_icon_path, default_workspace_dir_candidates,
+    is_within_workspace_limit, load_saved_settings, merge_builtin_terminal_error_keyword_actions,
+    normalize_compile_max_concurrency, normalize_favorite_path, normalize_font_size_tiers,
+    normalize_project_icon_relative_path, normalize_terminal_auto_continue_active_window,
     normalize_terminal_auto_continue_interval_seconds, normalize_terminal_fab_action_color,
     normalize_terminal_fab_action_opacity, normalize_terminal_floating_button_offset_vh,
-    normalize_terminal_soft_keyboard_scale, normalize_terminal_touch_selection_long_press_ms,
-    platform_workspace_root_limit, resolve_workspace_dir, sanitize_claude_default_config_entries,
-    sanitize_claude_model_options, sanitize_codex_api_auto_proxy_match_provider_ids,
-    sanitize_codex_config_key, sanitize_codex_config_value, sanitize_codex_default_config_entries,
+    normalize_terminal_scheduled_input_avoid_window, normalize_terminal_soft_keyboard_scale,
+    normalize_terminal_touch_selection_long_press_ms, platform_workspace_root_limit,
+    resolve_workspace_dir, sanitize_claude_default_config_entries, sanitize_claude_model_options,
+    sanitize_codex_api_auto_proxy_match_provider_ids, sanitize_codex_config_key,
+    sanitize_codex_config_value, sanitize_codex_default_config_entries,
     sanitize_codex_secondary_config_key, sanitize_codex_secondary_config_value,
-    sanitize_compile_environment, sanitize_favorite_paths, sanitize_terminal_default_env_vars,
-    sanitize_terminal_error_keyword_actions, sanitize_terminal_function_commands,
-    sanitize_terminal_quick_commands, sanitize_terminal_quick_start_default_key,
-    sanitize_terminal_rename_presets, sanitize_workspace_history, validate_terminal_tool_entries,
+    sanitize_compile_environment, sanitize_favorite_paths, sanitize_terminal_agent_commands,
+    sanitize_terminal_default_env_vars, sanitize_terminal_error_keyword_actions,
+    sanitize_terminal_function_commands, sanitize_terminal_quick_commands,
+    sanitize_terminal_quick_start_default_key, sanitize_terminal_rename_presets,
+    sanitize_workspace_history, validate_terminal_tool_entries,
 };
 use std::path::{Path, PathBuf};
 
@@ -264,6 +267,52 @@ fn terminal_function_commands_default_to_keyboard_and_slash_commands() {
 }
 
 #[test]
+fn terminal_agent_commands_default_to_the_dialog_agents() {
+    let parsed: SettingsFile = serde_json::from_str("{\"workspace_dir\": \"/home\"}").unwrap();
+    assert_eq!(parsed.terminal_agent_commands.len(), 8);
+    assert_eq!(parsed.terminal_agent_commands[3].key, "devin");
+    assert_eq!(parsed.terminal_agent_commands[3].label, "Devin");
+    assert_eq!(parsed.terminal_agent_commands[3].new_command, "devin");
+    assert_eq!(parsed.terminal_agent_commands[3].resume_command, "devin --resume {session_id}");
+    assert_eq!(parsed.terminal_agent_commands[5].key, "cline");
+    assert_eq!(parsed.terminal_agent_commands[5].resume_command, "cline --id {session_id}");
+    assert_eq!(parsed.terminal_agent_commands[6].key, "opencode");
+    assert_eq!(
+        parsed.terminal_agent_commands[6].resume_command,
+        "opencode --session {session_id}"
+    );
+}
+
+#[test]
+fn sanitize_terminal_agent_commands_filters_invalid_entries() {
+    let commands = sanitize_terminal_agent_commands(&[
+        TerminalAgentCommand {
+            key: "devin".into(),
+            label: "Devin".into(),
+            new_command: "devin".into(),
+            resume_command: "devin --resume {session_id}".into(),
+        },
+        TerminalAgentCommand {
+            key: "bad key".into(),
+            label: "Bad".into(),
+            new_command: "\u{7}bad".into(),
+            resume_command: "".into(),
+        },
+        TerminalAgentCommand {
+            key: "empty".into(),
+            label: "Empty".into(),
+            new_command: "  ".into(),
+            resume_command: "".into(),
+        },
+    ]);
+    assert_eq!(commands.len(), 1);
+    assert_eq!(commands[0].key, "devin");
+    assert_eq!(commands[0].new_command, "devin");
+
+    assert!(sanitize_terminal_agent_commands(&[]).is_empty());
+}
+
+#[test]
 fn terminal_rename_presets_default_to_common_suffixes() {
     let parsed: SettingsFile =
         serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
@@ -305,6 +354,19 @@ fn terminal_auto_continue_defaults_to_minute_cooldown_and_respects_manual_interr
 }
 
 #[test]
+fn terminal_auto_compact_skip_codebuddy_defaults_true_and_roundtrips() {
+    let parsed: SettingsFile =
+        serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
+    assert!(parsed.terminal_auto_compact_skip_codebuddy);
+
+    let parsed: SettingsFile = serde_json::from_str(
+        r#"{"workspace_dir":"/home/codes","terminal_auto_compact_skip_codebuddy":false}"#,
+    )
+    .expect("parse settings");
+    assert!(!parsed.terminal_auto_compact_skip_codebuddy);
+}
+
+#[test]
 fn terminal_error_keywords_include_quota_429_rejection_variants() {
     let parsed: SettingsFile =
         serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
@@ -324,6 +386,19 @@ fn terminal_error_keywords_include_quota_429_rejection_variants() {
 }
 
 #[test]
+fn terminal_error_keywords_include_model_busy_529_variant() {
+    let parsed: SettingsFile =
+        serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
+
+    assert!(
+        parsed
+            .terminal_error_keywords
+            .iter()
+            .any(|keyword| keyword == "该模型当前访问量过大，请您稍后再试")
+    );
+}
+
+#[test]
 fn terminal_error_keywords_include_generic_stream_disconnect_prefix() {
     let parsed: SettingsFile =
         serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
@@ -334,6 +409,14 @@ fn terminal_error_keywords_include_generic_stream_disconnect_prefix() {
             .iter()
             .any(|keyword| keyword == "stream disconnected before completion:")
     );
+}
+
+#[test]
+fn terminal_auto_continue_active_window_accepts_only_full_day_end_endpoint() {
+    assert_eq!(normalize_terminal_auto_continue_active_window("00:00-24:00"), "00:00-24:00");
+    assert_eq!(normalize_terminal_auto_continue_active_window("00:00-24:01"), "");
+    assert_eq!(normalize_terminal_auto_continue_active_window("24:00-08:00"), "");
+    assert_eq!(normalize_terminal_scheduled_input_avoid_window("00:00-24:00"), "");
 }
 
 #[test]
@@ -378,6 +461,19 @@ fn terminal_error_keywords_include_openai_cybersecurity_block_signatures() {
             .terminal_error_keywords
             .iter()
             .any(|keyword| keyword == OPENAI_CYBERSECURITY_BLOCK_PHRASE_KEYWORD)
+    );
+}
+
+#[test]
+fn terminal_error_keywords_include_openrouter_web_search_failure() {
+    let parsed: SettingsFile =
+        serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
+
+    assert!(
+        parsed
+            .terminal_error_keywords
+            .iter()
+            .any(|keyword| keyword == OPENROUTER_WEB_SEARCH_ERROR_KEYWORD)
     );
 }
 
@@ -1133,6 +1229,12 @@ fn load_saved_settings_merges_new_builtin_terminal_error_keywords() {
         loaded
             .terminal_error_keywords
             .iter()
+            .any(|keyword| keyword == "该模型当前访问量过大，请您稍后再试")
+    );
+    assert!(
+        loaded
+            .terminal_error_keywords
+            .iter()
             .any(|keyword| keyword == "stream disconnected before completion:")
     );
     assert!(
@@ -1574,4 +1676,15 @@ fn legacy_actions_deserialize_with_empty_codex_launch_fields() {
     assert_eq!(action.preset_selector, "");
     assert_eq!(action.preset_match, "");
     assert_eq!(action.session_action, "");
+}
+
+#[test]
+fn terminal_new_session_behavior_round_trips_and_normalizes() {
+    let json = r#"{"workspace_dir":"/home/codes","terminal_new_session_behavior":"direct"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_new_session_behavior.as_deref(), Some("direct"));
+
+    let json = r#"{"workspace_dir":"/home/codes"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_new_session_behavior, None);
 }

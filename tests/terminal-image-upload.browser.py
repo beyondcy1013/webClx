@@ -8,9 +8,9 @@ from playwright.async_api import async_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
-STATIC = ROOT / "static"
+STATIC = ROOT / "static.checkout-final"
 CHROMIUM = "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome"
-SESSION_ID = "image-upload-session"
+SESSION_ID = "file-upload-session"
 
 
 async def main():
@@ -81,9 +81,9 @@ async def main():
                     json={
                         "assets": [
                             {
-                                "name": "paste-client-image.png",
-                                "relative_path": ".webclx-paste/paste-client-image.png",
-                                "mime": "image/png",
+                            "name": "paste-client-document.pdf",
+                            "relative_path": ".webclx-paste/paste-client-document.pdf",
+                            "mime": "application/pdf",
                                 "size": 16,
                             }
                         ]
@@ -112,14 +112,14 @@ async def main():
             wait_until="domcontentloaded",
         )
         await page.wait_for_function(
-            """() => state.activeSessionId === 'image-upload-session'
+            """() => state.activeSessionId === 'file-upload-session'
                 && terminalSoftKeyboardVisible()
-                && typeof handleTerminalImageUploadSelection === 'function'"""
+                && typeof handleTerminalFileUploadSelection === 'function'"""
         )
         await page.evaluate(
             """() => {
               sendPastedText = (text) => {
-                window.__imageUploadPrompt = String(text);
+                window.__fileUploadPrompt = String(text);
                 return true;
               };
             }"""
@@ -127,7 +127,7 @@ async def main():
 
         await page.click("#terminal-function-command-button")
         menu = page.locator("#terminal-function-command-menu")
-        upload_button = page.locator("#terminal-image-upload-button")
+        upload_button = page.locator("#terminal-file-upload-button")
         assert await menu.is_visible()
         assert await upload_button.is_visible()
 
@@ -158,14 +158,14 @@ async def main():
         assert chooser.is_multiple()
         await chooser.set_files(
             {
-                "name": "client-image.png",
-                "mimeType": "image/png",
-                "buffer": b"\x89PNG\r\n\x1a\nclient",
+                "name": "client-document.pdf",
+                "mimeType": "application/pdf",
+                "buffer": b"%PDF-1.4\nclient",
             }
         )
 
-        await page.wait_for_function("() => Boolean(window.__imageUploadPrompt)")
-        prompt = await page.evaluate("window.__imageUploadPrompt")
+        await page.wait_for_function("() => Boolean(window.__fileUploadPrompt)")
+        prompt = await page.evaluate("window.__fileUploadPrompt")
         status = await page.locator("#terminal-status").inner_text()
         await page.screenshot(path="/tmp/webclx-terminal-image-upload-mobile.png", full_page=True)
         await browser.close()
@@ -173,9 +173,9 @@ async def main():
     assert not page_errors, page_errors
     assert len(upload_requests) == 1, upload_requests
     assert upload_requests[0]["content_type"].startswith("multipart/form-data; boundary="), upload_requests
-    assert b'filename="client-image.png"' in upload_requests[0]["body"], upload_requests
-    assert prompt == "请查看这张图片文件：.webclx-paste/paste-client-image.png", prompt
-    assert "已上传 1 张图片" in status, status
+    assert b'filename="client-document.pdf"' in upload_requests[0]["body"], upload_requests
+    assert prompt == "请查看这个文件：.webclx-paste/paste-client-document.pdf", prompt
+    assert "已上传 1 个文件" in status, status
     print(
         json.dumps(
             {

@@ -1,11 +1,19 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    io::{self, Write},
+    path::PathBuf,
+    time::Duration,
+};
 
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use crate::frpc::make_executable;
-use crate::{ApiResult, AppError, AppState};
+use crate::{ApiResult, AppError, AppState, compile_service::is_external_callback_url};
+
+mod process;
+
+const DEPLOY_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,52 +52,28 @@ pub async fn deploy_service(
     let parent_dir = binary_path.parent().ok_or_else(|| {
         AppError::bad_request(format!("无法确定二进制文件 {} 的父目录", binary_path.display()))
     })?;
-    if !parent_dir.is_dir() {
+    if !tokio::fs::metadata(parent_dir)
+        .await
+        .map_err(|error| AppError::bad_request(format!("读取二进制文件父目录失败: {error}")))?
+        .is_dir()
+    {
         return Err(AppError::bad_request(format!(
             "二进制文件父目录不存在: {}",
             parent_dir.display()
         )));
     }
 
-    let temp_path = std::env::temp_dir().join(format!("webclx-deploy-{}.sh", std::process::id()));
-    fs::write(&temp_path, script.as_bytes())
-        .map_err(|error| AppError::internal(format!("写入临时部署脚本失败: {error}")))?;
+    run_deploy_script(script, DEPLOY_TIMEOUT).await?;
 
-    if let Err(error) = make_executable(&temp_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(AppError::internal(format!("设置脚本执行权限失败: {error}")));
-    }
-
-    let script_result = Command::new("/bin/bash").arg(&temp_path).output();
-    let _ = fs::remove_file(&temp_path);
-
-    match script_result {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(AppError::internal(format!(
-                "部署脚本执行失败: {}",
-                if stderr.is_empty() {
-                    "无 stderr 输出"
-                } else {
-                    &stderr
-                }
-            )));
-        }
-        Err(error) => {
-            return Err(AppError::internal(format!("无法执行部署脚本: {error}")));
-        }
-    }
-
-    let restarted = schedule_deploy_restart(&service_name)?;
+    let restarted = schedule_deploy_restart(&service_name).await?;
 
     let source_terminal_target = first_nonempty([
         payload.source_terminal_id.as_str(),
         payload.source_terminal_name.as_str(),
-    ]);
+    ])
+    .filter(|target| !is_external_callback_url(target.trim()));
     if let Some(target) = source_terminal_target {
-        let message =
-            format!("已部署 {} → {}，{}已重启", binary_path.display(), service_name, service_name);
+        let message = format!("已部署 {} → {}，已安排重启", binary_path.display(), service_name);
         if let Err(error) = state
             .terminal_manager
             .send_session_toast(target, None, message, "info")
@@ -112,41 +96,97 @@ pub async fn deploy_service(
     }))
 }
 
-#[cfg(target_os = "linux")]
-fn schedule_deploy_restart(service_name: &str) -> ApiResult<bool> {
-    let output = Command::new("/usr/bin/systemd-run")
-        .args([
-            "--quiet",
-            "--collect",
-            "--on-active=1s",
-            "/bin/systemctl",
-            "restart",
-            service_name,
-        ])
-        .output();
+async fn run_deploy_script(script: String, limit: Duration) -> ApiResult<()> {
+    // The private directory guard survives until bash has stopped, including
+    // cancellation and errors during file creation.
+    let script = tokio::task::spawn_blocking(move || DeployScript::create(&script))
+        .await
+        .map_err(|error| AppError::internal(format!("创建部署脚本任务失败: {error}")))?
+        .map_err(|error| AppError::internal(format!("创建临时部署脚本失败: {error}")))?;
+    let mut command = tokio::process::Command::new("/bin/bash");
+    command.arg(&script.path);
+    process::run(&mut command, limit)
+        .await
+        .map_err(|error| AppError::internal(format!("部署脚本执行失败: {error}")))
+}
 
-    match output {
-        Ok(out) if out.status.success() => Ok(true),
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            Err(AppError::internal(format!(
-                "重启 {} 失败: {}",
-                service_name,
-                if stderr.is_empty() {
-                    out.status.to_string()
-                } else {
-                    stderr
-                }
-            )))
+struct DeployScript {
+    directory: PathBuf,
+    path: PathBuf,
+}
+
+impl DeployScript {
+    fn create(script: &str) -> io::Result<Self> {
+        for _ in 0..16 {
+            let directory = std::env::temp_dir().join(format!(
+                "webclx-deploy-{}-{:032x}",
+                std::process::id(),
+                rand::random::<u128>()
+            ));
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+            let guard = Self {
+                path: directory.join("deploy.sh"),
+                directory,
+            };
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            options.open(&guard.path)?.write_all(script.as_bytes())?;
+            return Ok(guard);
         }
-        Err(error) => {
-            Err(AppError::internal(format!("提交 {} 重启请求失败: {error}", service_name)))
+        Err(io::Error::new(io::ErrorKind::AlreadyExists, "创建唯一部署目录重试耗尽"))
+    }
+}
+
+impl Drop for DeployScript {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.directory) {
+            warn!(path = %self.directory.display(), %error, "failed to remove deploy script");
         }
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn schedule_deploy_restart(service_name: &str) -> ApiResult<bool> {
+    process::run(&mut restart_command(service_name), Duration::from_secs(10))
+        .await
+        .map_err(|error| {
+            AppError::internal(format!("提交 {service_name} 重启请求失败: {error}"))
+        })?;
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn restart_command(service_name: &str) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("/usr/bin/systemd-run");
+    command.args([
+        "--quiet",
+        "--collect",
+        "--on-active=1s",
+        "/bin/systemctl",
+        "restart",
+        "--",
+        service_name,
+    ]);
+    command
+}
+
 #[cfg(not(target_os = "linux"))]
-fn schedule_deploy_restart(service_name: &str) -> ApiResult<bool> {
+async fn schedule_deploy_restart(service_name: &str) -> ApiResult<bool> {
     Err(AppError::internal(format!("当前平台不支持通过 systemd 重启 {}", service_name)))
 }
 
@@ -160,6 +200,40 @@ fn first_nonempty<'a>(values: impl IntoIterator<Item = &'a str>) -> Option<&'a s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_scripts_are_private_unique_and_cleaned_up() {
+        let first = DeployScript::create("printf first").unwrap();
+        let second = DeployScript::create("printf second").unwrap();
+        assert_ne!(first.path, second.path);
+        assert_eq!(fs::read_to_string(&first.path).unwrap(), "printf first");
+        assert_eq!(fs::read_to_string(&second.path).unwrap(), "printf second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&first.directory).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(fs::metadata(&first.path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let directory = first.directory.clone();
+        drop(first);
+        assert!(!directory.exists());
+        assert!(second.path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_deploy_scripts_execute_independently() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let (first, second) = tokio::join!(
+                run_deploy_script("exit 0".to_string(), Duration::from_secs(3)),
+                run_deploy_script("printf second >&2; exit 7".to_string(), Duration::from_secs(3)),
+            );
+            first.unwrap();
+            assert!(second.unwrap_err().message.contains("second"));
+        })
+        .await
+        .expect("concurrent deployment regression timed out");
+    }
 
     #[test]
     fn deploy_request_requires_service_name() {
@@ -220,27 +294,26 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn linux_restart_uses_systemd_run_with_custom_service_name() {
-        let output = Command::new("/usr/bin/systemd-run")
-            .args([
+        let command = restart_command("my-app.service");
+        assert_eq!(command.as_std().get_program(), "/usr/bin/systemd-run");
+        assert_eq!(
+            command.as_std().get_args().collect::<Vec<_>>(),
+            [
                 "--quiet",
                 "--collect",
                 "--on-active=1s",
                 "/bin/systemctl",
                 "restart",
+                "--",
                 "my-app.service",
-            ])
-            .output();
-
-        match output {
-            Ok(_) => {}  // Command executed; may succeed or fail depending on env
-            Err(_) => {} // Binary may not exist in test env
-        }
+            ]
+        );
     }
 
-    #[test]
+    #[tokio::test]
     #[cfg(not(target_os = "linux"))]
-    fn non_linux_restart_returns_unsupported() {
-        let result = schedule_deploy_restart("my-app.service");
+    async fn non_linux_restart_returns_unsupported() {
+        let result = schedule_deploy_restart("my-app.service").await;
         assert!(result.is_err());
         if let Err(error) = result {
             assert!(error.to_string().contains("不支持"));

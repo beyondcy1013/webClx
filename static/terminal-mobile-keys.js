@@ -49,7 +49,10 @@ function sendSlashCommand(command, { enterDelayMs = 0, sessionId = "" } = {}) {
   if (!commandLine) {
     return false;
   }
-  const targetSessionId = String(sessionId || "").trim();
+  const compactCommand = commandLine.split(/\s+/)[0] === "/compact";
+  const targetSessionId = String(sessionId || (compactCommand ? state.activeSessionId : "") || "").trim();
+  if (typeof terminalCompactCommandAllowed === "function"
+    && !terminalCompactCommandAllowed(commandLine, targetSessionId)) return false;
   const requestedEnterDelayMs = mobileKeyDelayMs(enterDelayMs, 0);
   const effectiveEnterDelayMs =
     requestedEnterDelayMs > 0
@@ -61,9 +64,12 @@ function sendSlashCommand(command, { enterDelayMs = 0, sessionId = "" } = {}) {
   mobileKeySendQueue = mobileKeySendQueue
     .catch(() => {})
     .then(async () => {
+      if (typeof terminalCompactCommandAllowed === "function"
+        && !terminalCompactCommandAllowed(commandLine, targetSessionId)) return;
       const sendInput = (data) => {
-        if (!targetSessionId) {
-          sendTerminalInput(data);
+        if (!targetSessionId
+          || (compactCommand && !sessionId && targetSessionId === state.activeSessionId)) {
+          sendTerminalInput(data, { flush: true });
           return true;
         }
         return sendTerminalInputToSession(data, targetSessionId);
@@ -300,7 +306,7 @@ function triggerMobileKey(button) {
   }
 
   if (button.dataset.action === "open_schedule_paste") {
-    openScheduledTerminalPasteDialog();
+    openScheduledTaskManagement();
     return;
   }
 
@@ -330,6 +336,21 @@ function triggerMobileKey(button) {
   }
 
   if (button.dataset.action === "sort_directory_sessions_by_path") {
+    runTerminalFunctionCommand({ action: button.dataset.action });
+    return;
+  }
+
+  if (button.dataset.action === "reflow_current_session") {
+    terminalReflowCurrentSession();
+    return;
+  }
+
+  if (button.dataset.action === "set_terminal_group_token") {
+    runTerminalFunctionCommand({ action: button.dataset.action });
+    return;
+  }
+
+  if (button.dataset.action === "exit_terminal_group") {
     runTerminalFunctionCommand({ action: button.dataset.action });
     return;
   }
@@ -455,7 +476,7 @@ function runTerminalFunctionCommand(command, options = {}) {
   }
 
   if (command.action === "open_schedule_paste") {
-    openScheduledTerminalPasteDialog();
+    openScheduledTaskManagement();
     return true;
   }
 
@@ -502,6 +523,40 @@ function runTerminalFunctionCommand(command, options = {}) {
     return true;
   }
 
+  if (command.action === "set_terminal_group_token") {
+    const session = activeSession();
+    if (!session) {
+      updateStatus("当前没有可编组的终端。", "warn");
+      return true;
+    }
+    if (typeof terminalActionKeyboardPolicyActive === "boolean") {
+      terminalActionKeyboardPolicyActive = false;
+      terminalActionEditableFocusBlocked = false;
+    }
+    openTerminalGroupDialog();
+    return true;
+  }
+
+  if (command.action === "exit_terminal_group") {
+    const session = activeSession();
+    if (!session) {
+      updateStatus("当前没有可退出分组的终端。", "warn");
+      return true;
+    }
+    if (!session.group_token) {
+      updateStatus("当前终端未加入分组。", "muted");
+      return true;
+    }
+    requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}/group`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ member_ids: [], fixed_order: false }),
+    }).then(() => loadSessions({ preserveCurrentList: true }))
+      .then(() => updateStatus("当前终端已退出分组。", "ok"))
+      .catch((error) => updateStatus(`退出分组失败：${error.message}`, "warn"));
+    return true;
+  }
+
   if (command.action === "sort_directory_sessions_by_path") {
     const mode = cycleTerminalSessionSortMode();
     const currentLabel = sharedTerminalSessionSortModeLabel(mode);
@@ -536,11 +591,10 @@ function runTerminalFunctionCommand(command, options = {}) {
   }
 
   if (command.action === "send_slash_command" || command.command.startsWith("/")) {
-    sendSlashCommand(command.command, {
+    return sendSlashCommand(command.command, {
       enterDelayMs: options.enterDelayMs ?? terminalCommandEnterDelayMs(command),
       sessionId: options.sessionId,
     });
-    return true;
   }
 
   if (command.action === "send_text") {
@@ -569,6 +623,11 @@ function handleTerminalFunctionCommandMenuAction(event) {
     return;
   }
   event.preventDefault();
+  if (button.dataset.action === "restore_portrait") {
+    closeTerminalFunctionCommandMenu();
+    restoreTerminalPortraitOrientation();
+    return;
+  }
   if (button.dataset.action === "upload_terminal_image") {
     closeTerminalFunctionCommandMenu();
     openTerminalImageUploadPicker();
@@ -708,7 +767,15 @@ function runTerminalProjectCommandAction(action) {
   } else if (action === "open_agents_doc") {
     openTerminalAgentsDocEditor();
   } else if (action === "open_specified_task") {
-    openTerminalSpecifiedTaskDialog();
+    openTerminalSpecifiedTaskDialog(null, { temporary: true });
+  } else if (action === "open_future_tasks") {
+    openTerminalFutureTasksDialog();
+  } else if (action === "open_workspace_restores") {
+    openTerminalWorkspaceRestoresDialog();
+  } else if (action === "open_multi_model_advisor") {
+    openTerminalMultiModelAdvisorDialog();
+  } else if (action === "open_multi_terminal_discussion") {
+    openTerminalMultiTerminalDiscussionDialog();
   } else if (action === "permanent_switch_preset") {
     openTerminalPermanentPresetSwitchDialog();
   } else if (action === "designate_preset_fork") {
@@ -721,6 +788,13 @@ function runTerminalProjectCommandAction(action) {
     openTerminalInPlacePresetSwitchDialog(null, { sessionAction: "new" });
   } else if (action === "designate_preset_terminal") {
     openTerminalDesignatePresetDialog();
+  } else if (action === "designate_preset_ask") {
+    openTerminalNewSessionDialog(null, state.currentPath, {
+      sessionAction: "ask",
+      temporary: true,
+      title: "临时/新终端/提问",
+      updatePageStatus: updateStatus,
+    });
   }
 }
 
@@ -734,19 +808,7 @@ function handleTerminalProjectCommandSelectChange() {
 }
 
 function positionTerminalProjectCommandMenu() {
-  if (!terminalProjectCommandMenuEl || !terminalProjectCommandButtonEl || terminalProjectCommandMenuEl.hidden) {
-    return;
-  }
-  const triggerRect = terminalProjectCommandButtonEl.getBoundingClientRect();
-  const menuRect = terminalProjectCommandMenuEl.getBoundingClientRect();
-  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const left = Math.min(Math.max(triggerRect.left, 8), Math.max(8, viewportWidth - menuRect.width - 8));
-  const above = triggerRect.top - menuRect.height - 6;
-  const below = triggerRect.bottom + 6;
-  const top = above >= 8 ? above : Math.min(Math.max(below, 8), Math.max(8, viewportHeight - menuRect.height - 8));
-  terminalProjectCommandMenuEl.style.left = `${Math.round(left)}px`;
-  terminalProjectCommandMenuEl.style.top = `${Math.round(top)}px`;
+  positionCompactTerminalMenu(terminalProjectCommandMenuEl, terminalProjectCommandButtonEl);
 }
 
 function setTerminalProjectCommandMenuExpanded(expanded, { restoreFocus = false } = {}) {
@@ -762,6 +824,7 @@ function setTerminalProjectCommandMenuExpanded(expanded, { restoreFocus = false 
   }
   terminalProjectCommandMenuEl.style.removeProperty("left");
   terminalProjectCommandMenuEl.style.removeProperty("top");
+  terminalProjectCommandMenuEl.style.removeProperty("max-height");
   if (restoreFocus) {
     terminalProjectCommandButtonEl.focus({ preventScroll: true });
   }
@@ -1016,7 +1079,7 @@ function suppressSystemImeForSoftKeyboardControl(event) {
   const helperWasFocused =
     !isMainSoftKey && now < softKeyboardMenuImeFocusUntil && softKeyboardMenuImeFocus !== null
       ? softKeyboardMenuImeFocus
-      : terminalHelperTextareaFocused();
+      : (terminalHelperTextareaFocused() || (terminalSystemImeEnabled && terminalNativeKeyboardVisible()));
   softKeyboardImeGestureSequence += 1;
   if (isMainSoftKey) {
     softKeyboardMenuImeFocus = helperWasFocused;
@@ -1102,8 +1165,10 @@ function handleMobileKeyPointerDown(event) {
     repeatDelayTimer: null,
     repeatIntervalTimer: null,
   };
-  if (typeof button.setPointerCapture === "function") {
-    button.setPointerCapture(event.pointerId);
+  if (event.pointerType !== "touch" && typeof button.setPointerCapture === "function") {
+    try {
+      button.setPointerCapture(event.pointerId);
+    } catch {}
   }
   button.classList.add("pressed");
   startMobileKeyRepeat(mobileKeyPress);
@@ -1134,8 +1199,17 @@ function handleMobileKeyPointerEnd(event) {
   const hasRepeated = mobileKeyPress.hasRepeated;
   const longPressTriggered =
     button.dataset.action === "escape_ctrl_c" && mobileKeyPress.longPressTriggered;
+  const distance = Math.hypot(
+    (Number.isFinite(event.clientX) ? event.clientX : mobileKeyPress.startX) - mobileKeyPress.startX,
+    (Number.isFinite(event.clientY) ? event.clientY : mobileKeyPress.startY) - mobileKeyPress.startY,
+  );
+  const isTouchRelease =
+    event.type === "pointerup" ||
+    (event.type === "pointercancel" &&
+      event.pointerType === "touch" &&
+      distance < MOBILE_KEY_DRAG_THRESHOLD);
   const shouldTrigger =
-    event.type === "pointerup" &&
+    isTouchRelease &&
     !hasRepeated &&
     (event.pointerType !== "mouse" || mobileKeyButtonFromPoint(event.clientX, event.clientY) === button);
   clearMobileKeyPress();

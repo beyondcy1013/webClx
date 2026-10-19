@@ -31,21 +31,30 @@
     return `/api/workspace-icon?${params.toString()}`;
   }
 
-  function workspaceProjectKey(path) {
+  function normalizedProjectPath(path) {
     const parts = String(path || "")
       .trim()
       .replaceAll("\\", "/")
       .split("/")
       .filter((part) => part && part !== ".");
+    return parts;
+  }
+
+  function workspaceProjectKey(path, exact = false) {
+    const parts = normalizedProjectPath(path);
     if (parts.length === 0) return ".";
+    if (exact) return parts.join("/");
     if (parts[0] === "..") {
       return parts.slice(0, Math.min(3, parts.length)).join("/");
+    }
+    if (parts[0] === "third_party" && parts.length > 1) {
+      return parts.slice(0, 2).join("/");
     }
     return parts[0];
   }
 
-  function workspaceProjectTextIcon(path) {
-    const projectName = workspaceProjectKey(path).split("/").filter(Boolean).at(-1) || "project";
+  function workspaceProjectTextIcon(path, exact = false) {
+    const projectName = workspaceProjectKey(path, exact).split("/").filter(Boolean).at(-1) || "project";
     const tokens = projectName.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+|[\p{L}\p{N}]/gu) || [];
     if (tokens.length >= 2) {
       return `${Array.from(tokens[0])[0]}${Array.from(tokens[1])[0]}`.toUpperCase();
@@ -54,13 +63,15 @@
     return characters.slice(0, 2).join("").toUpperCase() || "PR";
   }
 
-  function workspaceProjectColorSlots(paths) {
-    const keys = Array.from(new Set(Array.from(paths || [], workspaceProjectKey))).sort();
+  function workspaceProjectColorSlots(paths, exact = false) {
+    const keys = Array.from(
+      new Set(Array.from(paths || [], (path) => workspaceProjectKey(path, exact))),
+    ).sort();
     return new Map(keys.map((key, index) => [key, index]));
   }
 
-  function workspaceProjectHue(path, colorSlots = null) {
-    const key = workspaceProjectKey(path);
+  function workspaceProjectHue(path, colorSlots = null, exact = false) {
+    const key = workspaceProjectKey(path, exact);
     if (colorSlots?.has(key)) {
       return Number(((210 + colorSlots.get(key) * 137.508) % 360).toFixed(3));
     }
@@ -72,12 +83,35 @@
     return (hash >>> 0) % 360;
   }
 
+  const EXECUTOR_EMOJIS = ["⚙️", "🛠️", "🚀", "🔧", "🧭", "🧪", "📦", "🛰️", "🧩", "🎯"];
+  function terminalRoleEmoji(option) {
+    const role = option.dataset.groupRole || "";
+    if (!role) return "";
+    if (role === "manager") return root.localStorage?.getItem("webclx:terminal-group-manager-emoji") || "👑";
+    if (root.localStorage?.getItem("webclx:terminal-group-executor-emoji-mode") === "fixed") {
+      return root.localStorage?.getItem("webclx:terminal-group-executor-emoji") || "⚙️";
+    }
+    let hash = 2166136261;
+    // Random is selected once per project, so every executor terminal for the
+    // same project shares one stable emoji across refreshes and sessions.
+    const projectKey = workspaceProjectKey(
+      option.dataset.iconProjectPath || option.dataset.workspacePath || option.value || "",
+      true,
+    );
+    for (const character of projectKey) {
+      hash ^= character.codePointAt(0);
+      hash = Math.imul(hash, 16777619);
+    }
+    return EXECUTOR_EMOJIS[(hash >>> 0) % EXECUTOR_EMOJIS.length];
+  }
+
   function createWorkspaceProjectIcon(
     path,
     iconPath,
     nearest = false,
     className = "",
     colorSlots = null,
+    exactProjectPath = false,
   ) {
     if (!root?.document || !iconPath) {
       return null;
@@ -85,15 +119,15 @@
     const icon = root.document.createElement("span");
     icon.className = ["workspace-project-icon", className].filter(Boolean).join(" ");
     icon.setAttribute("aria-hidden", "true");
-    icon.dataset.projectKey = workspaceProjectKey(path);
+    icon.dataset.projectKey = workspaceProjectKey(path, exactProjectPath);
     icon.style.setProperty(
       "--workspace-project-icon-hue",
-      String(workspaceProjectHue(path, colorSlots)),
+      String(workspaceProjectHue(path, colorSlots, exactProjectPath)),
     );
 
     const fallback = root.document.createElement("span");
     fallback.className = "workspace-project-text-icon";
-    fallback.textContent = workspaceProjectTextIcon(path);
+    fallback.textContent = workspaceProjectTextIcon(path, exactProjectPath);
 
     const image = root.document.createElement("img");
     image.className = "workspace-project-icon-image";
@@ -109,7 +143,11 @@
       image.hidden = true;
       icon.classList.add("text-fallback");
     });
-    image.src = workspaceProjectIconUrl(path, iconPath, nearest);
+    // The workspace root has no project-relative icon. Use the app favicon
+    // directly so the normal root fallback does not create a 404 request.
+    image.src = !String(path || "").trim() && iconPath === DEFAULT_TERMINAL_WORKSPACE_ICON_PATH
+      ? "/assets/favicon.svg"
+      : workspaceProjectIconUrl(path, iconPath, nearest);
     icon.append(fallback, image);
     return icon;
   }
@@ -143,6 +181,10 @@
     selectEl.classList.add("workspace-icon-native-select");
     selectEl.setAttribute("aria-hidden", "true");
     selectEl.tabIndex = -1;
+    const focusTarget = () => host.contains(root.document.activeElement) ? trigger : selectEl;
+    selectEl.addEventListener("focus", () => {
+      focusTarget().focus?.();
+    });
 
     function iconPath() {
       return normalizeProjectIconPath(
@@ -152,27 +194,132 @@
     }
 
     function appendOptionContent(container, option, colorSlots) {
-      const path = option.dataset.workspacePath || "";
+      const grouped = option.dataset.grouped === "true";
+      const groupColor = option.dataset.groupColor || "";
+      if (grouped) {
+        container.style.setProperty("--terminal-group-color", groupColor);
+        container.style.setProperty(
+          "background",
+          "color-mix(in srgb, var(--terminal-group-color) 18%, transparent)",
+        );
+      }
+      const path = option.dataset.iconProjectPath || option.dataset.workspacePath || "";
       const icon = createWorkspaceProjectIcon(
         path,
         iconPath(),
         true,
         "workspace-icon-select-image",
         colorSlots,
+        true,
       );
+      const roleEmoji = terminalRoleEmoji(option);
+      if (roleEmoji) {
+        const role = root.document.createElement("span");
+        role.className = "terminal-role-emoji";
+        role.textContent = roleEmoji;
+        let counterpart = null;
+        try {
+          const members = JSON.parse(option.dataset.groupRoleMembers || "[]");
+          counterpart = Array.isArray(members)
+            ? members.find((member) => member?.role && member.role !== option.dataset.groupRole)
+            : null;
+        } catch {
+          counterpart = null;
+        }
+        role.title = [
+          option.dataset.groupRoleName || (option.dataset.groupRole === "manager" ? "管理者" : "执行者"),
+          counterpart ? `搭档：${counterpart.name || counterpart.id}` : "",
+        ].filter(Boolean).join(" · ");
+        container.append(role);
+      }
       if (icon) {
+        if (grouped) {
+          icon.style.setProperty("--workspace-project-icon-hue", "");
+          icon.classList.add("group-colored");
+        }
         container.append(icon);
+      }
+      if (grouped) {
+        // 编组跟随终端标记图标（第3个图标），暂时隐藏
+        const marker = root.document.createElement("span");
+        marker.className = "workspace-icon-select-group-marker";
+        marker.setAttribute("aria-hidden", "true");
+        marker.textContent = "⇄";
+        marker.title = "编组跟随终端";
+        marker.hidden = true;
+        marker.style.display = "none";
+        container.append(marker);
       }
       const text = root.document.createElement("span");
       text.className = "workspace-icon-select-text";
-      text.textContent = option.textContent || "";
+      const baseText = option.textContent || "";
+      const separator = baseText.includes(" | ") ? " | " : " · ";
+      const [base, ...details] = separator === " | " ? baseText.split(" | ") : [baseText];
+      const parts = [base, ...details];
+      const groupName = option.dataset.groupName || "";
+      if (groupName) {
+        const groupBadge = `【${groupName}】`;
+        if (parts[0].includes(` · ${groupName}`)) {
+          parts[0] = parts[0].replace(` · ${groupName}`, "");
+        }
+        if (!parts[0].includes(groupBadge)) {
+          parts[0] = `${groupBadge}${parts[0]}`;
+        }
+      }
+      text.textContent = parts.join(separator);
+      attachHorizontalDragScroll(text);
       container.append(text);
     }
+
+    function attachHorizontalDragScroll(el) {
+      if (!el) return;
+      let startX = 0;
+      let scrollLeft = 0;
+      let isDown = false;
+      let hasMoved = false;
+
+      el.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0) return;
+        isDown = true;
+        hasMoved = false;
+        startX = e.clientX;
+        scrollLeft = el.scrollLeft;
+        el.setPointerCapture?.(e.pointerId);
+      });
+
+      el.addEventListener("pointermove", (e) => {
+        if (!isDown) return;
+        const walk = e.clientX - startX;
+        if (Math.abs(walk) > 4) {
+          hasMoved = true;
+          el.scrollLeft = scrollLeft - walk;
+          el.dataset.dragScrolled = "true";
+        }
+      });
+
+      const stopDrag = (e) => {
+        if (!isDown) return;
+        isDown = false;
+        if (hasMoved) {
+          e?.stopPropagation?.();
+        }
+        window.setTimeout(() => {
+          delete el.dataset.dragScrolled;
+        }, 50);
+      };
+
+      el.addEventListener("pointerup", stopDrag);
+      el.addEventListener("pointercancel", stopDrag);
+    }
+
+    let renderedSignature = "";
+    let pendingSync = false;
 
     function close() {
       menu.hidden = true;
       trigger.setAttribute("aria-expanded", "false");
       host.classList.remove("open");
+      if (pendingSync) sync();
     }
 
     function positionMenu() {
@@ -182,14 +329,17 @@
       const triggerRect = trigger.getBoundingClientRect();
       const margin = 8;
       const gap = 5;
-      const width = Math.min(Math.max(triggerRect.width, 260), viewportWidth - margin * 2);
+
+      menu.style.width = "max-content";
+      const naturalWidth = menu.scrollWidth || triggerRect.width;
+      const width = Math.min(Math.max(triggerRect.width, naturalWidth, 260), viewportWidth - margin * 2);
       const spaceBelow = viewportHeight - triggerRect.bottom - gap - margin;
       const spaceAbove = triggerRect.top - gap - margin;
       const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
       const availableHeight = Math.max(80, openAbove ? spaceAbove : spaceBelow);
 
       menu.style.width = `${width}px`;
-      menu.style.maxHeight = `${Math.min(420, availableHeight)}px`;
+      menu.style.maxHeight = `${Math.min(460, availableHeight)}px`;
       menu.style.left = `${Math.min(
         Math.max(margin, triggerRect.left),
         viewportWidth - width - margin,
@@ -220,8 +370,27 @@
 
     function sync() {
       const options = Array.from(selectEl.options);
+      // Keep the hit target alive between pointerdown and click. Session events
+      // can update the native select several times while this menu is open.
+      if (!menu.hidden) {
+        pendingSync = true;
+        return;
+      }
+      pendingSync = false;
+      const signature = JSON.stringify([
+        selectEl.value, selectEl.disabled, iconPath(),
+        options.map((option) => [
+          option.value, option.textContent, option.title, option.disabled,
+          { ...option.dataset }, terminalRoleEmoji(option),
+        ]),
+      ]);
+      if (signature === renderedSignature) return;
+      renderedSignature = signature;
       const colorSlots = workspaceProjectColorSlots(
-        options.map((option) => option.dataset.workspacePath || ""),
+        options.map(
+          (option) => option.dataset.iconProjectPath || option.dataset.workspacePath || "",
+        ),
+        true,
       );
       const selected = selectEl.selectedOptions?.[0] || selectEl.options[0] || null;
       trigger.replaceChildren();
@@ -243,11 +412,22 @@
         item.role = "option";
         item.id = `${menu.id}-option-${index}`;
         item.disabled = option.disabled;
+        item.classList.toggle("workspace-icon-select-option-grouped", option.dataset.grouped === "true");
         item.setAttribute("aria-selected", option.value === selectEl.value ? "true" : "false");
         item.title = option.title || option.textContent || "";
         appendOptionContent(item, option, colorSlots);
-        item.addEventListener("click", () => {
-          selectEl.value = option.value;
+        item.addEventListener("click", (e) => {
+          if (item.querySelector(".workspace-icon-select-text")?.dataset.dragScrolled === "true") {
+            return;
+          }
+          const currentOption = Array.from(selectEl.options).find(
+            (candidate) => candidate.value === option.value && !candidate.disabled,
+          );
+          if (!currentOption || selectEl.disabled) {
+            close();
+            return;
+          }
+          selectEl.value = currentOption.value;
           selectEl.dispatchEvent(new root.Event("change", { bubbles: true }));
           close();
           trigger.focus();
@@ -256,7 +436,10 @@
       });
     }
 
-    trigger.addEventListener("click", () => {
+    trigger.addEventListener("click", (e) => {
+      if (trigger.querySelector(".workspace-icon-select-text")?.dataset.dragScrolled === "true") {
+        return;
+      }
       if (menu.hidden) open();
       else close();
     });

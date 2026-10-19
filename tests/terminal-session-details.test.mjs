@@ -34,7 +34,7 @@ assert.match(
 assert.match(
   terminalJs,
   /action === "open_agents_doc"[\s\S]*openTerminalAgentsDocEditor\(\)/,
-  "the project-command document entry should open the AGENTS.MD document manager",
+  "the project-command document entry should open the AGENTS.md document manager",
 );
 
 assert.match(
@@ -57,7 +57,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function openTerminalAgentsDocDialog\(\)[\s\S]*resetTerminalImeFocusContext\(\);[\s\S]*terminalAgentsDocDialogEl\.showModal\(\)/,
+  /function openTerminalAgentsDocDialog\(\)[\s\S]*resetTerminalImeFocusContext\(\{ desktopInput: true \}\);[\s\S]*terminalAgentsDocDialogEl\.showModal\(\)/,
   "document button should reset the old terminal IME focus context before opening the modal editor",
 );
 
@@ -69,26 +69,32 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function resetTerminalImeFocusContext\(\)[\s\S]*terminalHelperTextarea\(\)[\s\S]*helper\.blur\(\);[\s\S]*focusTerminalImeResetTarget\(\);[\s\S]*syncTerminalImePolicy\(\);[\s\S]*\}/,
+  /function resetTerminalImeFocusContext\(\{ desktopInput = false \} = \{\}\)[\s\S]*terminalHelperTextarea\(\)[\s\S]*helper\.blur\(\);[\s\S]*focusTerminalImeResetTarget\(\{ desktopInput \}\);[\s\S]*syncTerminalImePolicy\(\);[\s\S]*\}/,
   "document editor focus recovery should first break the old xterm helper textarea IME context",
 );
 
 assert.match(
   terminalJs,
-  /function restoreTerminalFocusAfterDialogClose\(\)[\s\S]*resetTerminalImeFocusContext\(\);[\s\S]*window\.requestAnimationFrame\(\(\) => \{[\s\S]*window\.requestAnimationFrame\(\(\) => \{[\s\S]*focusTerminalForUserInput\(\);[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*focusTerminalForUserInput\(\);[\s\S]*\}, 80\);[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*focusTerminalForUserInput\(\);[\s\S]*\}, 180\);[\s\S]*\}/,
+  /function restoreTerminalFocusAfterDialogClose\(\{ desktopInput = false \} = \{\}\)[\s\S]*!hasPrimaryTouchInput\(\)[\s\S]*resetTerminalImeFocusContext\(\{ desktopInput: restoreDesktopInput \}\);[\s\S]*const restore = \(\) => \{[\s\S]*focusTerminalForUserInput\(\);[\s\S]*terminalHelperTextareaFocused\(\)[\s\S]*focusTerminalForDirectInput\(\);[\s\S]*window\.requestAnimationFrame\(\(\) => \{[\s\S]*window\.requestAnimationFrame\(restore\);[\s\S]*window\.setTimeout\(restore, 80\);[\s\S]*window\.setTimeout\(restore, 180\);/,
   "closing the document editor should rebuild the Windows IME context before restoring xterm focus",
 );
 
 assert.match(
   terminalJs,
-  /terminalAgentsDocDialogEl\.addEventListener\("close", \(\) => \{[\s\S]*updateTerminalAgentsDocStatus\("", "info"\);[\s\S]*terminalAgentsDocSessionId = "";[\s\S]*restoreTerminalFocusAfterDialogClose\(\);[\s\S]*\}\)/,
+  /terminalAgentsDocDialogEl\.addEventListener\("close", \(\) => \{[\s\S]*updateTerminalAgentsDocStatus\("", "info"\);[\s\S]*terminalAgentsDocSessionId = "";[\s\S]*restoreTerminalFocusAfterDialogClose\(\{ desktopInput: true \}\);[\s\S]*\}\)/,
   "document editor close event should restore terminal focus so Chinese IME can be selected again",
 );
 
 assert.match(
   terminalJs,
-  /async function loadTerminalAgentsDoc\(sessionId, documentPath\)[\s\S]*const selectedPath = String\(documentPath \|\| "AGENTS\.MD"\)[\s\S]*new URLSearchParams\(\{[\s\S]*path: selectedPath,[\s\S]*show_hidden:[\s\S]*\/api\/terminal\/sessions\/\$\{encodeURIComponent\(sessionId\)\}\/agents-doc\?\$\{query\}[\s\S]*terminalAgentsDocEditorEl\.value = payload\.content \|\| ""/,
-  "document selector should load the selected document path into the editor",
+  /function terminalActionFocusGateExempt\(target\)[\s\S]*terminalAgentsDocDialogEl\?\.contains\(target\)/,
+  "document editor controls should be exempt from the keyboard action focus gate so Chinese IME works",
+);
+
+assert.match(
+  terminalJs,
+  /async function loadTerminalAgentsDoc\(sessionId, documentPath\)[\s\S]*const selectedPath = String\(documentPath \|\| "AGENTS\.MD"\)[\s\S]*new URLSearchParams\(\{[\s\S]*path: selectedPath,[\s\S]*show_hidden:[\s\S]*\/api\/terminal\/sessions\/\$\{encodeURIComponent\(sessionId\)\}\/agents-doc\?\$\{query\}[\s\S]*readTerminalAgentsDocDraft\(sessionId,[\s\S]*terminalAgentsDocEditorEl\.value = draft\.content[\s\S]*terminalAgentsDocEditorEl\.value = serverContent/,
+  "document selector should restore an unsaved draft before falling back to server content",
 );
 
 assert.match(
@@ -118,13 +124,13 @@ assert.match(
 assert.match(
   terminalDocsRs,
   /pub async fn read_session_agents_doc\([\s\S]*AxumPath\(session_id\): AxumPath<String>[\s\S]*session_agents_doc_path/,
-  "terminal API should expose a session-scoped AGENTS.MD read endpoint",
+  "terminal API should expose a session-scoped AGENTS.md read endpoint",
 );
 
 assert.match(
   terminalDocsRs,
   /pub async fn save_session_agents_doc\([\s\S]*AxumPath\(session_id\): AxumPath<String>[\s\S]*Json\(payload\): Json<TerminalAgentsDocSaveRequest>[\s\S]*tokio::fs::write/,
-  "terminal API should expose a session-scoped AGENTS.MD save endpoint that can create the file",
+  "terminal API should expose a session-scoped AGENTS.md save endpoint that can create the file",
 );
 
 assert.match(

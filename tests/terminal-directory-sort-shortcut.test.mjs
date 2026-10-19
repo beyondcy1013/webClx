@@ -11,7 +11,7 @@ const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta
 for (const html of [indexHtml, terminalHtml]) {
   assert.match(
     html,
-    /terminal-session-activity\.js\?v=20260726a/,
+    /terminal-session-activity\.js\?v=20260904a/,
     "pages using terminal session sorting should load the current activity helper version",
   );
 }

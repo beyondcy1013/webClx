@@ -9,9 +9,20 @@
   const CODEX_RESUME_COMMAND_PATTERN =
     /\bcodex\s+resume\s+[`'"]?([^\s`"'，。；；：:<>()[\]{}]+)[`'"]?/gi;
   const CODEX_RESUME_INVOKE_PATTERN = /\bcodex\s+resume\b/gi;
+  const CDX_RESUME_COMMAND_PATTERN =
+    /\bcdx\s+resume\s+[`'"]?([^\s`"'，。；；：:<>()[\]{}]+)[`'"]?/gi;
+  const CDX_RESUME_INVOKE_PATTERN = /\bcdx\s+resume\b/gi;
   const CLAUDE_RESUME_COMMAND_PATTERN =
     /\bclaude\s+--resume\s+[`'"]?([^\s`"'，。；；：:<>()[\]{}]+)[`'"]?/gi;
   const CLAUDE_RESUME_INVOKE_PATTERN = /\bclaude\s+--resume\b/gi;
+  const AGY_RESUME_INVOKE_PATTERN = /\bagy\s+--conversation(?:=|\s+)/gi;
+  const CODEBUDDY_RESUME_INVOKE_PATTERN = /\bcodebuddy\s+--resume(?:=|\s+)/gi;
+  const KIRO_RESUME_INVOKE_PATTERN = /\bkiro-cli\s+--resume-id(?:=|\s+)/gi;
+  const GROK_RESUME_INVOKE_PATTERN = /\bgrok\s+--resume\s+/gi;
+  const CLINE_RESUME_INVOKE_PATTERN = /\bcline\s+(?:--id|--taskId|-T)(?:=|\s+)/gi;
+  const OPENCODE_RESUME_INVOKE_PATTERN = /\bopencode\s+(?:--session|-s)(?:=|\s+)/gi;
+  const DEVIN_RESUME_INVOKE_PATTERN = /\bdevin[ \t]+(?:-r|--resume)[ \t]+/gi;
+  const DEVIN_RESUME_SLUG_PATTERN = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
   const CODEX_RESUME_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
   const CODEX_RESUME_UUID_PATTERN =
     /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
@@ -23,7 +34,8 @@
   const CODEX_RESUME_FRAGMENT_SCAN_LIMIT = 260;
   const CODEX_RESUME_FRAGMENT_WHITESPACE_LIMIT = 16;
   const RESUME_UUID_CONTEXT_SCAN_LIMIT = 1024;
-  const NEXT_RESUME_INVOKE_PATTERN = /\b(?:codex\s+resume|claude\s+--resume)\b/i;
+  const NEXT_RESUME_INVOKE_PATTERN =
+    /\b(?:codex\s+resume|cdx\s+resume|claude\s+--resume|agy\s+--conversation|codebuddy\s+--resume|kiro-cli\s+--resume-id|grok\s+--resume|cline\s+(?:--id|--taskId|-T)|opencode\s+(?:--session|-s)|devin\s+(?:-r|--resume))\b/i;
 
   // Codex/Claude startup banner prints the active session id in a labelled
   // box, e.g.:
@@ -56,9 +68,48 @@
     );
   }
 
+  function isValidDevinResumeSlug(slug) {
+    const value = String(slug || "");
+    return value.length <= 160 && DEVIN_RESUME_SLUG_PATTERN.test(value);
+  }
+
+  function devinResumeSlugAfterInvoke(rawTail) {
+    const match = String(rawTail || "").match(/^[`'"]?([^\s`"'，。；；：:<>()[\]{}]+)/);
+    if (!match) {
+      return "";
+    }
+
+    const slug = sanitizeResumeToken(match[1]);
+    return isValidDevinResumeSlug(slug) ? slug : "";
+  }
+
   function resumeCommandFromId(resumeId, program) {
+    if (program === "agy") {
+      return `agy --conversation=${resumeId}`;
+    }
+    if (program === "codebuddy") {
+      return `codebuddy --resume=${resumeId}`;
+    }
+    if (program === "kiro") {
+      return `kiro-cli --resume-id ${resumeId}`;
+    }
+    if (program === "grok") {
+      return `grok --resume ${resumeId}`;
+    }
+    if (program === "cline") {
+      return `cline --id ${resumeId}`;
+    }
+    if (program === "opencode") {
+      return `opencode --session ${resumeId}`;
+    }
     if (program === "claude") {
       return `claude --resume ${resumeId}`;
+    }
+    if (program === "devin") {
+      return `devin -r ${resumeId}`;
+    }
+    if (program === "cdx") {
+      return `cdx resume ${resumeId}`;
     }
     return `codex resume ${resumeId}`;
   }
@@ -70,6 +121,20 @@
     }
 
     const resumeId = sanitizeResumeToken(match[1]);
+    return isValidResumeId(resumeId) ? resumeId : "";
+  }
+
+  // The invoke pattern already consumed the `=` or whitespace separator, so
+  // the tail starts directly at the id token.
+  function exactResumeTokenAfterInvoke(rawTail, { allowNonUuid = false } = {}) {
+    const match = String(rawTail || "").match(/^[`'"]?([^\s`"'，。；；：:<>()[\]{}]+)[`'"]?/);
+    if (!match) {
+      return "";
+    }
+    const resumeId = sanitizeResumeToken(match[1]);
+    if (allowNonUuid) {
+      return CODEX_RESUME_ID_PATTERN.test(resumeId) ? resumeId : "";
+    }
     return isValidResumeId(resumeId) ? resumeId : "";
   }
 
@@ -184,6 +249,8 @@
     let latestUuid = "";
     let latestUuidProgram = "codex";
     let latestUuidIndex = -1;
+    let latestDevinId = "";
+    let latestDevinIndex = -1;
 
     const rememberCandidate = (resumeId, program, index) => {
       if (!resumeId) {
@@ -215,6 +282,20 @@
       }
     }
 
+    CDX_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(CDX_RESUME_INVOKE_PATTERN)) {
+      const resumeId = resumeIdAfterCommand(text.slice(match.index + match[0].length));
+      rememberCandidate(resumeId, "cdx", match.index);
+    }
+
+    CDX_RESUME_COMMAND_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(CDX_RESUME_COMMAND_PATTERN)) {
+      const resumeId = sanitizeResumeToken(match[1]);
+      if (isValidResumeId(resumeId)) {
+        rememberCandidate(resumeId, "cdx", match.index);
+      }
+    }
+
     CLAUDE_RESUME_INVOKE_PATTERN.lastIndex = 0;
     for (const match of text.matchAll(CLAUDE_RESUME_INVOKE_PATTERN)) {
       const resumeId = resumeIdAfterCommand(text.slice(match.index + match[0].length));
@@ -227,6 +308,88 @@
       if (isValidResumeId(resumeId)) {
         rememberCandidate(resumeId, "claude", match.index);
       }
+    }
+
+    AGY_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(AGY_RESUME_INVOKE_PATTERN)) {
+      // AGY prints a UUID directly after the option; do not borrow IDs from later output.
+      const resumeId = fragmentedUuidResumeIdAfterCommand(
+        text.slice(match.index + match[0].length),
+      );
+      rememberCandidate(resumeId, "agy", match.index);
+    }
+
+    CODEBUDDY_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(CODEBUDDY_RESUME_INVOKE_PATTERN)) {
+      // CodeBuddy prints a UUID directly after `--resume=` or `--resume `; the
+      // pattern above already consumes the `=` separator, so the tail starts
+      // at the id itself. Do not borrow IDs from later output.
+      const resumeId = fragmentedUuidResumeIdAfterCommand(
+        text.slice(match.index + match[0].length),
+      );
+      rememberCandidate(resumeId, "codebuddy", match.index);
+    }
+
+    KIRO_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(KIRO_RESUME_INVOKE_PATTERN)) {
+      // Kiro accepts either `--resume-id=` or a space-separated UUID; rebuild
+      // the command with the space-separated form.
+      const resumeId = fragmentedUuidResumeIdAfterCommand(
+        text.slice(match.index + match[0].length),
+      );
+      rememberCandidate(resumeId, "kiro", match.index);
+    }
+
+    GROK_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(GROK_RESUME_INVOKE_PATTERN)) {
+      // Grok prints a UUID directly after `--resume`; do not borrow IDs from
+      // later output.
+      const resumeId = fragmentedUuidResumeIdAfterCommand(
+        text.slice(match.index + match[0].length),
+      );
+      rememberCandidate(resumeId, "grok", match.index);
+    }
+
+    CLINE_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(CLINE_RESUME_INVOKE_PATTERN)) {
+      // Cline task/session ids are not UUIDs; take the token right after the flag.
+      const resumeId = exactResumeTokenAfterInvoke(
+        text.slice(match.index + match[0].length),
+        { allowNonUuid: true },
+      );
+      rememberCandidate(resumeId, "cline", match.index);
+    }
+
+    OPENCODE_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(OPENCODE_RESUME_INVOKE_PATTERN)) {
+      // OpenCode session ids look like `ses_...`; take the token right after the flag.
+      const resumeId = exactResumeTokenAfterInvoke(
+        text.slice(match.index + match[0].length),
+        { allowNonUuid: true },
+      );
+      rememberCandidate(resumeId, "opencode", match.index);
+    }
+
+    DEVIN_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(DEVIN_RESUME_INVOKE_PATTERN)) {
+      const slug = devinResumeSlugAfterInvoke(
+        text.slice(match.index + match[0].length),
+      );
+      if (slug && match.index > latestDevinIndex) {
+        latestDevinId = slug;
+        latestDevinIndex = match.index;
+      }
+    }
+
+    if (latestDevinId && latestDevinIndex > latestUuidIndex) {
+      if (
+        (latestProgram === "cline" || latestProgram === "opencode") &&
+        latestIndex > latestDevinIndex &&
+        latestIndex > latestUuidIndex
+      ) {
+        return { id: latestId, program: latestProgram };
+      }
+      return { id: latestDevinId, program: "devin" };
     }
 
     if (latestUuid) {

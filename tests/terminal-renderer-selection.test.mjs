@@ -43,6 +43,6 @@ assert.equal(terminalRendererType(desktopChrome, null), "canvas");
 const terminalHtml = readFileSync(new URL("../static/terminal.html", import.meta.url), "utf8");
 assert.match(
   terminalHtml,
-  /terminal-shell-settings\.js\?v=20260803b/,
+  /terminal-shell-settings.js\?v=20260913a/,
   "terminal page should invalidate cached renderer selection code",
 );

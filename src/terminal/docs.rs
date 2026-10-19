@@ -166,7 +166,7 @@ fn session_agents_doc_path(
     } else if !is_terminal_doc_file(&doc_path) {
         // 路径尚未落盘：仍按扩展名白名单校验，避免被用于创建任意扩展名的文件。
         // 真正的路径越权由 normalize_terminal_doc_path 与上方父目录 canonicalize
-        // 共同把关。AGENTS.MD（大小写不敏感）由 is_terminal_doc_file 允许。
+        // 共同把关。AGENTS.md（大小写不敏感）由 is_terminal_doc_file 允许。
         return Err(AppError::bad_request("只能编辑文本类文档。"));
     }
     Ok(doc_path)
@@ -191,13 +191,13 @@ fn terminal_agents_doc_response(
     })
 }
 
-/// AGENTS.MD 和 README.MD（大小写忽略）排在最前。
+/// AGENTS.md 和 README.MD（大小写忽略）排在最前。
 fn is_pinned_doc_name(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     name == "agents.md" || name == "readme.md"
 }
 
-/// 固定文档内部排序：AGENTS.MD 在 README.MD 之前。
+/// 固定文档内部排序：AGENTS.md 在 README.MD 之前。
 fn pin_rank(path: &str) -> u8 {
     let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     if name == "agents.md" { 0 } else { 1 }
@@ -211,7 +211,7 @@ fn list_terminal_doc_candidates(
 ) -> ApiResult<Vec<TerminalAgentsDocItem>> {
     let mut documents = Vec::new();
     let recursive_directories = parse_recursive_doc_directories(recursive_dirs);
-    push_terminal_doc_item(state, session_dir, &session_dir.join("AGENTS.MD"), &mut documents)?;
+    push_terminal_doc_item(state, session_dir, &session_dir.join("AGENTS.md"), &mut documents)?;
     collect_terminal_doc_entries(
         state,
         session_dir,
@@ -221,7 +221,7 @@ fn list_terminal_doc_candidates(
         &recursive_directories,
         &mut documents,
     )?;
-    // AGENTS.MD 和 README.MD（大小写忽略）固定在最前，其余按修改时间倒序。
+    // AGENTS.md 和 README.MD（大小写忽略）固定在最前，其余按修改时间倒序。
     documents.sort_by(|left, right| {
         let left_pinned = is_pinned_doc_name(&left.path);
         let right_pinned = is_pinned_doc_name(&right.path);
@@ -362,8 +362,8 @@ fn push_terminal_doc_item(
 
 fn normalize_terminal_doc_path(requested_path: &str) -> ApiResult<PathBuf> {
     let trimmed = requested_path.trim();
-    let relative = if trimmed.is_empty() || trimmed == "AGENTS.MD" {
-        PathBuf::from("AGENTS.MD")
+    let relative = if trimmed.is_empty() || trimmed == "AGENTS.md" {
+        PathBuf::from("AGENTS.md")
     } else {
         PathBuf::from(trimmed)
     };
@@ -380,7 +380,7 @@ fn normalize_terminal_doc_path(requested_path: &str) -> ApiResult<PathBuf> {
         }
     }
     if normalized.components().next().is_none() {
-        normalized.push("AGENTS.MD");
+        normalized.push("AGENTS.md");
     }
     Ok(normalized)
 }

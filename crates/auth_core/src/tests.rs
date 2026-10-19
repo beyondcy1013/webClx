@@ -1,25 +1,27 @@
 use super::{
-    ApiResponsesProxyMode, AuthFile, AuthTokens, CodexOAuthManager, CodexOAuthSessionStatus,
-    CodexRateLimit, CodexUsageResponse, CodexUsageWindow, CurrentAuthMode, CurrentAuthState,
-    PresetConfigOverride, PresetTerminalEnvVar, ResolvedConfigTarget, SaveApiPresetRequest,
-    StoredApiPreset, StoredAuthPreset, StoredClaudePreset, UpstreamProxySettings,
-    api_preset_enables_local_upstream_proxy_on_apply, api_preset_prefers_local_upstream_proxy,
-    api_preset_summary, api_preset_summary_with_proxy_state, api_provider_base_url,
+    ApiResponsesProxyMode, AuthFile, AuthTokens, CodexOAuthFlow, CodexOAuthManager,
+    CodexOAuthSessionStatus, CodexRateLimit, CodexUsageResponse, CodexUsageWindow, CurrentAuthMode,
+    CurrentAuthState, PresetConfigOverride, PresetTerminalEnvVar, ResolvedConfigTarget,
+    SaveApiPresetRequest, StoredApiPreset, StoredAuthPreset, StoredClaudePreset,
+    UpstreamProxySettings, api_preset_enables_local_upstream_proxy_on_apply,
+    api_preset_prefers_local_upstream_proxy, api_preset_summary,
+    api_preset_summary_with_proxy_state, api_provider_api_key_for_mode, api_provider_base_url,
     api_provider_base_url_for_mode, api_provider_options,
     claude_preset_summary_with_effective_proxy_state, claude_preset_summary_with_proxy_state,
     claude_preset_supports_direct_anthropic_endpoint, claude_provider_base_url_for_mode,
     clear_inactive_managed_config_entries_in_content,
     clear_provider_and_set_config_entry_in_config_content,
     clear_provider_and_set_model_in_config_content, clear_provider_in_config_content,
-    default_api_provider_options, derive_current_api_state, derive_current_claude_state,
-    derive_current_mode, effective_api_responses_proxy, effective_claude_use_local_proxy,
+    codex_oauth_session_response, create_codex_browser_login, default_api_provider_options,
+    derive_current_api_state, derive_current_claude_state, derive_current_mode,
+    effective_api_responses_proxy, effective_claude_use_local_proxy,
     effective_preset_config_overrides, extract_account_id_from_auth,
     local_proxy_api_key_for_preset_id, local_proxy_api_preset_id_from_api_key,
     local_proxy_claude_token_for_preset_id, merge_codex_snapshot_projects_in_config_content,
     merge_refreshed_auth_preset_details, normalize_api_preset, normalize_claude_preset,
-    parse_claude_settings_document, parse_codex_device_poll_interval, preset_summary,
-    read_current_config_provider_from_content, resolve_api_management_url, resolve_api_preset_name,
-    resolve_auth_preset_name, resolve_claude_preset_name,
+    parse_claude_settings_document, parse_codex_browser_callback, parse_codex_device_poll_interval,
+    preset_summary, read_current_config_provider_from_content, resolve_api_management_url,
+    resolve_api_preset_name, resolve_auth_preset_name, resolve_claude_preset_name,
     resolve_effective_claude_config_overrides, resolve_effective_preset_config_targets,
     sanitize_preset_config_override, set_api_provider_and_config_entry_in_config_content,
     set_api_provider_and_model_in_config_content, set_api_provider_in_config_content,
@@ -27,7 +29,7 @@ use super::{
     set_local_proxy_auth_header_in_config_content, summarize_remote_body, sync_api_model_catalog,
     touch_auth_last_refresh, upsert_model_catalog_entry_in_value, validate_api_auth_file_sync,
     validate_auth_file_sync, validate_claude_code_endpoint_compatibility,
-    validate_claude_model_selection, write_claude_settings_file,
+    validate_claude_model_selection, write_claude_settings_file, write_login_auth_file,
 };
 use base64::{Engine as _, engine::general_purpose};
 use serde_json::{Map, Value, json};
@@ -54,6 +56,7 @@ fn sample_auth() -> AuthFile {
 
 fn sample_api_preset(base_url: &str, model: Option<&str>) -> StoredApiPreset {
     StoredApiPreset {
+        interchange_source: None,
         id: "api-1".to_string(),
         name: "Example".to_string(),
         saved_at: 1,
@@ -81,6 +84,7 @@ fn sample_api_preset(base_url: &str, model: Option<&str>) -> StoredApiPreset {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     }
 }
@@ -122,6 +126,55 @@ fn codex_oauth_manager_marks_pending_session_expired() {
 }
 
 #[test]
+fn codex_browser_login_callback_contract() {
+    let login = create_codex_browser_login().expect("browser login should be generated");
+    assert_eq!(login.state.len(), 32);
+    assert!(login.code_verifier.len() >= 40);
+    assert!(
+        login
+            .authorize_url
+            .starts_with("https://auth.openai.com/oauth/authorize?")
+    );
+    assert!(login.authorize_url.contains("code_challenge_method=S256"));
+    assert!(login.authorize_url.contains("state="));
+    assert!(
+        login
+            .authorize_url
+            .contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1455%2Fauth%2Fcallback")
+    );
+    assert!(login.authorize_url.contains("api.connectors.invoke"));
+    assert!(
+        login
+            .authorize_url
+            .contains("codex_cli_simplified_flow=true")
+    );
+    assert!(login.authorize_url.contains("originator=codex_cli_rs"));
+
+    let (code, state) = parse_codex_browser_callback(&format!(
+        "http://127.0.0.1:1455/auth/callback?code=abc%2B123&state={}",
+        login.state
+    ))
+    .expect("callback URL should parse");
+    assert_eq!(code, "abc+123");
+    assert_eq!(state, login.state);
+}
+
+#[test]
+fn codex_browser_pending_session_hides_pkce_secret_from_response() {
+    let manager = CodexOAuthManager::new();
+    let login = create_codex_browser_login().expect("browser login should be generated");
+    let session =
+        manager.insert_browser_pending(&login.authorize_url, &login.code_verifier, &login.state);
+
+    assert_eq!(session.flow, CodexOAuthFlow::Browser);
+    assert_eq!(session.state.as_deref(), Some(login.state.as_str()));
+    let response = codex_oauth_session_response(&session);
+    let encoded = serde_json::to_vec(&response).expect("response should serialize");
+    let text = String::from_utf8(encoded).expect("response should be UTF-8");
+    assert!(!text.contains(&login.code_verifier));
+}
+
+#[test]
 fn reject_empty_token_fields() {
     let mut auth = sample_auth();
     auth.tokens.access_token.clear();
@@ -143,6 +196,33 @@ fn auth_file_accepts_refresh_time_aliases() {
     .expect("refresh_time alias should deserialize");
 
     assert_eq!(auth.last_refresh, "2026-04-20T08:00:00Z");
+}
+
+#[test]
+fn writing_oauth_auth_file_drops_stale_api_key() {
+    let path = std::env::temp_dir().join(format!(
+        "webclx-oauth-auth-{}-{}.json",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let mut auth = sample_auth();
+    auth.openai_api_key = Some("webclx-local-api-proxy:stale".to_string());
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(write_login_auth_file(&path, &auth))
+        .unwrap();
+
+    let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(written["OPENAI_API_KEY"].is_null());
+    assert_eq!(written["tokens"]["account_id"], auth.tokens.account_id);
+    let _ = fs::remove_file(path);
 }
 
 #[test]
@@ -483,12 +563,39 @@ fn api_provider_base_url_uses_local_proxy_when_enabled() {
 }
 
 #[test]
+fn api_provider_base_url_preserves_anthropic_conversion_when_proxy_enabled() {
+    let mut preset =
+        sample_api_preset("https://zcode.z.ai/api/v1/ultra/anthropic", Some("GLM-5.3"));
+    preset.responses_proxy = Some(ApiResponsesProxyMode::AnthropicChat);
+    preset.apply_upstream_proxy_on_switch = true;
+
+    let base_url = api_provider_base_url_for_mode(&preset, true);
+
+    assert!(base_url.ends_with("/api/codex-proxy/anthropic/v1"));
+    assert!(!base_url.contains("/api/upstream/openai/v1"));
+}
+
+#[test]
 fn api_provider_base_url_keeps_existing_special_proxy_when_disabled() {
     let preset = sample_api_preset("https://api.minimaxi.com/v1", Some("codex-MiniMax-M2.7"));
 
     let base_url = api_provider_base_url_for_mode(&preset, false);
 
     assert!(base_url.contains("/api/codex-proxy/minimax/v1"));
+}
+
+#[test]
+fn protocol_conversion_uses_scoped_codex_auth_even_when_proxy_toggle_is_disabled() {
+    let mut preset =
+        sample_api_preset("https://zcode.z.ai/api/v1/ultra/anthropic", Some("GLM-5.3"));
+    preset.id = "api-glm-53".to_string();
+    preset.responses_proxy = Some(ApiResponsesProxyMode::AnthropicChat);
+    preset.apply_upstream_proxy_on_switch = false;
+
+    assert_eq!(
+        api_provider_api_key_for_mode(&preset, false),
+        local_proxy_api_key_for_preset_id(&preset.id)
+    );
 }
 
 #[test]
@@ -627,6 +734,7 @@ fn api_preset_summary_describes_chatgpt_oauth_in_shared_table() {
 #[test]
 fn auth_name_can_reuse_same_value_when_editing_self() {
     let presets = vec![StoredAuthPreset {
+        interchange_source: None,
         id: "auth-1".to_string(),
         name: "账号 ccb2e5".to_string(),
         saved_at: 1,
@@ -647,6 +755,7 @@ fn auth_name_can_reuse_same_value_when_editing_self() {
 #[test]
 fn api_name_can_reuse_same_value_when_editing_self() {
     let presets = vec![StoredApiPreset {
+        interchange_source: None,
         id: "api-1".to_string(),
         name: "API api.openai.comv1".to_string(),
         saved_at: 1,
@@ -667,6 +776,7 @@ fn api_name_can_reuse_same_value_when_editing_self() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     }];
 
@@ -711,6 +821,7 @@ fn fake_jwt(payload: Value) -> String {
 
 fn sample_claude_preset() -> StoredClaudePreset {
     StoredClaudePreset {
+        interchange_source: None,
         id: "claude-1".to_string(),
         name: "Claude example".to_string(),
         saved_at: 1,
@@ -735,6 +846,7 @@ fn sample_claude_preset() -> StoredClaudePreset {
 
 fn sample_third_party_claude_preset() -> StoredClaudePreset {
     StoredClaudePreset {
+        interchange_source: None,
         id: "claude-2".to_string(),
         name: "Claude third party".to_string(),
         saved_at: 2,
@@ -760,6 +872,7 @@ fn sample_third_party_claude_preset() -> StoredClaudePreset {
 #[test]
 fn summary_can_derive_basic_details_from_tokens() {
     let preset = StoredAuthPreset {
+        interchange_source: None,
         id: "auth-2".to_string(),
         name: "旧预设".to_string(),
         saved_at: 1775363902,
@@ -775,7 +888,7 @@ fn summary_can_derive_basic_details_from_tokens() {
             tokens: AuthTokens {
                 access_token: fake_jwt(json!({
                     "https://api.openai.com/profile": {
-                        "email": "be02@739964.xyz"
+                        "email": "be02@example.invalid"
                     },
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "team",
@@ -792,7 +905,7 @@ fn summary_can_derive_basic_details_from_tokens() {
     };
 
     let summary = preset_summary(&preset, None);
-    assert_eq!(summary.details.email.as_deref(), Some("be02@739964.xyz"));
+    assert_eq!(summary.details.email.as_deref(), Some("be02@example.invalid"));
     assert_eq!(summary.details.plan_type.as_deref(), Some("TEAM"));
     assert_eq!(summary.details.login_method.as_deref(), Some("Password"));
 }
@@ -805,7 +918,7 @@ fn refreshed_quota_overrides_plan_and_windows() {
         tokens: AuthTokens {
             access_token: fake_jwt(json!({
                 "https://api.openai.com/profile": {
-                    "email": "be02@739964.xyz"
+                    "email": "be02@example.invalid"
                 }
             })),
             account_id: "100f021d-33a9-46ca-bc96-2d26bcccb2e5".to_string(),
@@ -834,10 +947,12 @@ fn refreshed_quota_overrides_plan_and_windows() {
                 }),
             }),
             plan_type: Some("Plus".to_string()),
+            rate_limit_reset_credits: None,
+            credits: None,
         },
     );
 
-    assert_eq!(details.email.as_deref(), Some("be02@739964.xyz"));
+    assert_eq!(details.email.as_deref(), Some("be02@example.invalid"));
     assert_eq!(details.plan_type.as_deref(), Some("PLUS"));
     assert_eq!(details.login_method.as_deref(), Some("Password"));
     assert_eq!(details.hourly_percentage, Some(36));
@@ -1036,6 +1151,24 @@ fn api_provider_writer_sets_fixed_provider() {
     assert_eq!(current.provider_name.as_deref(), Some("Example API"));
     assert_eq!(current.base_url.as_deref(), Some("https://api.example.com/v1"));
     assert_eq!(current.wire_api.as_deref(), Some("responses"));
+    assert!(next.contains("requires_openai_auth = true"));
+}
+
+#[test]
+fn local_proxy_provider_loads_scoped_key_from_codex_auth() {
+    let next = set_api_provider_in_config_content(
+        r#"
+[model_providers.webclx_api]
+requires_openai_auth = true
+"#,
+        "Local webClx proxy",
+        "http://127.0.0.1:11111/api/upstream/openai/v1",
+        &default_api_provider_options(),
+    )
+    .expect("config should update");
+
+    assert!(next.contains("requires_openai_auth = true"));
+    assert!(next.contains("X-WebClx-Local-Token = \"WEBCLX_LOCAL_API_TOKEN\""));
 }
 
 #[test]
@@ -1289,7 +1422,7 @@ fn api_model_catalog_initializes_from_bundled_catalog_when_config_has_no_catalog
             value: "GLM-5.2".to_string(),
         }];
 
-        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog))
+        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog), false)
             .await
             .expect("missing catalog config should initialize from bundled models");
 
@@ -1358,7 +1491,7 @@ fn api_model_catalog_refreshes_bundled_models_and_preserves_custom_path_and_entr
             value: "GLM-5.2".to_string(),
         }];
 
-        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog))
+        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog), false)
             .await
             .expect("configured catalog should refresh from bundled models");
 
@@ -1383,7 +1516,7 @@ fn api_model_catalog_refreshes_bundled_models_and_preserves_custom_path_and_entr
 }
 
 #[test]
-fn api_model_catalog_backfills_required_reasoning_summary_capability() {
+fn api_model_catalog_backfills_required_capabilities() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1416,6 +1549,12 @@ fn api_model_catalog_backfills_required_reasoning_summary_capability() {
                     "slug": "plain-model",
                     "display_name": "Plain Model",
                     "supported_reasoning_levels": []
+                },
+                {
+                    "slug": "serial-model",
+                    "display_name": "Serial Model",
+                    "supported_reasoning_levels": [],
+                    "supports_parallel_tool_calls": false
                 }
             ]
         });
@@ -1424,7 +1563,7 @@ fn api_model_catalog_backfills_required_reasoning_summary_capability() {
             value: "gpt-next-bundled".to_string(),
         }];
 
-        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog))
+        sync_api_model_catalog(&config_path, &targets, Some(&bundled_catalog), false)
             .await
             .expect("catalog sync should accept Codex bundled output");
 
@@ -1444,10 +1583,19 @@ fn api_model_catalog_backfills_required_reasoning_summary_capability() {
             .iter()
             .find(|entry| entry["slug"] == "plain-model")
             .expect("plain model should be present");
+        let serial_model = catalog["models"]
+            .as_array()
+            .expect("catalog should contain models")
+            .iter()
+            .find(|entry| entry["slug"] == "serial-model")
+            .expect("serial model should be present");
         fs::remove_dir_all(codex_dir.parent().unwrap()).ok();
 
         assert_eq!(model["supports_reasoning_summaries"], true);
         assert_eq!(plain_model["supports_reasoning_summaries"], false);
+        assert_eq!(model["supports_parallel_tool_calls"], true);
+        assert_eq!(plain_model["supports_parallel_tool_calls"], true);
+        assert_eq!(serial_model["supports_parallel_tool_calls"], false);
     });
 }
 
@@ -1544,6 +1692,47 @@ fn api_model_catalog_new_custom_entry_drops_template_upgrade() {
 }
 
 #[test]
+fn api_model_catalog_claude_5_5_models_default_to_400k_context_window() {
+    let mut catalog = serde_json::json!({
+        "models": [{
+            "slug": "gpt-5.4",
+            "context_window": 256_000,
+            "max_context_window": 256_000,
+            "auto_compact_token_limit": 204_800
+        }]
+    });
+
+    assert!(
+        upsert_model_catalog_entry_in_value(&mut catalog, "claude-sonnet-5-5", None)
+            .expect("claude-sonnet-5-5 should be created")
+    );
+    assert!(
+        upsert_model_catalog_entry_in_value(&mut catalog, "claude-opus-5-5", None)
+            .expect("claude-opus-5-5 should be created")
+    );
+
+    let sonnet = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["slug"] == "claude-sonnet-5-5")
+        .unwrap();
+    assert_eq!(sonnet["context_window"], 400_000);
+    assert_eq!(sonnet["max_context_window"], 400_000);
+    assert_eq!(sonnet["auto_compact_token_limit"], 320_000);
+
+    let opus = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["slug"] == "claude-opus-5-5")
+        .unwrap();
+    assert_eq!(opus["context_window"], 400_000);
+    assert_eq!(opus["max_context_window"], 400_000);
+    assert_eq!(opus["auto_compact_token_limit"], 320_000);
+}
+
+#[test]
 fn api_model_catalog_initialization_requires_bundled_catalog() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1564,7 +1753,7 @@ fn api_model_catalog_initialization_requires_bundled_catalog() {
             value: "GLM-5.2".to_string(),
         }];
 
-        let error = sync_api_model_catalog(&config_path, &targets, None)
+        let error = sync_api_model_catalog(&config_path, &targets, None, false)
             .await
             .expect_err("initialization without bundled models should fail");
         let config = fs::read_to_string(&config_path).expect("config should remain readable");
@@ -1782,6 +1971,7 @@ model = "gpt-5.4"
         .expect("provider should exist");
     assert_eq!(current.provider_id, "webclx_api");
     assert!(next.contains("model_reasoning_effort = \"high\""));
+    assert!(next.contains("requires_openai_auth = true"));
 }
 
 #[test]
@@ -1880,6 +2070,7 @@ fn current_mode_prefers_api_when_provider_exists() {
 #[test]
 fn api_preset_can_be_marked_active() {
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: "api-1".to_string(),
         name: "Example".to_string(),
         saved_at: 1,
@@ -1900,6 +2091,7 @@ fn api_preset_can_be_marked_active() {
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     let auth_state = CurrentAuthState::Api(super::ApiAuthFile {
@@ -1932,7 +2124,7 @@ fn api_preset_can_be_marked_active() {
 }
 
 #[test]
-fn api_preset_summary_is_active_from_proxy_state_when_proxy_enabled() {
+fn api_preset_summary_is_not_active_from_stale_proxy_state_in_oauth_mode() {
     let preset = sample_api_preset("https://api.example.com/v1", Some("gpt-5.4"));
     let settings = UpstreamProxySettings {
         codex_api_proxy_enabled: true,
@@ -1941,13 +2133,13 @@ fn api_preset_summary_is_active_from_proxy_state_when_proxy_enabled() {
     };
 
     let summary =
-        api_preset_summary_with_proxy_state(&preset, CurrentAuthMode::None, None, &settings);
+        api_preset_summary_with_proxy_state(&preset, CurrentAuthMode::Auth, None, &settings);
 
-    assert!(summary.active);
+    assert!(!summary.active);
 }
 
 #[test]
-fn api_preset_summary_is_active_from_preset_proxy_option_without_global_toggle() {
+fn api_preset_summary_is_not_active_from_stale_preset_proxy_option_in_oauth_mode() {
     let mut preset = sample_api_preset("https://api.example.com/v1", Some("gpt-5.4"));
     preset.apply_upstream_proxy_on_switch = true;
     let settings = UpstreamProxySettings {
@@ -1957,9 +2149,9 @@ fn api_preset_summary_is_active_from_preset_proxy_option_without_global_toggle()
     };
 
     let summary =
-        api_preset_summary_with_proxy_state(&preset, CurrentAuthMode::None, None, &settings);
+        api_preset_summary_with_proxy_state(&preset, CurrentAuthMode::Auth, None, &settings);
 
-    assert!(summary.active);
+    assert!(!summary.active);
 }
 
 #[test]
@@ -2365,4 +2557,15 @@ fn parse_imported_accounts_rejects_empty() {
 fn base64_url_no_pad(input: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(input.as_bytes())
+}
+
+#[test]
+fn interchange_source_survives_preset_serde_without_becoming_configuration() {
+    let raw = serde_json::json!({"id":"fixture", "name":"fixture", "saved_at":1,
+        "base_url":"https://example.test/v1", "api_key":"fixture", "favorite":false,
+        "interchange_source":{"platform":"openai","credentials":{"custom":"retained"},"extra":{"unknown":true}}});
+    let preset: super::StoredApiPreset = serde_json::from_value(raw.clone()).unwrap();
+    let saved = serde_json::to_value(preset).unwrap();
+    assert_eq!(saved["interchange_source"], raw["interchange_source"]);
+    assert!(saved["config_overrides"].is_null());
 }

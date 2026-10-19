@@ -24,6 +24,11 @@
       systemProxyNoInputEl,
       systemSaveProxyBtnEl,
       systemClearProxyBtnEl,
+      webuiCurrentPasswordInputEl,
+      webuiNewPasswordInputEl,
+      webuiConfirmPasswordInputEl,
+      webuiSavePasswordBtnEl,
+      webuiPasswordStatusEl,
       systemProxyStatusEl,
       systemCopyFromAppProxyBtnEl,
       updateCurrentVersionEl,
@@ -230,6 +235,51 @@
       }
     }
 
+    async function saveWebuiPassword() {
+      if (
+        !webuiCurrentPasswordInputEl
+        || !webuiNewPasswordInputEl
+        || !webuiConfirmPasswordInputEl
+        || !webuiSavePasswordBtnEl
+      ) {
+        return;
+      }
+
+      const currentPassword = webuiCurrentPasswordInputEl.value;
+      const newPassword = webuiNewPasswordInputEl.value;
+      const confirmPassword = webuiConfirmPasswordInputEl.value;
+      if (newPassword !== confirmPassword) {
+        setInlineStatus(webuiPasswordStatusEl, "两次输入的新密码不一致。", "warn");
+        webuiConfirmPasswordInputEl.focus();
+        return;
+      }
+      setButtonBusy(webuiSavePasswordBtnEl, true, "更新中…");
+      setInlineStatus(webuiPasswordStatusEl, "正在验证并更新密码…", "muted");
+      try {
+        const result = await requestJson("/api/auth/password", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            current_password: currentPassword,
+            new_password: newPassword,
+          }),
+        });
+        webuiCurrentPasswordInputEl.value = "";
+        webuiNewPasswordInputEl.value = "";
+        webuiConfirmPasswordInputEl.value = "";
+        setInlineStatus(
+          webuiPasswordStatusEl,
+          result?.message || "WebUI 登录密码已更新，请重新登录。",
+          "ok",
+        );
+        window.location.assign("/login");
+      } catch (error) {
+        setInlineStatus(webuiPasswordStatusEl, "更新失败: " + error.message, "warn");
+      } finally {
+        setButtonBusy(webuiSavePasswordBtnEl, false);
+      }
+    }
+
     function copySystemProxyFromAppProxy() {
       const active = state.activeProxy;
       if (!active) {
@@ -266,6 +316,7 @@
     }
     systemSaveProxyBtnEl.addEventListener("click", saveSystemProxy);
     systemClearProxyBtnEl.addEventListener("click", clearProxyFromSystem);
+    webuiSavePasswordBtnEl?.addEventListener("click", saveWebuiPassword);
     if (systemCopyFromAppProxyBtnEl) {
       systemCopyFromAppProxyBtnEl.addEventListener("click", copySystemProxyFromAppProxy);
     }

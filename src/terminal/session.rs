@@ -20,10 +20,11 @@ use tracing::debug;
 use tracing::warn;
 
 #[cfg(not(windows))]
-use super::capture_tmux_initial_pane_snapshot;
+use super::tmux::{capture_tmux_initial_pane_snapshot_with_limit, tmux_socket_name};
 use super::{
     CHILD_PROCESS_ENV_KEYS_TO_CLEAR, DEFAULT_COLS, DEFAULT_ROWS, INITIAL_TMUX_REDRAW_SUPPRESS_MS,
-    MAX_BACKLOG_BYTES, StoredTerminalSession,
+    MAX_BACKLOG_BYTES, MAX_INITIAL_REPLAY_BYTES, StoredTerminalSession,
+    TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT,
 };
 
 const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
@@ -102,6 +103,12 @@ pub(super) struct TerminalOutputChunk {
     pub(super) bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) enum TerminalStreamEvent {
+    Output(TerminalOutputChunk),
+    ViewportSize(TerminalViewportSize),
+}
+
 #[derive(Debug, Default)]
 pub(super) struct TerminalOutputBacklog {
     chunks: VecDeque<TerminalOutputChunk>,
@@ -173,6 +180,18 @@ impl TerminalOutputBacklog {
             .cloned()
             .collect()
     }
+
+    #[cfg(test)]
+    pub(super) fn pop_front_for_test(&mut self) {
+        if let Some(front) = self.chunks.pop_front() {
+            self.total_bytes = self.total_bytes.saturating_sub(front.bytes.len());
+        }
+    }
+
+    fn tail_snapshot_with_last_seq(&self, max_bytes: usize) -> (Vec<u8>, u64) {
+        let last_seq = self.chunks.back().map(|chunk| chunk.seq).unwrap_or(0);
+        (self.tail_snapshot(max_bytes), last_seq)
+    }
 }
 
 pub(super) struct TerminalSession {
@@ -184,14 +203,21 @@ pub(super) struct TerminalSession {
     pub(super) viewports: Arc<Mutex<TerminalViewportRegistry>>,
     pub(super) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub(super) _child: Arc<Mutex<Box<dyn portable_pty::Child + Send>>>,
-    pub(super) broadcaster: broadcast::Sender<TerminalOutputChunk>,
+    /// Set once the PTY child has been reaped. Keeping this state on the
+    /// session lets the manager poll existing sessions without repeatedly
+    /// calling `try_wait` after the underlying pid is gone.
+    pub(super) child_reaped: AtomicBool,
+    pub(super) broadcaster: broadcast::Sender<TerminalStreamEvent>,
     pub(super) backlog: Arc<Mutex<TerminalOutputBacklog>>,
     pub(super) next_output_seq: AtomicU64,
-    pub(super) initial_snapshot: Arc<Mutex<Option<Vec<u8>>>>,
+    /// 输出流实例标识：TerminalSession 每次创建都生成新随机值，与 seq 组合
+    /// 后让重连客户端能识别"seq 已重置"的会话重建。
+    pub(super) output_instance_id: u64,
     pub(super) attached_at: Instant,
     pub(super) suppressed_initial_redraw: AtomicBool,
     pub(super) last_output_at: AtomicU64,
     pub(super) alive: Arc<AtomicBool>,
+    pub(super) expected_shutdown: AtomicBool,
 }
 
 impl TerminalSession {
@@ -199,6 +225,20 @@ impl TerminalSession {
         stored: &StoredTerminalSession,
         proxy_env: Vec<(String, String)>,
         startup_script: Option<String>,
+    ) -> Result<Arc<Self>> {
+        let initial_snapshot = initial_backend_snapshot(&stored.id);
+        Self::attach_with_initial_snapshot(stored, proxy_env, startup_script, initial_snapshot)
+    }
+
+    pub(super) fn capture_initial_snapshot(session_id: &str) -> Option<Vec<u8>> {
+        initial_backend_snapshot(session_id)
+    }
+
+    pub(super) fn attach_with_initial_snapshot(
+        stored: &StoredTerminalSession,
+        proxy_env: Vec<(String, String)>,
+        startup_script: Option<String>,
+        initial_snapshot: Option<Vec<u8>>,
     ) -> Result<Arc<Self>> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -245,7 +285,6 @@ impl TerminalSession {
             writer.flush()?;
         }
 
-        let initial_snapshot = initial_backend_snapshot(&stored.id);
         let should_suppress_initial_redraw = initial_snapshot.is_some();
         let (broadcaster, _) = broadcast::channel(TERMINAL_OUTPUT_CHANNEL_CAPACITY);
         let session = Arc::new(Self {
@@ -266,16 +305,28 @@ impl TerminalSession {
             ))),
             writer: Arc::new(Mutex::new(writer)),
             _child: Arc::new(Mutex::new(child)),
+            child_reaped: AtomicBool::new(false),
             broadcaster,
             backlog: Arc::new(Mutex::new(TerminalOutputBacklog::with_capacity(MAX_BACKLOG_BYTES))),
             next_output_seq: AtomicU64::new(0),
-            initial_snapshot: Arc::new(Mutex::new(initial_snapshot)),
+            // 限制在 2^53 内，保证 JSON/JS Number 往返不失精度。
+            output_instance_id: rand::random::<u64>() & ((1_u64 << 53) - 1),
             attached_at: Instant::now(),
             suppressed_initial_redraw: AtomicBool::new(!should_suppress_initial_redraw),
             last_output_at: AtomicU64::new(0),
             alive: Arc::new(AtomicBool::new(true)),
+            expected_shutdown: AtomicBool::new(false),
         });
 
+        // 把 attach 时的 tmux 深度快照作为 seq=0 前缀种子写入 backlog：快照
+        // 覆盖 pane 在此之前的全部内容，后续 live chunk 全部晚于快照，整个
+        // backlog 因此是一条连续字节流。之后任意 WebSocket 接入都在同一锁下
+        // 原子读取"回放字节 + 水位线"，不再出现"即时抓快照 + 跳到当前 seq"
+        // 造成的快照窗口内输出丢失（页面刷新时中间消息被吞）。必须在
+        // reader 线程启动前写入，保证种子之前没有任何 live chunk。
+        if let Some(snapshot_bytes) = initial_snapshot.as_deref() {
+            session.seed_backlog_prefix(snapshot_bytes);
+        }
         Self::spawn_reader_thread(session.clone(), reader);
         Ok(session)
     }
@@ -286,17 +337,24 @@ impl TerminalSession {
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => {
-                        session.mark_closed(b"\r\n[webclx] terminal client exited.\r\n");
+                        if session.expected_shutdown.load(Ordering::SeqCst) {
+                            session.mark_closed(b"");
+                        } else {
+                            session.mark_closed(b"\r\n[webclx] terminal client exited.\r\n");
+                        }
                         break;
                     }
                     Ok(count) => {
+                        if session.expected_shutdown.load(Ordering::SeqCst) {
+                            continue;
+                        }
                         if session.should_suppress_initial_tmux_redraw() {
                             continue;
                         }
                         session.note_output_now();
                         let chunk = session.record_output_chunk(&buffer[..count]);
                         session.track_title(&chunk.bytes);
-                        let _ = session.broadcaster.send(chunk);
+                        let _ = session.broadcaster.send(TerminalStreamEvent::Output(chunk));
                     }
                     Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                     Err(error) => {
@@ -311,6 +369,61 @@ impl TerminalSession {
 
     pub(super) fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Reap an exited PTY client without taking ownership of the child out of
+    /// the session. This is intentionally driven by the manager's low-rate
+    /// maintenance loop so restored sessions created before the reaper was
+    /// added are covered as well.
+    pub(super) fn reap_child_if_exited(&self) -> bool {
+        if self.child_reaped.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let result = crate::lock_or_recover!(self._child.lock()).try_wait();
+        match result {
+            Ok(Some(_status)) => {
+                self.child_reaped.store(true, Ordering::SeqCst);
+                self.mark_closed(b"");
+                true
+            }
+            Ok(None) => false,
+            Err(error) => {
+                // ECHILD means another wait path already reaped this child.
+                // Treat it as complete so the maintenance loop does not log
+                // the same condition forever.
+                if error.raw_os_error() == Some(libc::ECHILD) {
+                    self.child_reaped.store(true, Ordering::SeqCst);
+                    self.mark_closed(b"");
+                } else {
+                    debug!("terminal child reap failed for {}: {error}", self.id);
+                }
+                false
+            }
+        }
+    }
+
+    /// Stop and reap the PTY client before its last `Arc` is dropped. This is
+    /// used for explicit session deletion and failed/cancelled session setup;
+    /// normal service restart deliberately leaves tmux clients attached.
+    pub(super) fn terminate_child(&self) {
+        if self.child_reaped.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        let mut child = crate::lock_or_recover!(self._child.lock());
+        if let Err(error) = child.kill()
+            && error.raw_os_error() != Some(libc::ESRCH)
+            && error.raw_os_error() != Some(libc::ECHILD)
+        {
+            debug!("terminal child kill failed for {}: {error}", self.id);
+        }
+        let _ = child.wait();
+        self.mark_closed(b"");
+    }
+
+    pub(super) fn prepare_for_shutdown(&self) {
+        self.expected_shutdown.store(true, Ordering::SeqCst);
     }
 
     pub(super) fn last_output_at(&self) -> u64 {
@@ -340,8 +453,12 @@ impl TerminalSession {
         crate::lock_or_recover!(self.name_state.read()).title()
     }
 
-    pub(super) fn subscribe(&self) -> broadcast::Receiver<TerminalOutputChunk> {
+    pub(super) fn subscribe(&self) -> broadcast::Receiver<TerminalStreamEvent> {
         self.broadcaster.subscribe()
+    }
+
+    pub(super) fn current_viewport_size(&self) -> Option<TerminalViewportSize> {
+        crate::lock_or_recover!(self.viewports.lock()).applied_size
     }
 
     /// 返回当前已分配的最新 output seq。
@@ -354,8 +471,16 @@ impl TerminalSession {
         self.next_output_seq.load(Ordering::SeqCst)
     }
 
+    pub(super) fn output_instance_id(&self) -> u64 {
+        self.output_instance_id
+    }
+
     pub(super) fn backlog_snapshot(&self) -> Vec<u8> {
         crate::lock_or_recover!(self.backlog.lock()).snapshot()
+    }
+
+    pub(super) fn backlog_tail_snapshot_with_last_seq(&self, max_bytes: usize) -> (Vec<u8>, u64) {
+        crate::lock_or_recover!(self.backlog.lock()).tail_snapshot_with_last_seq(max_bytes)
     }
 
     pub(super) fn backlog_tail_snapshot(&self, max_bytes: usize) -> Vec<u8> {
@@ -366,8 +491,23 @@ impl TerminalSession {
         crate::lock_or_recover!(self.backlog.lock()).chunks_after(seq)
     }
 
-    pub(super) fn initial_backlog_snapshot(&self) -> Option<Vec<u8>> {
-        crate::lock_or_recover!(self.initial_snapshot.lock()).take()
+    /// 把 attach 时的 tmux 深度快照作为 seq=0 前缀种子写入 backlog。
+    ///
+    /// 快照覆盖写入时刻 pane 的全部内容（含历史），而 live chunk 从 reader
+    /// 线程启动后才开始记录，因此整个 backlog 是一条连续流；首屏回放据此
+    /// 在同一锁下原子取得"回放字节 + 水位线"，接入不再有快照窗口竞态。
+    pub(super) fn seed_backlog_prefix(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let bytes = keep_tail_bytes(bytes, MAX_INITIAL_REPLAY_BYTES);
+        crate::lock_or_recover!(self.backlog.lock()).push(
+            TerminalOutputChunk {
+                seq: 0,
+                bytes: bytes.to_vec(),
+            },
+            MAX_BACKLOG_BYTES,
+        );
     }
 
     pub(super) fn should_suppress_initial_tmux_redraw(&self) -> bool {
@@ -419,6 +559,7 @@ impl TerminalSession {
     async fn apply_effective_viewport_size(&self) -> Result<()> {
         let master = self.master.clone();
         let viewports = self.viewports.clone();
+        let broadcaster = self.broadcaster.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut viewports = crate::lock_or_recover!(viewports.lock());
             let Some(size) = viewports.effective_size() else {
@@ -427,13 +568,22 @@ impl TerminalSession {
             if viewports.applied_size == Some(size) {
                 return Ok(());
             }
-            crate::lock_or_recover!(master.lock()).resize(PtySize {
-                rows: size.rows,
-                cols: size.cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })?;
+            let previous_size = viewports.applied_size;
             viewports.applied_size = Some(size);
+            let _ = broadcaster.send(TerminalStreamEvent::ViewportSize(size));
+            crate::lock_or_recover!(master.lock())
+                .resize(PtySize {
+                    rows: size.rows,
+                    cols: size.cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .inspect_err(|_| {
+                    viewports.applied_size = previous_size;
+                    if let Some(previous_size) = previous_size {
+                        let _ = broadcaster.send(TerminalStreamEvent::ViewportSize(previous_size));
+                    }
+                })?;
             Ok(())
         })
         .await
@@ -442,7 +592,7 @@ impl TerminalSession {
         Ok(())
     }
 
-    fn record_output_chunk(&self, data: &[u8]) -> TerminalOutputChunk {
+    pub(super) fn record_output_chunk(&self, data: &[u8]) -> TerminalOutputChunk {
         let chunk = TerminalOutputChunk {
             seq: self.next_output_seq.fetch_add(1, Ordering::SeqCst) + 1,
             bytes: data.to_vec(),
@@ -454,8 +604,10 @@ impl TerminalSession {
     pub(super) fn mark_closed(&self, message: &[u8]) {
         let was_alive = self.alive.swap(false, Ordering::SeqCst);
         if was_alive {
-            let chunk = self.record_output_chunk(message);
-            let _ = self.broadcaster.send(chunk);
+            if !message.is_empty() {
+                let chunk = self.record_output_chunk(message);
+                let _ = self.broadcaster.send(TerminalStreamEvent::Output(chunk));
+            }
             debug!("terminal session closed: {} ({})", self.path.display(), self.id);
         }
     }
@@ -567,6 +719,8 @@ fn attach_command(_stored: &StoredTerminalSession, _cwd: &std::path::Path) -> Co
 #[cfg(not(windows))]
 fn attach_command(stored: &StoredTerminalSession, _cwd: &std::path::Path) -> CommandBuilder {
     let mut command = CommandBuilder::new("tmux");
+    command.arg("-L");
+    command.arg(tmux_socket_name(&stored.id));
     command.arg("attach-session");
     command.arg("-t");
     command.arg(tmux_session_name(&stored.id));
@@ -580,12 +734,24 @@ fn initial_backend_snapshot(_session_id: &str) -> Option<Vec<u8>> {
 
 #[cfg(not(windows))]
 fn initial_backend_snapshot(session_id: &str) -> Option<Vec<u8>> {
-    match capture_tmux_initial_pane_snapshot(session_id) {
-        Ok(snapshot) if !snapshot.is_empty() => Some(snapshot),
+    let line_limit = TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT.load(Ordering::SeqCst);
+    match capture_tmux_initial_pane_snapshot_with_limit(session_id, line_limit) {
+        Ok(snapshot) if !snapshot.is_empty() => {
+            Some(keep_tail_bytes(&snapshot, MAX_INITIAL_REPLAY_BYTES))
+        }
         Ok(_) => None,
         Err(error) => {
             warn!("capture tmux pane snapshot failed for {session_id}: {error}");
             None
         }
     }
+}
+
+/// 保留字节尾部。快照深度受设置控制，个别会话（长时间 TUI 重绘）可能超过
+/// 回放上限；此时丢头部保尾部，保证回放流仍连续延伸到当前输出。
+fn keep_tail_bytes(bytes: &[u8], max_bytes: usize) -> Vec<u8> {
+    if bytes.len() <= max_bytes {
+        return bytes.to_vec();
+    }
+    bytes[bytes.len() - max_bytes..].to_vec()
 }

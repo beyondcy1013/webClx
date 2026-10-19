@@ -12,7 +12,18 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/auth/presets/reorder", put(auth::reorder_auth_presets))
         .route("/api/auth/presets/test-all", post(auth::test_all_auth_presets))
         .route("/api/auth/api-presets", get(auth::list_api_presets).post(auth::save_api_preset))
+        .route(
+            "/api/auth/model-catalog-policy",
+            get(auth::get_model_catalog_policy).put(auth::save_model_catalog_policy),
+        )
         .route("/api/auth/api-presets/import", post(auth::import_api_accounts))
+        .route("/api/auth/sub2api/sync", post(auth::sync_sub2api_accounts))
+        .route("/api/auth/sub2api/usage", post(auth::query_sub2api_account_usage))
+        .route("/api/auth/sub2api/usage-batch", post(auth::query_sub2api_accounts_usage_batch))
+        .route("/api/auth/sub2api/pelican", post(auth::run_sub2api_pelican_test))
+        .route("/api/auth/sub2api/auto-activate", post(auth::schedule_sub2api_auto_activate))
+        .route("/api/auth/sub2api/recycle", post(auth::sub2api_recycle_account))
+        .route("/api/auth/sub2api/restore", post(auth::sub2api_restore_account))
         .route(
             "/api/auth/api-presets/import-file",
             post(auth::import_api_accounts_file).layer(DefaultBodyLimit::max(
@@ -22,25 +33,48 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/api/auth/api-presets/reorder", put(auth::reorder_api_presets))
         .route("/api/auth/api-presets/test-all", post(auth::test_all_api_presets))
         .route(
+            "/api/auth/api-presets/{preset_id}/favorite",
+            put(auth::toggle_api_preset_favorite),
+        )
+        .route(
             "/api/auth/claude-presets",
             get(auth::list_claude_presets).post(auth::save_claude_preset),
         )
+        .route("/api/auth/presets/detect-current", post(auth::detect_current_codex_auth))
         .route("/api/auth/claude-presets/reorder", put(auth::reorder_claude_presets))
         .route("/api/auth/claude-presets/test-all", post(auth::test_all_claude_presets))
+        .route("/api/auth/claude-presets/detect-current", post(auth::detect_current_claude))
+        .route("/api/auth/api-presets/detect-current", post(auth::detect_current_codex_api))
         .route("/api/auth/oauth/codex/start", post(auth::start_codex_oauth_session))
+        .route(
+            "/api/auth/oauth/codex/browser/start",
+            post(auth::start_codex_browser_oauth_session),
+        )
+        .route("/api/auth/codex-accounts", get(auth::list_codex_accounts))
+        .route("/api/auth/codex-accounts/detect-current", post(auth::detect_current_codex_auth))
+        .route(
+            "/api/auth/codex-accounts/{kind}/{preset_id}/apply",
+            put(auth::apply_codex_account),
+        )
         .route(
             "/api/auth/oauth/codex/sessions/{session_id}",
             get(auth::get_codex_oauth_session),
         )
+        .route(
+            "/api/auth/oauth/codex/browser/exchange",
+            post(auth::exchange_codex_browser_oauth_session),
+        )
         .route("/api/auth/current", put(auth::apply_current_auth))
-        .route("/api/auth/preset-run-leases", post(auth::acquire_preset_run_lease))
+        .route("/api/auth/current", axum::routing::delete(auth::clear_current_auth))
+        .route("/api/auth/current/preset", post(auth::save_current_auth_preset))
+        .route("/api/auth/zcode-migration", post(auth::migrate_zcode_accounts))
         .route(
             "/api/auth/preset-run-leases/{lease_id}/heartbeat",
-            put(auth::heartbeat_preset_run_lease),
+            put(auth::acknowledge_removed_preset_run_lease),
         )
         .route(
             "/api/auth/preset-run-leases/{lease_id}",
-            axum::routing::delete(auth::release_preset_run_lease),
+            axum::routing::delete(auth::acknowledge_removed_preset_run_lease),
         )
         .route(
             "/api/auth/presets/{preset_id}",
@@ -59,6 +93,14 @@ pub(super) fn routes() -> Router<AppState> {
         .route(
             "/api/auth/presets/{preset_id}/refresh-quota",
             put(auth::refresh_auth_preset_quota),
+        )
+        .route(
+            "/api/auth/presets/{preset_id}/codex-reset-credit",
+            post(auth::consume_auth_preset_reset_credit),
+        )
+        .route(
+            "/api/auth/presets/{preset_id}/codex-referral",
+            get(auth::get_auth_preset_codex_referral).post(auth::send_auth_preset_codex_referral),
         )
         .route(
             "/api/auth/presets/refresh-all-quotas",

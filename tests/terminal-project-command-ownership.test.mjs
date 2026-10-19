@@ -48,6 +48,6 @@ assert.equal(
 
 assert.match(
   terminalHtml,
-  /<option value="deploy_project" data-shortcut="Ctrl\+B">本项目部署脚本<\/option>/,
-  "the project commands menu should own both deploy and its Ctrl+B shortcut",
+  /<option value="deploy_project" data-shortcut="\^B">本项目部署脚本<\/option>/,
+  "the project commands menu should own deploy and its compact Ctrl+B shortcut",
 );

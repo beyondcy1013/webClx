@@ -23,8 +23,9 @@ use crate::{
     infer_api_responses_proxy, parse_claude_settings_document, sanitize_api_provider_name,
     sanitize_api_wire_api, sanitize_auth_token, sanitize_base_url, sanitize_claude_model,
     sanitize_management_url, sanitize_terminal_env_vars, sanitize_terminal_startup_script,
-    set_api_provider_and_config_entry_in_config_content, set_claude_settings_in_value,
-    validate_claude_code_endpoint_compatibility, validate_claude_model_selection,
+    set_api_provider_and_config_entry_in_config_content, set_api_provider_in_config_content,
+    set_claude_settings_in_value, validate_claude_code_endpoint_compatibility,
+    validate_claude_model_selection,
 };
 
 const OWNER_ONLY_FILE_MODE: u32 = 0o600;
@@ -108,6 +109,42 @@ impl AuthPresetManager {
 
     pub fn upstream_proxy_settings_file(&self) -> PathBuf {
         self.upstream_proxy_settings_file.as_ref().clone()
+    }
+
+    pub fn reload_auth_presets(&self) -> Result<Vec<StoredAuthPreset>> {
+        let presets = match load_saved_auth_presets(&self.preset_file) {
+            Ok(presets) => presets,
+            Err(error) => {
+                warn!("reload auth presets failed, keeping current: {error}");
+                return Ok(self.auth_presets.read().unwrap().clone());
+            }
+        };
+        *self.auth_presets.write().unwrap() = presets.clone();
+        Ok(presets)
+    }
+
+    pub fn reload_api_presets(&self) -> Result<Vec<StoredApiPreset>> {
+        let presets = match load_saved_api_presets(&self.api_preset_file) {
+            Ok(presets) => presets,
+            Err(error) => {
+                warn!("reload api presets failed, keeping current: {error}");
+                return Ok(self.api_presets.read().unwrap().clone());
+            }
+        };
+        *self.api_presets.write().unwrap() = presets.clone();
+        Ok(presets)
+    }
+
+    pub fn reload_claude_presets(&self) -> Result<Vec<StoredClaudePreset>> {
+        let presets = match load_saved_claude_presets(&self.claude_preset_file) {
+            Ok(presets) => presets,
+            Err(error) => {
+                warn!("reload claude presets failed, keeping current: {error}");
+                return Ok(self.claude_presets.read().unwrap().clone());
+            }
+        };
+        *self.claude_presets.write().unwrap() = presets.clone();
+        Ok(presets)
     }
 
     pub async fn lock_active_config_write(&self) -> tokio::sync::OwnedMutexGuard<()> {
@@ -216,7 +253,9 @@ pub fn persist_upstream_proxy_settings(
 
 pub async fn write_login_auth_file(path: &Path, auth: &AuthFile) -> Result<()> {
     validate_auth_file(auth)?;
-    write_json_file(path, auth, "auth.json").await
+    let mut oauth_auth = auth.clone();
+    oauth_auth.openai_api_key = None;
+    write_json_file(path, &oauth_auth, "auth.json").await
 }
 
 pub async fn write_api_auth_file(path: &Path, auth: &ApiAuthFile) -> Result<()> {
@@ -338,6 +377,10 @@ pub async fn write_opencode_config_file(path: &Path, preset: &StoredClaudePreset
 
     provider.insert(provider_key, Value::Object(provider_entry));
 
+    // Keep webClx-managed OpenCode projects in the explicitly configured
+    // maximum-permission mode when a provider preset is regenerated.
+    root_map.insert("permission".to_string(), Value::String("allow".to_string()));
+
     write_json_file(path, &root, "opencode.json").await
 }
 
@@ -402,13 +445,17 @@ pub async fn sync_auth_preset_config(path: &Path, targets: &[ResolvedConfigTarge
     };
 
     let mut next = content;
-    for target in targets {
-        next = clear_provider_and_set_config_entry_in_config_content(
-            &next,
-            &target.key,
-            &target.value,
-        )
-        .context("更新 config.toml 失败")?;
+    if targets.is_empty() {
+        next = clear_provider_in_config_content(&next).context("更新 config.toml 失败")?;
+    } else {
+        for target in targets {
+            next = clear_provider_and_set_config_entry_in_config_content(
+                &next,
+                &target.key,
+                &target.value,
+            )
+            .context("更新 config.toml 失败")?;
+        }
     }
     write_text_file(path, next, "config.toml").await
 }
@@ -436,16 +483,21 @@ pub async fn sync_api_preset_config(
     let mut next =
         clear_inactive_managed_config_entries_in_content(&content, managed_keys, &active_keys)
             .context("清理旧 API 预设 config 失败")?;
-    for target in targets {
-        next = set_api_provider_and_config_entry_in_config_content(
-            &next,
-            provider_name,
-            base_url,
-            provider_options,
-            &target.key,
-            &target.value,
-        )
-        .context("更新 config.toml 失败")?;
+    if targets.is_empty() {
+        next = set_api_provider_in_config_content(&next, provider_name, base_url, provider_options)
+            .context("更新 config.toml 失败")?;
+    } else {
+        for target in targets {
+            next = set_api_provider_and_config_entry_in_config_content(
+                &next,
+                provider_name,
+                base_url,
+                provider_options,
+                &target.key,
+                &target.value,
+            )
+            .context("更新 config.toml 失败")?;
+        }
     }
     write_text_file(path, next, "config.toml").await
 }
@@ -454,6 +506,7 @@ pub async fn sync_api_model_catalog(
     config_path: &Path,
     targets: &[ResolvedConfigTarget],
     bundled_catalog: Option<&Value>,
+    suppress_comp_hash_changes: bool,
 ) -> Result<()> {
     let Some(model) = model_target_value(targets) else {
         return Ok(());
@@ -484,6 +537,8 @@ pub async fn sync_api_model_catalog(
     let context_window = model_context_window_target_value(targets);
     upsert_model_catalog_entry_in_value(&mut catalog, &model, context_window)?;
     backfill_model_catalog_reasoning_summary_capability(&mut catalog)?;
+    backfill_model_catalog_parallel_tool_capability(&mut catalog)?;
+    apply_model_catalog_comp_hash_policy(&mut catalog, suppress_comp_hash_changes)?;
     write_json_file(&catalog_path, &catalog, DEFAULT_MODEL_CATALOG_FILE_NAME)
         .await
         .with_context(|| format!("更新 {} 失败", catalog_path.display()))?;
@@ -494,6 +549,173 @@ pub async fn sync_api_model_catalog(
     }
 
     Ok(())
+}
+
+// Store the original field (including absence) on each model so disabling the
+// policy restores custom entries too, even when bundled metadata is unavailable.
+const ORIGINAL_COMP_HASH: &str = "_webclx_original_comp_hash";
+
+pub(crate) fn apply_model_catalog_comp_hash_policy(
+    catalog: &mut Value,
+    suppress: bool,
+) -> Result<()> {
+    for entry in model_catalog_models_mut(catalog)? {
+        let object = entry
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("模型目录条目必须是对象"))?;
+        if suppress {
+            if !object.contains_key(ORIGINAL_COMP_HASH) {
+                let mut original = Map::new();
+                if let Some(hash) = object.get("comp_hash") {
+                    original.insert("value".to_string(), hash.clone());
+                }
+                object.insert(ORIGINAL_COMP_HASH.to_string(), Value::Object(original));
+            }
+            object.insert("comp_hash".to_string(), Value::Null);
+        } else if let Some(original) = object.remove(ORIGINAL_COMP_HASH) {
+            if let Some(hash) = original.get("value") {
+                object.insert("comp_hash".to_string(), hash.clone());
+            } else {
+                object.remove("comp_hash");
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod comp_hash_policy_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn model_catalog_policy_is_reversible_idempotent_and_preserves_budgets() {
+        let original = json!({"models": [
+            {"slug": "a", "comp_hash": "2911", "context_window": 128000,
+             "auto_compact_token_limit": 100000},
+            {"slug": "b", "comp_hash": "3000"},
+            {"slug": "c", "comp_hash": null},
+            {"slug": "d"}
+        ]});
+        let mut catalog = original.clone();
+        apply_model_catalog_comp_hash_policy(&mut catalog, false).unwrap();
+        assert_eq!(catalog, original);
+        apply_model_catalog_comp_hash_policy(&mut catalog, true).unwrap();
+        let enabled = catalog.clone();
+        for model in catalog["models"].as_array().unwrap() {
+            assert_eq!(model.get("comp_hash"), Some(&Value::Null));
+        }
+        assert_eq!(catalog["models"][0]["context_window"], 128000);
+        assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 100000);
+        apply_model_catalog_comp_hash_policy(&mut catalog, true).unwrap();
+        assert_eq!(catalog, enabled);
+        apply_model_catalog_comp_hash_policy(&mut catalog, false).unwrap();
+        assert_eq!(catalog, original);
+    }
+
+    #[test]
+    fn model_catalog_policy_survives_refresh_and_restores_current_bundled_hash() {
+        let mut existing = json!({"models": [
+            {"slug": "official", "comp_hash": "old"},
+            {"slug": "custom", "comp_hash": "custom-original"}
+        ]});
+        apply_model_catalog_comp_hash_policy(&mut existing, true).unwrap();
+        let bundled = json!({"models": [
+            {"slug": "official", "comp_hash": "new"},
+            {"slug": "new-official", "comp_hash": "new-family"}
+        ]});
+        let mut merged = merge_model_catalog_values(Some(&bundled), Some(&existing)).unwrap();
+        apply_model_catalog_comp_hash_policy(&mut merged, true).unwrap();
+        assert!(
+            merged["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["comp_hash"].is_null())
+        );
+        apply_model_catalog_comp_hash_policy(&mut merged, false).unwrap();
+        assert_eq!(merged["models"][0]["comp_hash"], "new");
+        assert_eq!(merged["models"][1]["comp_hash"], "new-family");
+        assert_eq!(merged["models"][2]["comp_hash"], "custom-original");
+    }
+
+    #[test]
+    fn model_catalog_policy_does_not_copy_template_backup_to_new_model() {
+        let mut catalog = json!({"models": [{"slug": "gpt-5.4", "comp_hash": "official"}]});
+        apply_model_catalog_comp_hash_policy(&mut catalog, true).unwrap();
+        upsert_model_catalog_entry_in_value(&mut catalog, "custom", Some(128000)).unwrap();
+        apply_model_catalog_comp_hash_policy(&mut catalog, true).unwrap();
+        apply_model_catalog_comp_hash_policy(&mut catalog, false).unwrap();
+        assert_eq!(catalog["models"][0]["comp_hash"], "official");
+        assert!(catalog["models"][1].get("comp_hash").is_none());
+    }
+
+    #[test]
+    fn model_catalog_policy_sync_writes_all_models_and_restores_without_bundled_catalog() {
+        let dir = std::env::temp_dir().join(format!(
+            "webclx-policy-sync-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone());
+        let config = dir.join("config.toml");
+        let catalog_path = dir.join("model_catalog.json");
+        std::fs::write(&config, "model = \"first\"\n").unwrap();
+        let bundled = json!({"models": [
+            {"slug": "first", "comp_hash": "2911"},
+            {"slug": "second", "comp_hash": "3000"}
+        ]});
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for name in ["first", "second"] {
+                let targets = [ResolvedConfigTarget {
+                    key: "model".into(),
+                    value: name.into(),
+                }];
+                sync_api_model_catalog(&config, &targets, Some(&bundled), true)
+                    .await
+                    .unwrap();
+                let written: Value =
+                    serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+                assert!(
+                    written["models"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .all(|m| m.get("comp_hash") == Some(&Value::Null))
+                );
+            }
+            let targets = [ResolvedConfigTarget {
+                key: "model".into(),
+                value: "second".into(),
+            }];
+            sync_api_model_catalog(&config, &targets, None, false)
+                .await
+                .unwrap();
+            let restored: Value =
+                serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+            assert_eq!(restored["models"][0]["comp_hash"], "2911");
+            assert_eq!(restored["models"][1]["comp_hash"], "3000");
+        });
+        assert!(
+            std::fs::read_to_string(config)
+                .unwrap()
+                .contains("model_catalog_json")
+        );
+    }
 }
 
 fn model_target_value(targets: &[ResolvedConfigTarget]) -> Option<String> {
@@ -646,6 +868,18 @@ fn backfill_model_catalog_reasoning_summary_capability(catalog: &mut Value) -> R
     Ok(())
 }
 
+fn backfill_model_catalog_parallel_tool_capability(catalog: &mut Value) -> Result<()> {
+    for entry in model_catalog_models_mut(catalog)? {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        object
+            .entry("supports_parallel_tool_calls".to_string())
+            .or_insert(Value::Bool(true));
+    }
+    Ok(())
+}
+
 fn deduplicate_model_catalog_entries(models: &mut Vec<Value>) -> bool {
     let mut seen = HashSet::new();
     let original_len = models.len();
@@ -736,6 +970,10 @@ fn custom_model_catalog_entry(models: &[Value], model: &str, context_window: Opt
 
     let context_window = context_window.unwrap_or_else(|| custom_model_context_window(model));
     let object = entry.as_object_mut().expect("entry should be object");
+    // A template's policy backup belongs to the template, not this new model.
+    if object.remove(ORIGINAL_COMP_HASH).is_some() {
+        object.remove("comp_hash");
+    }
     object.insert("slug".to_string(), Value::String(model.to_string()));
     object.insert("display_name".to_string(), Value::String(model.to_string()));
     object.insert(
@@ -772,6 +1010,8 @@ fn custom_model_context_window(model: &str) -> i64 {
         128_000
     } else if lower.starts_with("gpt-5") || lower.starts_with("glm-5") {
         256_000
+    } else if lower.contains("claude-opus-5-5") || lower.contains("claude-sonnet-5-5") {
+        400_000
     } else {
         128_000
     }
@@ -841,6 +1081,7 @@ fn stored_auth_preset_from_cpa_export(
         .unwrap_or(loaded_at.saturating_add(index as u64));
 
     Ok(StoredAuthPreset {
+        interchange_source: None,
         id: format!("auth-cpa-{loaded_at}-{index}"),
         name,
         saved_at,
@@ -865,6 +1106,7 @@ fn auth_preset_details_from_cpa_export(value: &Value) -> AuthPresetDetails {
         hourly_reset_time: json_u64_field(value, "hourly_reset_time"),
         weekly_percentage: json_u64_field(value, "weekly_percentage"),
         weekly_reset_time: json_u64_field(value, "weekly_reset_time"),
+        ..AuthPresetDetails::default()
     }
 }
 
@@ -1054,6 +1296,7 @@ pub fn normalize_api_preset(preset: &mut StoredApiPreset) -> Result<()> {
 }
 
 pub fn normalize_auth_preset(preset: &mut StoredAuthPreset) -> Result<()> {
+    preset.auth.openai_api_key = None;
     preset.config_overrides = effective_preset_config_overrides(
         std::mem::take(&mut preset.config_overrides),
         preset.legacy_config_key.take(),

@@ -16,7 +16,6 @@ use auth_core::{
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -42,7 +41,6 @@ const MAX_LISTED_TASKS: usize = 100;
 const MAX_CONCURRENT_TASKS: usize = 4;
 const LAUNCH_VERIFY_TIMEOUT: Duration = Duration::from_secs(45);
 const MONITOR_INTERVAL: Duration = Duration::from_millis(250);
-const LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const TASK_ROOT_NAME: &str = ".webclx-codex-tasks";
 const NETWORK_ENV_KEYS: [&str; 8] = [
     "HTTP_PROXY",
@@ -270,15 +268,9 @@ impl CodexTaskManager {
             .await
             .map_err(|error| AppError::internal(format!("创建 Codex 任务记录目录失败: {error}")))?;
         let final_path = self.records_dir.join(format!("{}.json", record.id));
-        let temp_path = self.records_dir.join(format!(".{}.tmp", record.id));
         let content = serde_json::to_vec_pretty(record)
             .map_err(|error| AppError::internal(format!("序列化 Codex 任务失败: {error}")))?;
-        fs::write(&temp_path, content)
-            .await
-            .map_err(|error| AppError::internal(format!("写入 Codex 任务记录失败: {error}")))?;
-        set_owner_only_mode(&temp_path, 0o600)?;
-        fs::rename(&temp_path, &final_path)
-            .await
+        crate::private_file::write_atomic(&final_path, &content)
             .map_err(|error| AppError::internal(format!("提交 Codex 任务记录失败: {error}")))
     }
 
@@ -480,51 +472,27 @@ async fn run_task(
         })
         .await;
     let started = Instant::now();
-    let lease = loop {
-        if cancellation.load(Ordering::SeqCst) {
-            finish_cancelled(&state, &manager, &task_id, None).await;
+    let cwd = manager
+        .get(&task_id)
+        .await
+        .map(|record| record.cwd)
+        .unwrap_or_default();
+    let original_preset_id = match auth::current_api_preset_id(&state).await {
+        Ok(preset_id) => preset_id,
+        Err(error) => {
+            finish_failed(&manager, &task_id, error.to_string(), true).await;
             manager.remove_cancellation(&task_id);
             return;
         }
-        match auth::begin_preset_run_lease(
-            &state,
-            auth::PresetRunKind::Api,
-            &preset.id,
-            &manager
-                .get(&task_id)
-                .await
-                .map(|record| record.cwd)
-                .unwrap_or_default(),
-            &format!("Codex 任务 {task_id}"),
-        )
-        .await
-        {
-            Ok(lease) => break lease,
-            Err(error) if error.status == StatusCode::CONFLICT => {
-                if started.elapsed()
-                    >= Duration::from_secs(
-                        manager
-                            .get(&task_id)
-                            .await
-                            .map(|record| record.timeout_secs)
-                            .unwrap_or(DEFAULT_TIMEOUT_SECS),
-                    )
-                {
-                    finish_failed(&manager, &task_id, "等待全局预设门禁超时。".to_string(), true)
-                        .await;
-                    manager.remove_cancellation(&task_id);
-                    return;
-                }
-                sleep(MONITOR_INTERVAL).await;
-            }
-            Err(error) => {
-                finish_failed(&manager, &task_id, error.to_string(), true).await;
-                manager.remove_cancellation(&task_id);
-                return;
-            }
+    };
+    let applied_preset = match auth::apply_api_preset_for_run(&state, &preset.id, &cwd).await {
+        Ok(preset) => preset,
+        Err(error) => {
+            finish_failed(&manager, &task_id, error.to_string(), true).await;
+            manager.remove_cancellation(&task_id);
+            return;
         }
     };
-    let mut last_lease_heartbeat = Instant::now();
     let mut direct_child: Option<Child> = None;
     let mut terminal_id: Option<String> = None;
 
@@ -581,11 +549,8 @@ async fn run_task(
             }
         }
 
-        let expected_model = lease.model.as_deref().or_else(|| api_preset_model(&preset));
+        let expected_model = api_preset_model(&applied_preset);
         let launch_info = await_verified_launch(
-            &state,
-            &lease,
-            &mut last_lease_heartbeat,
             &paths,
             expected_model,
             &cancellation,
@@ -608,9 +573,10 @@ async fn run_task(
     if let Err(error) = launch {
         terminate_direct_child(&mut direct_child).await;
         let terminal_closed = close_owned_terminal(&state, terminal_id.as_deref()).await;
-        let restore_error = auth::release_preset_run_lease_internal(&state, &lease.id)
-            .await
-            .err();
+        let restore_error =
+            restore_original_api_preset(&state, original_preset_id.as_deref(), &preset.id, &cwd)
+                .await
+                .err();
         if let Some(restore_error) = restore_error {
             finish_failed(
                 &manager,
@@ -628,10 +594,23 @@ async fn run_task(
         return;
     }
 
-    let mut outcome = monitor_task(
-        &state,
-        &lease,
-        &mut last_lease_heartbeat,
+    if let Err(error) =
+        restore_original_api_preset(&state, original_preset_id.as_deref(), &preset.id, &cwd).await
+    {
+        terminate_direct_child(&mut direct_child).await;
+        let terminal_closed = close_owned_terminal(&state, terminal_id.as_deref()).await;
+        finish_failed(
+            &manager,
+            &task_id,
+            format!("Codex 已验证启动，但恢复原配置失败: {error}"),
+            terminal_closed,
+        )
+        .await;
+        manager.remove_cancellation(&task_id);
+        return;
+    }
+
+    let outcome = monitor_task(
         &paths,
         &cancellation,
         started,
@@ -644,9 +623,6 @@ async fn run_task(
     )
     .await;
     let terminal_closed = close_owned_terminal(&state, terminal_id.as_deref()).await;
-    if let Err(error) = auth::release_preset_run_lease_internal(&state, &lease.id).await {
-        outcome = MonitorOutcome::LeaseFailed(format!("恢复原配置失败: {error}"));
-    }
 
     manager
         .update(&task_id, |record| record.status = CodexTaskStatus::Collecting)
@@ -712,9 +688,6 @@ async fn run_task(
         MonitorOutcome::RunnerFailed(error) => {
             finish_failed(&manager, &task_id, error, terminal_closed).await;
         }
-        MonitorOutcome::LeaseFailed(error) => {
-            finish_failed(&manager, &task_id, error, terminal_closed).await;
-        }
     }
     manager.remove_cancellation(&task_id);
 }
@@ -725,10 +698,25 @@ struct LaunchInfo {
     session_id: Option<String>,
 }
 
-async fn await_verified_launch(
+async fn restore_original_api_preset(
     state: &AppState,
-    lease: &auth::AcquiredPresetRunLease,
-    last_lease_heartbeat: &mut Instant,
+    original_preset_id: Option<&str>,
+    target_preset_id: &str,
+    cwd: &str,
+) -> Result<(), String> {
+    let Some(original_preset_id) = original_preset_id else {
+        return Ok(());
+    };
+    if original_preset_id == target_preset_id {
+        return Ok(());
+    }
+    auth::apply_api_preset_for_run(state, original_preset_id, cwd)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn await_verified_launch(
     paths: &CodexTaskPaths,
     expected_model: Option<&str>,
     cancellation: &AtomicBool,
@@ -738,7 +726,6 @@ async fn await_verified_launch(
 ) -> Result<LaunchInfo, String> {
     let deadline = Instant::now() + LAUNCH_VERIFY_TIMEOUT;
     loop {
-        heartbeat_lease_if_due(state, lease, last_lease_heartbeat).await?;
         if cancellation.load(Ordering::SeqCst) {
             return Err("任务启动期间已取消。".to_string());
         }
@@ -784,27 +771,11 @@ async fn await_verified_launch(
     }
 }
 
-async fn heartbeat_lease_if_due(
-    state: &AppState,
-    lease: &auth::AcquiredPresetRunLease,
-    last_heartbeat: &mut Instant,
-) -> Result<(), String> {
-    if last_heartbeat.elapsed() < LEASE_HEARTBEAT_INTERVAL {
-        return Ok(());
-    }
-    auth::heartbeat_preset_run_lease_internal(state, &lease.id)
-        .await
-        .map_err(|error| format!("全局预设门禁续租失败: {error}"))?;
-    *last_heartbeat = Instant::now();
-    Ok(())
-}
-
 enum MonitorOutcome {
     Exited(i32),
     Cancelled,
     TimedOut,
     RunnerFailed(String),
-    LeaseFailed(String),
 }
 
 fn direct_child_exit_outcome(status: std::process::ExitStatus) -> MonitorOutcome {
@@ -829,9 +800,6 @@ fn direct_child_exit_outcome(status: std::process::ExitStatus) -> MonitorOutcome
 }
 
 async fn monitor_task(
-    state: &AppState,
-    lease: &auth::AcquiredPresetRunLease,
-    last_lease_heartbeat: &mut Instant,
     paths: &CodexTaskPaths,
     cancellation: &AtomicBool,
     started: Instant,
@@ -839,10 +807,6 @@ async fn monitor_task(
     direct_child: &mut Option<Child>,
 ) -> MonitorOutcome {
     loop {
-        if let Err(error) = heartbeat_lease_if_due(state, lease, last_lease_heartbeat).await {
-            terminate_direct_child(direct_child).await;
-            return MonitorOutcome::LeaseFailed(error);
-        }
         if cancellation.load(Ordering::SeqCst) {
             terminate_direct_child(direct_child).await;
             return MonitorOutcome::Cancelled;
@@ -1092,7 +1056,6 @@ async fn create_task_terminal(
             &display_root,
             cwd,
             user,
-            state.workspace_settings.terminal_default_env_entries(),
             state.proxy_manager.get_terminal_proxy_env(),
             None,
             preset.name.clone(),
@@ -1416,24 +1379,13 @@ fn set_user_owned_path_mode(
     Ok(())
 }
 
-#[cfg(unix)]
-fn set_owner_only_mode(path: &Path, mode: u32) -> ApiResult<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .map_err(|error| AppError::internal(format!("设置 Codex 任务记录权限失败: {error}")))
-}
-
-#[cfg(not(unix))]
-fn set_owner_only_mode(_path: &Path, _mode: u32) -> ApiResult<()> {
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn preset(id: &str, name: &str, model: &str) -> StoredApiPreset {
         let mut preset = StoredApiPreset {
+            interchange_source: None,
             id: id.to_string(),
             name: name.to_string(),
             saved_at: 0,
@@ -1454,6 +1406,7 @@ mod tests {
             access_token: String::new(),
             account_id: String::new(),
             access_mode: None,
+            favorite: false,
             switch_count: 0,
         };
         preset

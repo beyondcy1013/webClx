@@ -29,7 +29,7 @@ assert.doesNotMatch(
 );
 assert.match(
   terminalHtml,
-  /terminal-output-scroll\.js\?v=20260807a/,
+  /terminal-output-scroll\.js\?v=20261016-background-bottom/,
   "terminal page should invalidate cached resume scroll behavior",
 );
 
@@ -41,13 +41,13 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function restorePageScrollSnapshotForLayout\(snapshot\) \{[\s\S]*const currentScrollTop =[\s\S]*if \(maxScroll - currentScrollTop <= TERMINAL_PAGE_SCROLL_BOTTOM_TOLERANCE_PX\) \{[\s\S]*updatePageScrollRail\(\);[\s\S]*return;[\s\S]*\}[\s\S]*window\.scrollTo\(/,
+  /function restorePageScrollSnapshotForLayout\(snapshot\) \{[\s\S]*?const currentScrollTop =[\s\S]*?if \(maxScroll - currentScrollTop <= TERMINAL_PAGE_SCROLL_BOTTOM_TOLERANCE_PX\) \{[\s\S]*?updatePageScrollRail\(\);[\s\S]*?return;[\s\S]*?\}[\s\S]*?window\.scrollTo\(/,
   "page-bottom restoration should avoid redundant window scrolling when the page is already at the bottom",
 );
 
 assert.match(
   terminalJs,
-  /function fitTerminal\(\{ force = false \} = \{\}\) \{[\s\S]*preserveTerminalScrollDuringLayout\(\(\) => \{[\s\S]*fitAddon\.fit\(\);[\s\S]*syncTerminalSize\(\{ force \}\);[\s\S]*\}\);[\s\S]*\}/,
+  /function fitTerminal\(\{ force = false \} = \{\}\) \{[\s\S]*?preserveTerminalScrollDuringLayout\(\(\) => \{[\s\S]*?(?:fitAddon\.fit\(\)|fitAddon\.fit\(\);)[\s\S]*?syncTerminalSize\(\{ force[\s\S]*?\}\);[\s\S]*?\}\);[\s\S]*?\}/,
   "terminal layout fitting should preserve the current session scroll position",
 );
 
@@ -63,7 +63,7 @@ assert.match(
   "terminal size syncing should retry briefly while browser layout and mobile viewport geometry settle",
 );
 
-const syncTerminalSizeStart = terminalJs.indexOf("function syncTerminalSize({ force = false } = {})");
+const syncTerminalSizeStart = terminalJs.indexOf("function syncTerminalSize({ force = false, size = null } = {})");
 const flushTerminalSizeStart = terminalJs.indexOf("function flushTerminalSize()");
 assert.ok(
   syncTerminalSizeStart >= 0 &&
@@ -112,7 +112,7 @@ assert.ok(
 
 assert.match(
   terminalJs,
-  /function handleTerminalViewportScroll\(\) \{[\s\S]*!terminalBacklogReplayActive && !terminalScrollSaveSuppressed\(\)[\s\S]*saveTerminalScrollPositionForSession\(state\.activeSessionId\);[\s\S]*\}/,
+  /function handleTerminalViewportScroll\(event\) \{[\s\S]*!terminalBacklogReplayActive && !terminalScrollSaveSuppressed\(\)[\s\S]*saveTerminalScrollPositionForSession\(state\.activeSessionId\);[\s\S]*\}/,
   "layout-induced viewport scroll events should not overwrite the saved session scroll state",
 );
 
@@ -124,7 +124,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function restoreTerminalScrollSnapshot\(snapshot\) \{[\s\S]*if \(snapshot\.atBottom\) \{[\s\S]*scrollTerminalToBottom\(\);[\s\S]*\} else \{[\s\S]*scrollTerminalToDomScrollTop\(snapshot\.scrollTop, metrics\.maxScroll\);[\s\S]*updateTerminalScrollBottomButton\(\);[\s\S]*\}[\s\S]*saveTerminalScrollPositionForSession\(snapshot\.sessionId\);[\s\S]*\}/,
+  /function restoreTerminalScrollSnapshot\(snapshot\) \{[\s\S]*?if \(snapshot\.atBottom\) \{[\s\S]*?scrollTerminalToBottom\(\);[\s\S]*?\} else \{[\s\S]*?scrollTerminalToDomScrollTop\(snapshot\.scrollTop, metrics\.maxScroll\);[\s\S]*?updateTerminalScrollBottomButton\(\);[\s\S]*?\}[\s\S]*?saveTerminalScrollPositionForSession\(snapshot\.sessionId\);[\s\S]*?\}/,
   "terminal layout scroll restoration should keep either the previous position or the bottom state",
 );
 
@@ -136,8 +136,8 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function terminalShouldStickToBottomForOutput\(context = activeTerminalContext\) \{[\s\S]*context\.backlogReplayActive[\s\S]*terminalScrollSaveSuppressed\(\)[\s\S]*terminalScrollPositions\.get\(context\.sessionId\)[\s\S]*saved\?\.atBottom[\s\S]*\}/,
-  "terminal output should use the saved bottom state while layout-induced scroll changes are being suppressed",
+  /function terminalShouldStickToBottomForOutput\(context = activeTerminalContext\) \{[\s\S]*context\.backlogReplayActive[\s\S]*context\.followOutput !== false;[\s\S]*\}/,
+  "terminal output should use the session's follow intent rather than transient layout scroll metrics",
 );
 
 assert.match(
@@ -150,4 +150,10 @@ assert.match(
   terminalJs,
   /const TERMINAL_VIEWPORT_RESIZE_DEBOUNCE_MS = 240;[\s\S]*function applyTerminalViewportResizeLayout\(pageSnapshot,[\s\S]*fitTerminal\(\);[\s\S]*restorePageScrollSnapshotForLayout\(pageSnapshot\);[\s\S]*function handleTerminalViewportResize\(\) \{[\s\S]*terminalViewportResizePageSnapshot = capturePageScrollSnapshotForLayout\(\);[\s\S]*const pageSnapshot = terminalViewportResizePageSnapshot;[\s\S]*requestAnimationFrame\(\(\) => \{[\s\S]*applyTerminalViewportResizeLayout\(pageSnapshot\);[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*applyTerminalViewportResizeLayout\(pageSnapshot, \{ settle: true \}\);[\s\S]*TERMINAL_VIEWPORT_RESIZE_DEBOUNCE_MS[\s\S]*window\.visualViewport\.addEventListener\("resize", handleTerminalViewportResize\)/,
   "mobile visualViewport changes should fit on the first frame, retain the original page-bottom anchor, and settle once geometry stabilizes",
+);
+
+assert.match(
+  terminalJs,
+  /let terminalViewportResizeTerminalSnapshot = null;[\s\S]*function applyTerminalViewportResizeLayout\(pageSnapshot,[\s\S]*fitTerminal\(\);[\s\S]*restoreTerminalScrollSnapshot\(terminalViewportResizeTerminalSnapshot\);[\s\S]*scheduleTerminalScrollSnapshotRestore\(terminalViewportResizeTerminalSnapshot\);[\s\S]*terminalViewportResizeTerminalSnapshot = sessionId[\s\S]*terminalScrollPositions\.get\(sessionId\)/,
+  "IME viewport changes should restore the last reliable terminal scroll anchor after each layout pass",
 );

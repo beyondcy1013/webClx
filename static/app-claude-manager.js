@@ -19,6 +19,8 @@
       normalizePresetBaseUrlGroupKey,
       renderClaudePresetTableHeader,
       renderPresetTable,
+      renderPresetCompactList,
+      appendPresetCompactDetail,
       movePresetById,
       movePresetOrderWithPersist,
       persistPresetOrder,
@@ -26,6 +28,7 @@
       buildPresetConfigCells,
       createActionCell,
       createActionButton,
+      createPresetActionMenu,
       createPresetDeleteButton,
       createCurrentIndicatorCell,
       createPresetNameCell,
@@ -45,6 +48,11 @@
       claudeCurrentFileEl,
       claudeCurrentTargetEl,
       claudePresetFileEl,
+      claudePresetGroupModeInputEl,
+      claudePresetSearchInputEl,
+      claudePresetSelectionModeButtonEl,
+      claudeAddPresetButton,
+      claudePresetEditorPanelEl,
       claudeProviderNameInputEl,
       claudeAuthTokenInputEl,
       claudeBaseUrlInputEl,
@@ -65,9 +73,12 @@
       claudeTestAllPresetsButton,
       claudeFormStatusEl,
       claudePresetListEl,
+      claudePresetMobileListEl,
       claudeSharedModelOptionsEl,
       claudeAccessModeInputEl,
     } = elements;
+    const CLAUDE_PRESET_GROUP_MODE_STORAGE_KEY = "webclx.claudePresetGroupMode";
+    const expandedClaudePresetIds = new Set();
 
     function normalizeClaudeModelOptions(options) {
       const values = Array.isArray(options) ? options : [];
@@ -208,6 +219,196 @@
       ];
     }
 
+    function claudePresetPrimaryModel(preset) {
+      return preset?.third_party_model
+        || preset?.default_sonnet_model
+        || preset?.default_opus_model
+        || preset?.default_haiku_model
+        || "";
+    }
+
+    function normalizeClaudePresetGroupMode(value) {
+      return value === "model" ? "model" : "base_url";
+    }
+
+    function claudePresetGroupConfig() {
+      if (state.claudePresetGroupMode === "model") {
+        return {
+          getKey: claudePresetPrimaryModel,
+          normalizeKey: (value) => String(value || "").trim().toLocaleLowerCase(),
+        };
+      }
+      return {
+        getKey: (preset) => preset?.base_url || "",
+        normalizeKey: normalizePresetBaseUrlGroupKey,
+        mergeCellKey: "base_url",
+      };
+    }
+
+    function filteredClaudePresets(presets) {
+      const searchTerm = String(state.claudePresetSearchTerm || "").trim().toLocaleLowerCase();
+      if (!searchTerm) return Array.isArray(presets) ? presets : [];
+      return (Array.isArray(presets) ? presets : []).filter((preset) => [
+        preset?.name,
+        preset?.provider_name,
+        preset?.base_url,
+        preset?.management_url,
+        formatClaudeModelSummary(preset),
+      ].filter(Boolean).join("\n").toLocaleLowerCase().includes(searchTerm));
+    }
+
+    function updateClaudePresetSelectionControls() {
+      const count = state.claudePresetExportSelection.size;
+      if (claudePresetSelectionModeButtonEl) {
+        claudePresetSelectionModeButtonEl.setAttribute(
+          "aria-pressed",
+          state.claudePresetSelectionMode ? "true" : "false",
+        );
+        claudePresetSelectionModeButtonEl.textContent = state.claudePresetSelectionMode
+          ? (count > 0 ? `已选 ${count}` : "取消选择")
+          : "选择";
+      }
+      const exportButton = document.getElementById("claude-clipboard-export");
+      if (exportButton) exportButton.disabled = count === 0;
+    }
+
+    function initializeClaudePresetListControls() {
+      try {
+        state.claudePresetGroupMode = normalizeClaudePresetGroupMode(
+          window.localStorage.getItem(CLAUDE_PRESET_GROUP_MODE_STORAGE_KEY),
+        );
+      } catch {
+        state.claudePresetGroupMode = "base_url";
+      }
+      if (claudePresetGroupModeInputEl) {
+        claudePresetGroupModeInputEl.value = state.claudePresetGroupMode;
+        claudePresetGroupModeInputEl.addEventListener("change", () => {
+          state.claudePresetGroupMode = normalizeClaudePresetGroupMode(claudePresetGroupModeInputEl.value);
+          try {
+            window.localStorage.setItem(CLAUDE_PRESET_GROUP_MODE_STORAGE_KEY, state.claudePresetGroupMode);
+          } catch {}
+          state.presetTableSort?.delete?.("claude");
+          renderClaudePresets(state.claudePresets);
+        });
+      }
+      claudePresetSearchInputEl?.addEventListener("input", () => {
+        state.claudePresetSearchTerm = claudePresetSearchInputEl.value;
+        renderClaudePresets(state.claudePresets);
+      });
+      claudePresetSelectionModeButtonEl?.addEventListener("click", () => {
+        state.claudePresetSelectionMode = !state.claudePresetSelectionMode;
+        if (!state.claudePresetSelectionMode) state.claudePresetExportSelection.clear();
+        renderClaudePresets(state.claudePresets);
+      });
+      claudeAddPresetButton?.addEventListener("click", () => {
+        if (claudePresetEditorPanelEl) claudePresetEditorPanelEl.hidden = false;
+        resetClaudePresetForm("填写信息后保存为新的 Claude 预设。", "muted");
+        claudeProviderNameInputEl.focus();
+        claudeProviderNameInputEl.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+      updateClaudePresetSelectionControls();
+    }
+
+    function hideClaudePresetEditor() {
+      if (claudePresetEditorPanelEl) claudePresetEditorPanelEl.hidden = true;
+    }
+
+    function claudePresetRowActions(preset) {
+      const index = state.claudePresets.findIndex((item) => item?.id === preset?.id);
+      return [
+        { label: "上移", disabled: index <= 0, handler: () => moveClaudePresetOrder(preset.id, -1) },
+        {
+          label: "下移",
+          disabled: index < 0 || index >= state.claudePresets.length - 1,
+          handler: () => moveClaudePresetOrder(preset.id, 1),
+        },
+      ];
+    }
+
+    function createClaudePresetMobileStatus(preset) {
+      const wrap = document.createElement("div");
+      wrap.className = "provider-preset-mobile-status";
+      if (preset.active) {
+        const current = document.createElement("span");
+        current.className = "provider-preset-current-badge";
+        current.textContent = "当前";
+        wrap.appendChild(current);
+      }
+      const indicator = createCurrentIndicatorCell(preset.active, {
+        testResult: state.claudePresetTestResults.get(preset.id) || null,
+        testKind: "claude",
+        testing: state.claudePresetsTesting.has(preset.id),
+      });
+      indicator.querySelector(".current-indicator-arrow")?.remove();
+      wrap.append(...indicator.childNodes);
+      if (!wrap.childNodes.length) {
+        const idle = document.createElement("span");
+        idle.textContent = "未测试";
+        wrap.appendChild(idle);
+      }
+      return wrap;
+    }
+
+    function createClaudePresetMobileDetails(preset, configKeys) {
+      const details = document.createElement("div");
+      const list = document.createElement("dl");
+      list.className = "provider-preset-mobile-details-grid";
+      appendPresetCompactDetail(list, "Base URL", preset.base_url, { mono: true });
+      appendPresetCompactDetail(list, "模型", formatClaudeModelSummary(preset), { mono: true });
+      appendPresetCompactDetail(list, "协议转换", formatClaudeAccessMode(preset));
+      appendPresetCompactDetail(list, "Token", preset.masked_auth_token, { mono: true });
+      const managementUrl = String(preset.management_url || "").trim();
+      if (managementUrl) {
+        const link = document.createElement("a");
+        link.href = managementUrl;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = managementUrl;
+        appendPresetCompactDetail(list, "管理页面", link);
+      }
+      const configValues = buildPresetConfigValueMap(preset);
+      appendPresetCompactDetail(
+        list,
+        "settings.json",
+        configKeys.map((key) => `${key}=${configValues.get(key) || "—"}`).join(" · ") || "无",
+        { mono: true },
+      );
+      appendPresetCompactDetail(list, "使用次数", String(preset.switch_count || 0));
+      appendPresetCompactDetail(list, "保存时间", formatDateTime(preset.saved_at));
+      details.appendChild(list);
+      return details;
+    }
+
+    function renderClaudePresetMobileList(presets, configKeys) {
+      renderPresetCompactList({
+        listEl: claudePresetMobileListEl,
+        presets,
+        expandedIds: expandedClaudePresetIds,
+        selectedIds: state.claudePresetExportSelection,
+        selectionMode: state.claudePresetSelectionMode,
+        emptyText: state.claudePresetSearchTerm
+          ? "没有匹配的 Claude 预设。"
+          : "还没有保存任何 Claude 预设。",
+        getGroupKey: (preset) => state.claudePresetGroupMode === "model"
+          ? claudePresetPrimaryModel(preset)
+          : normalizePresetBaseUrlGroupKey(preset.base_url),
+        getGroupLabel: (preset) => state.claudePresetGroupMode === "model"
+          ? claudePresetPrimaryModel(preset) || "未设置模型"
+          : preset.base_url || "未设置 Base URL",
+        getName: (preset) => preset.name || "未命名预设",
+        getMeta: (preset) => [
+          claudePresetPrimaryModel(preset) || "未设置模型",
+          formatClaudeAccessMode(preset),
+        ].join(" · "),
+        createStatus: createClaudePresetMobileStatus,
+        createDetails: (preset) => createClaudePresetMobileDetails(preset, configKeys),
+        onPrimary: (preset) => applyClaudePreset(preset.id),
+        getActions: claudePresetRowActions,
+        onSelectionChange: () => renderClaudePresets(state.claudePresets),
+        idPrefix: "claude",
+      });
+    }
+
     async function moveClaudePresetOrder(presetId, direction) {
       await movePresetOrderWithPersist({
         presets: state.claudePresets,
@@ -227,16 +428,25 @@
     function renderClaudePresets(presets) {
       const configKeys = collectPresetConfigKeys(presets);
       const sortColumns = buildClaudePresetSortColumns(configKeys);
+      const groupConfig = claudePresetGroupConfig();
+      const visiblePresets = buildPresetTableVisibleRows(
+        sortPresetTableRows(filteredClaudePresets(presets), "claude", sortColumns),
+        groupConfig,
+      ).map((row) => row.preset);
       const validIds = new Set(presets.map((preset) => preset.id));
       state.claudePresetExportSelection.forEach((id) => {
         if (!validIds.has(id)) state.claudePresetExportSelection.delete(id);
       });
+      expandedClaudePresetIds.forEach((id) => {
+        if (!validIds.has(id)) expandedClaudePresetIds.delete(id);
+      });
       const selection = {
         label: "Claude_API 账号",
-        presets,
+        presets: visiblePresets,
         selectedIds: state.claudePresetExportSelection,
         onChange: () => renderClaudePresets(presets),
       };
+      updateClaudePresetSelectionControls();
       renderClaudePresetTableHeader(configKeys, {
         sortColumns,
         onSortChange: () => renderClaudePresets(presets),
@@ -245,20 +455,14 @@
 
       renderPresetTable({
         listEl: claudePresetListEl,
-        presets,
-        emptyText: "还没有保存任何 Claude 预设。",
-        emptyColspan: 16 + configKeys.length,
-        group: {
-          getKey: (preset) => preset?.base_url || "",
-          normalizeKey: normalizePresetBaseUrlGroupKey,
-          mergeCellKey: "base_url",
-        },
+        presets: visiblePresets,
+        emptyText: state.claudePresetSearchTerm
+          ? "没有匹配的 Claude 预设。"
+          : "还没有保存任何 Claude 预设。",
+        emptyColspan: 11 + configKeys.length,
+        group: groupConfig,
         tableKey: "claude",
         sortColumns,
-        order: {
-          enabled: true,
-          onMove: moveClaudePresetOrder,
-        },
         selection,
         buildCells: (preset) => {
           const currentCell = createCurrentIndicatorCell(preset.active, {
@@ -286,38 +490,19 @@
 
           const timeCell = createTextCell(formatDateTime(preset.saved_at));
 
-          const applyCell = createActionCell(
-            [createActionButton("切换", () => applyClaudePreset(preset.id), "mini-button accent")],
-            "auth-action-cell",
-            "actions preset-actions",
-          );
-          const testCell = createActionCell(
-            [createActionButton("测试", () => testClaudePreset(preset.id, preset.name), "mini-button")],
-            "auth-action-cell",
-            "actions preset-actions",
-          );
-          const opencodeCell = createActionCell(
-            [createActionButton("OpenCode", () => applyClaudePresetToOpencode(preset.id), "mini-button")],
-            "auth-action-cell",
-            "actions preset-actions",
-          );
-          const editCell = createActionCell(
-            [createActionButton("编辑", () => editClaudePreset(preset.id), "mini-button")],
-            "auth-action-cell",
-            "actions preset-actions",
-          );
-          const deleteCell = createActionCell(
-            [createPresetDeleteButton(() => deleteClaudePreset(preset.id, preset.name))],
-            "auth-action-cell",
-            "actions preset-actions",
-          );
+          const actionCell = createActionCell([
+            createActionButton("切换", () => applyClaudePreset(preset.id), "mini-button accent"),
+            createActionButton("测试", () => testClaudePreset(preset.id, preset.name), "mini-button"),
+            createActionButton("OpenCode", () => applyClaudePresetToOpencode(preset.id), "mini-button"),
+            createActionButton("编辑", () => editClaudePreset(preset.id), "mini-button"),
+            createPresetDeleteButton(() => deleteClaudePreset(preset.id, preset.name)),
+            createPresetActionMenu(claudePresetRowActions(preset), {
+              label: `${preset.name || "当前预设"} 的更多操作`,
+            }),
+          ], "auth-action-cell provider-preset-operation-cell", "actions preset-actions provider-preset-consolidated-actions");
 
           return [
-            applyCell,
-            testCell,
-            opencodeCell,
-            editCell,
-            deleteCell,
+            actionCell,
             currentCell,
             nameCell,
             baseUrlCell,
@@ -331,6 +516,7 @@
           ];
         },
       });
+      renderClaudePresetMobileList(visiblePresets, configKeys);
     }
 
     async function loadClaudePresets() {
@@ -497,6 +683,14 @@
       updateStatus(claudeFormStatusEl, message || CLAUDE_FORM_DEFAULT_STATUS, tone);
     }
 
+    function cancelClaudePresetEdit() {
+      resetClaudePresetForm(
+        state.editingClaudePresetId ? "已取消编辑。" : "输入内容已清空。",
+        "muted",
+      );
+      hideClaudePresetEditor();
+    }
+
     function editClaudePreset(presetId) {
       const preset = state.claudePresets.find((item) => item.id === presetId);
       if (!preset) {
@@ -523,6 +717,7 @@
       const preferredMode = preferredClaudeModelModeFromSource(preset) || "official";
       syncClaudeModelGroupState(preferredMode);
       setClaudePresetEditingState(preset.id);
+      if (claudePresetEditorPanelEl) claudePresetEditorPanelEl.hidden = false;
       claudeProviderNameInputEl.focus();
       claudeProviderNameInputEl.select();
       claudeProviderNameInputEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -648,7 +843,7 @@
         updateStatus(
           statusElement,
           response.deferred
-            ? `已登记 Claude 预设切换：${response.name}。当前指定 Agent 退出并恢复原配置后，将实际写入该预设。`
+            ? `Claude 预设未被立即写入：${response.name}。已停止后续启动，请重试。`
             : `已应用 Claude 预设：${response.name}`,
           response.deferred ? "info" : "ok",
         );
@@ -763,6 +958,8 @@
       }
     }
 
+    initializeClaudePresetListControls();
+
     return {
       applyClaudePreset,
       applyClaudePresetToOpencode,
@@ -770,6 +967,7 @@
       deleteClaudePreset,
       editClaudePreset,
       ensureClaudePresetsLoaded,
+      cancelClaudePresetEdit,
       formatCurrentClaudeStatus,
       loadClaudePresets,
       normalizeClaudeModelOptions,

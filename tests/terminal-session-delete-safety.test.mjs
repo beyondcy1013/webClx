@@ -41,6 +41,26 @@ test("terminal deletion requires an explicit target-id confirmation header", () 
   );
 });
 
+test("WebUI ending actions hide the selected terminal and never terminate it", () => {
+  const terminalDelete = functionBlock(
+    terminalPageSource,
+    "async function deleteSession(session)",
+    "function refreshTerminalViewportLayout(",
+  );
+  const homeDelete = functionBlock(
+    homePageSource,
+    "async function deleteSession(session)",
+    "",
+  );
+
+  assert.doesNotMatch(terminalDelete, /method:\s*"DELETE"/);
+  assert.doesNotMatch(homeDelete, /method:\s*"DELETE"/);
+  assert.match(terminalDelete, /\/hide`, \{[\s\S]*method:\s*"PUT"/);
+  assert.match(homeDelete, /\/hide`, \{[\s\S]*method:\s*"PUT"/);
+  assert.doesNotMatch(terminalDelete, /正在结束/);
+  assert.doesNotMatch(homeDelete, /正在结束/);
+});
+
 test("terminal deletion emits request, success, and failure audit events", () => {
   const handler = functionBlock(
     terminalSource,
@@ -61,7 +81,7 @@ test("terminal deletion emits request, success, and failure audit events", () =>
   assert.match(handler, /target_session_name = %session\.name/);
 });
 
-test("both terminal WebUI delete actions bind confirmation to the selected session", () => {
+test("both terminal WebUI ending actions bind to the selected session", () => {
   const terminalDelete = functionBlock(
     terminalPageSource,
     "async function deleteSession(session)",
@@ -73,12 +93,8 @@ test("both terminal WebUI delete actions bind confirmation to the selected sessi
     "",
   );
 
-  assert.match(
-    terminalDelete,
-    /"X-WebClx-Confirm-Session": session\.id[\s\S]*"X-WebClx-Delete-Source": "terminal-page"/,
-  );
-  assert.match(
-    homeDelete,
-    /"X-WebClx-Confirm-Session": session\.id[\s\S]*"X-WebClx-Delete-Source": "home-sessions"/,
-  );
+  assert.match(terminalDelete, /encodeURIComponent\(session\.id\)\}\/hide/);
+  assert.match(homeDelete, /encodeURIComponent\(session\.id\)\}\/hide/);
+  assert.match(terminalDelete, /confirmTerminalExperienceSaveAndHide\(session\)/);
+  assert.match(homeDelete, /confirmTerminalExperienceSaveAndHide\(session\)/);
 });

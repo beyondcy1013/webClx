@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-[Download v1.8.11](https://github.com/beyondcy1013/webClx/releases/tag/v1.8.11) ·
+[Download v1.10.15](https://github.com/beyondcy1013/webClx/releases/tag/v1.10.15) ·
 [Request a 7-day isolated hosted trial](https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml) ·
 [Try the interactive demo](https://beyondcy1013.github.io/webClx/demo.html) ·
 [Product page](https://beyondcy1013.github.io/webClx/) ·

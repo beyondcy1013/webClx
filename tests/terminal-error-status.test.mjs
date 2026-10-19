@@ -114,8 +114,8 @@ assert.match(
 
 assert.match(
   appJs,
-  /const DEFAULT_TERMINAL_ERROR_KEYWORDS = Object\.freeze\(\[[\s\S]*Concurrency limit exceeded for user, please retry later[\s\S]*Selected model is at capacity\. Please try a different model\.[\s\S]*API Error: Request rejected \(429\)[\s\S]*已达到 5 小时的使用上限[\s\S]*last status: 429[\s\S]*last status: 503[\s\S]*last status: 404[\s\S]*unexpected status 502 Bad Gateway/,
-  "terminal settings fallback defaults should include auto-continue interval, concurrency-limit, selected-model-capacity, quota 429, and 502 upstream unavailable error keywords",
+  /const DEFAULT_TERMINAL_ERROR_KEYWORDS = Object\.freeze\(\[[\s\S]*Concurrency limit exceeded for user, please retry later[\s\S]*Selected model is at capacity\. Please try a different model\.[\s\S]*该模型当前访问量过大，请您稍后再试[\s\S]*API Error: Request rejected \(429\)[\s\S]*已达到 5 小时的使用上限[\s\S]*last status: 429[\s\S]*last status: 503[\s\S]*last status: 404[\s\S]*unexpected status 502 Bad Gateway[\s\S]*openrouter:web_search/,
+  "terminal settings fallback defaults should include concurrency-limit, model-capacity, model-busy 529, quota 429, and 502 upstream unavailable error keywords",
 );
 
 assert.match(
@@ -245,6 +245,18 @@ assert.match(
 );
 
 assert.match(
+  terminalRs,
+  /pub async fn send_session_auto_continue\([\s\S]*glm_quota_auto_continue_requires_preflight[\s\S]*refresh_zhipu_quota_reset_cache[\s\S]*ZhipuQuotaPreflightStatus::Available[\s\S]*sent: false[\s\S]*send_session_auto_continue_if_error/,
+  "the auto-continue endpoint should send immediately when GLM quota remains and wait when it is exhausted or unavailable",
+);
+
+assert.match(
+  terminalManagerRs,
+  /glm_quota_auto_continue_requires_preflight[\s\S]*sessions_by_id[\s\S]*base_url_is_zhipu_upstream[\s\S]*terminal_recent_output_has_quota_error/,
+  "the GLM quota send gate should use persisted Zhipu identity and the actual 429 tail text",
+);
+
+assert.match(
   quotaResetCacheRs,
   /pub fn record_for_preset\(&self, preset_id: &str, base_url: &str, reset_at: String\)[\s\S]*base_url_cache_key\(base_url\)[\s\S]*pub fn get_for_base_url\(&self, base_url: &str\) -> Option<String>[\s\S]*fn cache_records_base_url_fallback\(\)[\s\S]*cache\.get_for_base_url\("https:\/\/OPEN\.bigmodel\.cn\/api\/coding\/paas\/v4"\)/,
   "quota reset cache should record preset reset times by both preset id and normalized base URL",
@@ -260,6 +272,48 @@ assert.match(
   terminalManagerRs,
   /pub fn send_session_continue\(&self, session_id: &str\) -> Result<\(\)>[\s\S]*send_terminal_command_with_enter\(session_id, TERMINAL_CONTINUE_COMMAND\)/,
   "terminal manager should expose one canonical continue sender",
+);
+
+assert.match(
+  terminalManagerRs,
+  /fn send_session_auto_compact\([\s\S]*error_signature: &str[\s\S]*if self\.error_matches_previous_compact\(session_id, error_signature\)[\s\S]*TerminalAutoContinueSendOutcome::NotEligible/,
+  "a compact sent for one error signature must not be repeated for the same visible error",
+);
+
+assert.match(
+  terminalManagerRs,
+  /fn terminal_error_keyword_is_payload_too_large\([\s\S]*keyword\.contains\("413"\)[\s\S]*keyword\.contains\("payload too large"\)[\s\S]*keyword\.contains\("length limit exceeded"\)/,
+  "413 and payload-limit errors should be recognized as compact-only recovery errors",
+);
+
+assert.match(
+  terminalManagerRs,
+  /if terminal_error_keyword_is_payload_too_large\(&error_match\.keyword\)[\s\S]*TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE[\s\S]*if terminal_error_keyword_is_payload_too_large\(matched_keyword\)[\s\S]*TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE/,
+  "both browser-triggered and background scanners must send compact, never continue, for payload-limit errors",
+);
+
+assert.match(
+  terminalManagerRs,
+  /per_session_runtime\.lock\(\)\)\.retain\([\s\S]*current == signature/,
+  "the compact retry guard should expire only after the matched error changes or clears",
+);
+
+assert.match(
+  terminalManagerRs,
+  /fn send_session_auto_compact\([\s\S]*auto_continue_retry_at_millis[\s\S]*send_terminal_slash_command\(session_id, TERMINAL_COMPACT_COMMAND\)[\s\S]*TerminalAutoContinueSendOutcome::CompactSent/,
+  "context exhaustion should use one cooldown-aware compact-only sender",
+);
+
+assert.doesNotMatch(
+  terminalManagerRs,
+  /fn send_session_compact_then_continue|send_terminal_slash_command\(session_id, TERMINAL_COMPACT_COMMAND\)[\s\S]{0,500}send_terminal_command_with_enter\(session_id, TERMINAL_CONTINUE_COMMAND\)/,
+  "context exhaustion must not enqueue continue after compact",
+);
+
+assert.doesNotMatch(
+  terminalManagerRs,
+  /fn send_terminal_slash_command\([\s\S]{0,800}send_session_input_direct_or_backend\(session_id, "\\u\{1b\}"\.to_string\(\)\)/,
+  "slash commands must not prefix / with an adjacent Escape that Codex consumes",
 );
 
 assert.match(
@@ -324,7 +378,7 @@ assert.match(
 
 assert.match(
   terminalManagerRs,
-  /run_error_auto_continue_loop\([\s\S]*auth_manager: auth_core::AuthPresetManager[\s\S]*update_api_preset_snapshot\(auth_manager\.api_presets_snapshot\(\)\)[\s\S]*scan_error_auto_continue_sessions/,
+  /run_error_auto_continue_loop\([\s\S]*auth_manager: auth_core::AuthPresetManager[\s\S]*api_presets_snapshot\(\)[\s\S]*update_api_preset_snapshot\([\s\S]*scan_error_auto_continue_sessions/,
   "terminal error auto-continue loop should refresh API preset snapshots without relying on browser session-list requests",
 );
 
@@ -468,7 +522,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /function sessionActivityLabel\(session\) \{[\s\S]*return sharedSessionActivityLabel\(session\);/,
+  /function sessionActivityLabel\(session\) \{[\s\S]*sharedSessionActivityLabel\(session\)[\s\S]*return label;/,
   "terminal page session switcher should use the shared activity labels",
 );
 

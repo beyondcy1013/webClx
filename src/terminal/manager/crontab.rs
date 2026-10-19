@@ -2,21 +2,19 @@
 //!
 //! 这些函数不依赖 `TerminalManager` 状态，是纯 OS 层工具，方便单测和复用。
 
-use std::{
-    collections::HashMap,
-    fs,
-    io::Write,
-    path::Path,
-    process::{Command, Stdio},
-};
+use std::{collections::HashMap, fs, path::Path, process::Command, time::Duration};
 
 use anyhow::{Context, Result};
 
+/// `crontab -l` / `crontab -` 是短命令，挂上超时与输出上限，避免挂死阻塞线程。
+const CRONTAB_BUDGET: Duration = Duration::from_secs(10);
+const CRONTAB_MAX_OUTPUT: usize = 1024 * 1024;
+
 /// 读取当前用户的 crontab 内容；不存在时返回空串。
 pub(super) fn current_crontab() -> Result<String> {
-    let output = Command::new("crontab")
-        .arg("-l")
-        .output()
+    let mut command = Command::new("crontab");
+    command.arg("-l");
+    let output = crate::process_exec::bounded_output(command, CRONTAB_BUDGET, CRONTAB_MAX_OUTPUT)
         .context("read crontab")?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
@@ -30,18 +28,15 @@ pub(super) fn current_crontab() -> Result<String> {
 
 /// 把内容写回用户 crontab（整体替换）。
 pub(super) fn install_crontab(content: &str) -> Result<()> {
-    let mut child = Command::new("crontab")
-        .arg("-")
-        .stdin(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn crontab installer")?;
-    if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(content.as_bytes())
-            .context("write crontab content")?;
-    }
-    let output = child.wait_with_output().context("wait crontab installer")?;
+    let mut command = Command::new("crontab");
+    command.arg("-");
+    let output = crate::process_exec::bounded_output_with_stdin(
+        command,
+        content.as_bytes(),
+        CRONTAB_BUDGET,
+        CRONTAB_MAX_OUTPUT,
+    )
+    .context("install crontab")?;
     if output.status.success() {
         Ok(())
     } else {

@@ -54,6 +54,7 @@ function renderSessionsSessionPicker() {
     sessionsSessionListEl.appendChild(option);
   });
 
+  sessionsSessionListEl.workspaceIconSelectController?.sync();
   syncSessionsTerminalLink();
 }
 
@@ -123,6 +124,7 @@ function syncDirectorySessionControls() {
     directorySessionListEl.appendChild(option);
   });
 
+  directorySessionListEl.workspaceIconSelectController?.sync();
   state.pendingDirectorySessionUiSync = false;
   syncWorkspaceTerminalLink();
 }

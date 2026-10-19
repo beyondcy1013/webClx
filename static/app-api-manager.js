@@ -18,6 +18,7 @@
       normalizePresetBaseUrlGroupKey,
       renderApiPresetTableHeader,
       renderPresetTable,
+      renderPresetCompactList,
       movePresetById,
       movePresetOrderWithPersist,
       persistPresetOrder,
@@ -28,6 +29,7 @@
       createPresetActionMenu,
       createCurrentIndicatorCell,
       createPresetNameCell,
+      createEditablePresetNameCell,
       createTextCell,
       createExternalUrlCell,
       formatDateTime,
@@ -35,7 +37,6 @@
       parseTerminalStartupEnvInput,
       normalizeTerminalStartupEnvVars,
       apiBaseUrlMatchesSelectedAutoProxyProvider,
-      confirmEditedPresetOverwrite,
       formatCurrentApiHeadline,
       normalizeTestResult,
       errorTestResult,
@@ -47,14 +48,10 @@
       elements,
     } = deps;
     const {
-      apiManagerStatusEl,
       apiCurrentFileEl,
       apiConfigFileEl,
       apiCurrentTargetEl,
       apiPresetFileEl,
-      apiPresetGroupModeInputEl,
-      apiPresetSearchInputEl,
-      apiPresetSelectionModeButtonEl,
       apiPresetNameEl,
       apiPresetRowNumberEl,
       apiConfigOverrideControls,
@@ -72,22 +69,14 @@
       apiTerminalEnvInputEl,
       apiTerminalStartupScriptInputEl,
       apiPresetEditorPanelEl,
+      apiPresetEditorModeLabelEl,
       apiSavePresetButton,
       apiSaveAsNewPresetButton,
       apiApplyEditedPresetButton,
       apiClearInputButton,
-      apiTestAllPresetsButton,
-      apiClipboardExportButton,
       apiFormStatusEl,
-      apiPresetListEl,
-      apiPresetMobileListEl,
-      apiAccountImportDialogEl,
-      apiAccountImportTextEl,
-      apiAccountImportFileButton,
-      apiAccountImportTextButton,
-      apiAccountImportSubmitButton,
-      apiAccountImportStatusEl,
     } = elements;
+    let apiPresetFormSnapshot = null;
 
     function apiPresetHasTerminalStartupSettings(preset) {
       return (
@@ -229,79 +218,23 @@
         savedMode = window.localStorage.getItem(API_PRESET_GROUP_MODE_STORAGE_KEY) || "";
       } catch {}
       state.apiPresetGroupMode = normalizeApiPresetGroupMode(savedMode);
-      if (!apiPresetGroupModeInputEl) {
-        return;
-      }
-      apiPresetGroupModeInputEl.value = state.apiPresetGroupMode;
-      apiPresetGroupModeInputEl.addEventListener("change", () => {
-        state.apiPresetGroupMode = normalizeApiPresetGroupMode(apiPresetGroupModeInputEl.value);
-        apiPresetGroupModeInputEl.value = state.apiPresetGroupMode;
-        try {
-          window.localStorage.setItem(API_PRESET_GROUP_MODE_STORAGE_KEY, state.apiPresetGroupMode);
-        } catch {}
-        state.presetTableSort?.delete?.("api");
-        renderApiPresets(state.apiPresets);
-      });
     }
 
-    function apiPresetMatchesSearch(preset, searchTerm) {
-      if (!searchTerm) return true;
-      const searchableText = [
-        preset?.name,
-        preset?.provider_name,
-        preset?.base_url,
-        preset?.management_url,
-        apiPresetModel(preset),
-      ]
-        .filter(Boolean)
-        .join("\n")
-        .toLocaleLowerCase();
-      return searchableText.includes(searchTerm);
+    function apiPresetIsFavorite(preset) {
+      return preset?.favorite === true;
     }
 
-    function filteredApiPresets(presets) {
-      const searchTerm = String(state.apiPresetSearchTerm || "").trim().toLocaleLowerCase();
-      return (Array.isArray(presets) ? presets : []).filter(
-        (preset) => apiPresetMatchesSearch(preset, searchTerm),
-      );
-    }
-
-    function updateApiPresetSelectionControls() {
-      const count = state.apiPresetExportSelection.size;
-      if (apiPresetSelectionModeButtonEl) {
-        apiPresetSelectionModeButtonEl.setAttribute(
-          "aria-pressed",
-          state.apiPresetSelectionMode ? "true" : "false",
-        );
-        apiPresetSelectionModeButtonEl.textContent = state.apiPresetSelectionMode
-          ? (count > 0 ? `已选 ${count}` : "取消选择")
-          : "选择";
-        apiPresetSelectionModeButtonEl.title = state.apiPresetSelectionMode
-          ? "退出选择模式"
-          : "选择要批量导出的预设";
+    function sortApiPresetsWithFavoritesFirst(presets) {
+      const source = Array.isArray(presets) ? presets : [];
+      const favorites = source.filter((preset) => apiPresetIsFavorite(preset));
+      if (favorites.length === 0) {
+        return source.slice();
       }
-      if (apiClipboardExportButton) {
-        apiClipboardExportButton.disabled = count === 0;
-      }
-    }
-
-    function initializeApiPresetListControls() {
-      if (!state) return;
-      if (apiPresetSearchInputEl) {
-        apiPresetSearchInputEl.value = state.apiPresetSearchTerm || "";
-        apiPresetSearchInputEl.addEventListener("input", () => {
-          state.apiPresetSearchTerm = apiPresetSearchInputEl.value;
-          renderApiPresets(state.apiPresets);
-        });
-      }
-      if (apiPresetSelectionModeButtonEl) {
-        apiPresetSelectionModeButtonEl.addEventListener("click", () => {
-          state.apiPresetSelectionMode = !state.apiPresetSelectionMode;
-          if (!state.apiPresetSelectionMode) state.apiPresetExportSelection.clear();
-          renderApiPresets(state.apiPresets);
-        });
-      }
-      updateApiPresetSelectionControls();
+      const favoriteIds = new Set(favorites.map((preset) => preset?.id));
+      return [
+        ...favorites,
+        ...source.filter((preset) => !favoriteIds.has(preset?.id)),
+      ];
     }
 
     // Overrides shown in the generic editor (everything except `model`, which
@@ -341,6 +274,7 @@
 
     function buildApiPresetSortColumns(configKeys) {
       return [
+        { key: "favorite", type: "boolean", defaultDirection: "desc", getValue: (preset) => apiPresetIsFavorite(preset) },
         { key: "status", type: "number", defaultDirection: "desc", getValue: apiStatusSortRank },
         { key: "name", type: "text", getValue: (preset) => preset?.name || "" },
         { key: "base_url", type: "text", getValue: (preset) => preset?.base_url || "" },
@@ -370,9 +304,10 @@
     }
 
     function apiPresetVisibleOrder(presets = state.apiPresets) {
+      const orderedPresets = sortApiPresetsWithFavoritesFirst(presets);
       const groups = [];
       const groupsByKey = new Map();
-      (Array.isArray(presets) ? presets : []).forEach((preset, index) => {
+      orderedPresets.forEach((preset, index) => {
         const groupKey = apiPresetGroupKey(preset, index);
         let groupRecord = groupsByKey.get(groupKey);
         if (!groupRecord) {
@@ -444,7 +379,7 @@
       renderApiPresets(state.apiPresets);
       try {
         await persistPresetOrder("/api/auth/api-presets/reorder", state.apiPresets);
-        setInlineStatus(apiManagerStatusEl, "API 预设顺序已保存。", "success");
+        setInlineStatus(apiFormStatusEl, "API 预设顺序已保存。", "success");
         return true;
       } catch (error) {
         state.apiPresets = previousPresets;
@@ -473,7 +408,7 @@
 
       try {
         await persistPresetOrder("/api/auth/api-presets/reorder", state.apiPresets);
-        setInlineStatus(apiManagerStatusEl, "API 预设顺序已保存。", "success");
+        setInlineStatus(apiFormStatusEl, "API 预设顺序已保存。", "success");
         return true;
       } catch (error) {
         state.apiPresets = previousPresets;
@@ -507,11 +442,16 @@
       );
       const actions = [
         {
+          label: preset.favorite ? "取消收藏" : "收藏",
+          handler: () => toggleApiPresetFavorite(preset.id),
+        },
+        {
           label: "切换并启动",
           handler: () => applyApiPresetAndLaunch(preset.id),
         },
         {
           label: "测试",
+          disabled: state.apiPresetsTesting.has(preset.id),
           handler: () => testApiPreset(preset.id, preset.name),
         },
         {
@@ -598,6 +538,7 @@
       details.hidden = !expandedApiPresetIds.has(preset.id);
       const list = document.createElement("dl");
       list.className = "api-mobile-preset-details-grid";
+      appendApiPresetMobileDetail(list, "收藏", preset.favorite ? "已收藏" : "未收藏");
       appendApiPresetMobileDetail(list, "Base URL", preset.base_url, { mono: true });
       appendApiPresetMobileDetail(list, "模型", apiPresetModel(preset) || "未设置", { mono: true });
       appendApiPresetMobileDetail(list, "Wire", preset.wire_api || "responses", { mono: true });
@@ -652,229 +593,11 @@
       return details;
     }
 
-    function createApiPresetMobileRow(preset, configKeys, actions) {
-      const row = document.createElement("div");
-      row.className = "api-mobile-preset-row";
-      row.setAttribute("role", "listitem");
-      if (preset.active) row.classList.add("active-auth-row");
-      if (state.apiPresetExportSelection.has(preset.id)) row.classList.add("is-selected");
-
-      const summary = document.createElement("div");
-      summary.className = "api-mobile-preset-summary";
-      if (state.apiPresetSelectionMode) {
-        summary.classList.add("has-selection");
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.className = "api-mobile-preset-checkbox";
-        checkbox.checked = state.apiPresetExportSelection.has(preset.id);
-        checkbox.setAttribute("aria-label", `选择 ${preset.name || preset.id}`);
-        checkbox.addEventListener("change", () => {
-          if (checkbox.checked) state.apiPresetExportSelection.add(preset.id);
-          else state.apiPresetExportSelection.delete(preset.id);
-          renderApiPresets(state.apiPresets);
-        });
-        summary.appendChild(checkbox);
-      }
-
-      const detailsId = `api-mobile-preset-${String(preset.id).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-      const identityButton = document.createElement("button");
-      identityButton.type = "button";
-      identityButton.className = "api-mobile-preset-identity";
-      identityButton.setAttribute("aria-controls", detailsId);
-      identityButton.setAttribute("aria-expanded", expandedApiPresetIds.has(preset.id) ? "true" : "false");
-      const name = document.createElement("strong");
-      name.className = "api-mobile-preset-name";
-      name.textContent = preset.name || "未命名预设";
-      const meta = document.createElement("span");
-      meta.className = "api-mobile-preset-meta mono-text";
-      meta.textContent = [apiPresetModel(preset) || "未设置模型", apiPresetDisplayHost(preset.base_url)]
-        .join(" · ");
-      identityButton.append(name, meta, createApiPresetMobileStatus(preset));
-
-      const primaryButton = createActionButton(
-        "切换",
-        () => applyApiPreset(preset.id),
-        "mini-button accent api-mobile-preset-primary",
-      );
-      const menuButton = createPresetActionMenu(actions, {
-        label: `${preset.name || "当前预设"} 的更多操作`,
-      });
-      summary.append(identityButton, primaryButton, menuButton);
-
-      const details = createApiPresetMobileDetails(preset, configKeys, detailsId);
-      identityButton.addEventListener("click", () => {
-        const expanded = !expandedApiPresetIds.has(preset.id);
-        if (expanded) expandedApiPresetIds.add(preset.id);
-        else expandedApiPresetIds.delete(preset.id);
-        identityButton.setAttribute("aria-expanded", expanded ? "true" : "false");
-        details.hidden = !expanded;
-      });
-      row.append(summary, details);
-      return row;
-    }
-
-    function renderApiPresetMobileList(presets, configKeys) {
-      if (!apiPresetMobileListEl) return;
-      apiPresetMobileListEl.replaceChildren();
-      if (!presets.length) {
-        const empty = document.createElement("p");
-        empty.className = "meta-text api-mobile-preset-empty";
-        empty.textContent = state.apiPresetSearchTerm
-          ? "没有匹配的 API 预设。"
-          : "还没有保存任何 API 预设。";
-        apiPresetMobileListEl.appendChild(empty);
-        return;
-      }
-      let previousGroupKey = null;
-      presets.forEach((preset, index) => {
-        const groupKey = apiPresetGroupKey(preset, index);
-        if (groupKey !== previousGroupKey) {
-          const groupLabel = document.createElement("div");
-          groupLabel.className = "api-mobile-preset-group-label";
-          groupLabel.textContent = state.apiPresetGroupMode === "model"
-            ? apiPresetModel(preset) || "未设置模型"
-            : preset.base_url || "未设置 Base URL";
-          apiPresetMobileListEl.appendChild(groupLabel);
-          previousGroupKey = groupKey;
-        }
-        apiPresetMobileListEl.appendChild(
-          createApiPresetMobileRow(preset, configKeys, apiPresetRowActions(preset)),
-        );
-      });
-    }
-
     function renderApiPresets(presets) {
-      const configKeys = collectPresetConfigKeys(presets);
-      const groupConfig = apiPresetGroupConfig();
-      const filteredPresets = filteredApiPresets(presets);
-      const visiblePresets = apiPresetVisibleOrder(filteredPresets);
-      const sortColumns = buildApiPresetSortColumns(configKeys);
+      // API accounts are owned by the LLM_API unified list; the standalone API
+      // detail table is intentionally gone. Preserve favorite/order selection
+      // cleanup and the model datalist used by the on-demand editor.
       const validIds = new Set(presets.map((preset) => preset.id));
-      state.apiPresetExportSelection.forEach((id) => {
-        if (!validIds.has(id)) state.apiPresetExportSelection.delete(id);
-      });
-      expandedApiPresetIds.forEach((id) => {
-        if (!validIds.has(id)) expandedApiPresetIds.delete(id);
-      });
-      const selection = state.apiPresetSelectionMode
-        ? {
-            label: "Codex_API 账号",
-            presets: visiblePresets,
-            selectedIds: state.apiPresetExportSelection,
-            onChange: () => renderApiPresets(presets),
-          }
-        : null;
-      updateApiPresetSelectionControls();
-      renderApiPresetTableHeader(configKeys, {
-        sortColumns,
-        onSortChange: () => renderApiPresets(presets),
-        selection,
-      });
-
-      renderPresetTable({
-        listEl: apiPresetListEl,
-        presets: visiblePresets,
-        emptyText: state.apiPresetSearchTerm
-          ? "没有匹配的 API 预设。"
-          : "还没有保存任何 API 预设。",
-        group: groupConfig,
-        emptyColspan: 14 + configKeys.length,
-        tableKey: "api",
-        sortColumns,
-        selection,
-        buildCells: (preset) => {
-          const currentCell = createCurrentIndicatorCell(preset.active, {
-            testResult: state.apiPresetTestResults.get(preset.id) || null,
-            testKind: "api",
-            testing: state.apiPresetsTesting.has(preset.id),
-          });
-          currentCell.classList.add("api-preset-status-cell");
-          const nameCell = createPresetNameCell(preset.name);
-          nameCell.classList.add("api-preset-name-cell");
-          const baseUrlCell = createTextCell(preset.base_url, "mono-text");
-          baseUrlCell.classList.add("api-preset-base-url-cell");
-          baseUrlCell.dataset.presetColumn = "base_url";
-          const managementUrlCell = createExternalUrlCell(preset.management_url);
-          const wireApiCell = createTextCell(preset.wire_api || "responses", "mono-text");
-
-          const responsesProxyCell = createTextCell(
-            formatApiResponsesProxyMode(preset.responses_proxy),
-            "mono-text",
-          );
-          if (preset.provider_base_url) {
-            responsesProxyCell.title = `Provider Base URL: ${preset.provider_base_url}`;
-          }
-          const isChatgptOauth = preset.access_mode === "chatgpt_oauth";
-          const applyProxyCell = createTextCell(
-            isChatgptOauth
-              ? "OAuth 代理"
-              : preset.apply_upstream_proxy_on_switch ? "是" : "否",
-            "mono-text",
-          );
-
-          const keyCell = createTextCell(
-            isChatgptOauth
-              ? `OAuth Token ${preset.masked_access_token || "已保存"}`
-              : preset.masked_api_key,
-            "mono-text",
-          );
-          if (isChatgptOauth && preset.account_id) {
-            keyCell.title = `ChatGPT Account ID: ${preset.account_id}`;
-          }
-          const terminalEnvCell = createTextCell(
-            formatTerminalStartupEnvVars(preset.terminal_env) || "无",
-            "mono-text",
-          );
-          const terminalScriptCell = createTextCell(
-            preset.terminal_startup_script ? "已设置" : "无",
-            "mono-text",
-          );
-          if (preset.terminal_startup_script) {
-            terminalScriptCell.title = preset.terminal_startup_script;
-          }
-          const switchCountCell = createTextCell(String(preset.switch_count || 0), "mono-text");
-
-          const configValues = buildPresetConfigValueMap(preset);
-          const configCells = buildPresetConfigCells(configKeys, configValues);
-          configCells.forEach((cell, index) => {
-            cell.dataset.presetColumn = `config:${configKeys[index]}`;
-          });
-          const timeCell = createTextCell(formatDateTime(preset.saved_at));
-          const actionCell = createActionCell(
-            [
-              createActionButton(
-                "切换",
-                () => applyApiPreset(preset.id),
-                "mini-button accent",
-              ),
-              createPresetActionMenu(apiPresetRowActions(preset), {
-                label: `${preset.name || "当前预设"} 的更多操作`,
-              }),
-            ],
-            "auth-action-cell api-preset-operation-cell",
-            "actions preset-actions api-preset-consolidated-actions",
-          );
-
-          return [
-            actionCell,
-            currentCell,
-            nameCell,
-            baseUrlCell,
-            wireApiCell,
-            responsesProxyCell,
-            applyProxyCell,
-            managementUrlCell,
-            keyCell,
-            terminalEnvCell,
-            terminalScriptCell,
-            switchCountCell,
-            ...configCells,
-            timeCell,
-          ];
-        },
-      });
-      renderApiPresetMobileList(visiblePresets, configKeys);
-
       if (apiModelPresetsEl) {
         const seen = new Set();
         const models = [];
@@ -899,11 +622,7 @@
 
       const requestRevision = apiPresetMutationRevision;
       state.apiPresetsLoading = true;
-      setInlineStatus(apiManagerStatusEl, "", "info", true);
-      if (apiTestAllPresetsButton) {
-        apiTestAllPresetsButton.disabled = true;
-      }
-
+      setInlineStatus(apiFormStatusEl, "", "info", true);
       try {
         const response = await requestJson("/api/auth/api-presets");
         if (requestRevision !== apiPresetMutationRevision) {
@@ -927,24 +646,17 @@
         renderApiPresets(response.presets);
         refreshBaseUrlPresetOptions();
         refreshConfigOverrideDatalists();
-        if (apiTestAllPresetsButton) {
-          apiTestAllPresetsButton.disabled = response.presets.length === 0;
-        }
-        setInlineStatus(apiManagerStatusEl, "", "ok", true);
+        setInlineStatus(apiFormStatusEl, "", "ok", true);
       } catch (error) {
         state.apiPresets = [];
         state.apiPresetsLoaded = false;
-        apiPresetListEl.textContent = "";
         refreshBaseUrlPresetOptions();
         apiCurrentFileEl.textContent = "读取失败";
         apiConfigFileEl.textContent = "读取失败";
         apiCurrentTargetEl.textContent = "读取失败";
         apiPresetFileEl.textContent = "读取失败";
         refreshConfigOverrideDatalists();
-        if (apiTestAllPresetsButton) {
-          apiTestAllPresetsButton.disabled = true;
-        }
-        setInlineStatus(apiManagerStatusEl, error.message, "warn", false);
+        setInlineStatus(apiFormStatusEl, error.message, "warn", false);
       } finally {
         state.apiPresetsLoading = false;
         if (apiPresetReloadPending) {
@@ -967,12 +679,41 @@
       const editingPreset = state.apiPresets.find((preset) => preset.id === presetId);
       const canDuplicate = Boolean(presetId)
         && editingPreset?.access_mode !== "chatgpt_oauth";
-      apiSavePresetButton.textContent = presetId ? "编辑" : "新增";
+      if (apiPresetEditorModeLabelEl) {
+        apiPresetEditorModeLabelEl.textContent = presetId ? "编辑预设" : "新增预设";
+      }
+      apiSavePresetButton.textContent = "保存";
       apiSaveAsNewPresetButton.disabled = !canDuplicate;
       apiSaveAsNewPresetButton.hidden = !canDuplicate;
-      apiSaveAsNewPresetButton.textContent = "新增";
+      apiSaveAsNewPresetButton.textContent = "另存为副本";
       apiApplyEditedPresetButton.disabled = !presetId;
       apiClearInputButton.textContent = presetId ? "取消编辑" : "清空";
+    }
+
+    function captureApiPresetFormSnapshot() {
+      return JSON.stringify({
+        name: apiPresetNameEl.value,
+        apiKey: apiKeyInputEl.value,
+        baseUrl: apiBaseUrlInputEl.value,
+        wireApi: apiWireApiInputEl?.value,
+        responsesProxy: apiResponsesProxyInputEl?.value,
+        managementUrl: apiManagementUrlInputEl.value,
+        managementUrlSameAsBase: Boolean(apiManagementUrlSameAsBaseInputEl?.checked),
+        model: apiModelInputEl?.value,
+        applyProxy: Boolean(apiApplyUpstreamProxyOnSwitchInputEl?.checked),
+        terminalEnv: apiTerminalEnvInputEl?.value,
+        terminalStartupScript: apiTerminalStartupScriptInputEl.value,
+        configOverrides: collectConfigOverrideEditorValues(apiConfigOverrideControls),
+      });
+    }
+
+    function hasApiPresetUnsavedChanges() {
+      return Boolean(apiPresetFormSnapshot && captureApiPresetFormSnapshot() !== apiPresetFormSnapshot);
+    }
+
+    function confirmDiscardApiPresetChanges() {
+      if (!hasApiPresetUnsavedChanges()) return true;
+      return window.confirm("当前 API 预设编辑内容尚未保存。\n\n确定要放弃这些修改吗？");
     }
 
     function showApiPresetEditor({ focus = false } = {}) {
@@ -1079,9 +820,11 @@
         hideApiPresetEditor();
       }
       updateStatus(apiFormStatusEl, message || API_FORM_DEFAULT_STATUS, tone);
+      apiPresetFormSnapshot = null;
     }
 
     function startNewApiPreset() {
+      if (!confirmDiscardApiPresetChanges()) return;
       resetApiPresetForm("正在新增 API 预设。", "info", { hideEditor: false });
       if (apiPresetRowNumberEl) {
         const nextRowNumber = apiPresetVisibleOrder().length + 1;
@@ -1089,13 +832,19 @@
         apiPresetRowNumberEl.max = String(nextRowNumber);
         apiPresetRowNumberEl.disabled = false;
       }
+      apiPresetFormSnapshot = captureApiPresetFormSnapshot();
       showApiPresetEditor({ focus: true });
     }
 
     function editApiPreset(presetId) {
+      if (state.editingApiPresetId === presetId && apiPresetEditorPanelEl && !apiPresetEditorPanelEl.hidden) {
+        showApiPresetEditor({ focus: true });
+        return;
+      }
+      if (!confirmDiscardApiPresetChanges()) return;
       const preset = state.apiPresets.find((item) => item.id === presetId);
       if (!preset) {
-        updateStatus(apiManagerStatusEl, "找不到要编辑的 API 预设。", "warn");
+        updateStatus(apiFormStatusEl, "找不到要编辑的 API 预设。", "warn");
         return;
       }
 
@@ -1149,6 +898,7 @@
       state.apiApplyProxyManuallyChanged = true;
       syncApiApplyProxyRecommendation();
       setApiPresetEditingState(preset.id);
+      apiPresetFormSnapshot = captureApiPresetFormSnapshot();
       showApiPresetEditor({ focus: true });
       updateStatus(
         apiFormStatusEl,
@@ -1209,12 +959,6 @@
           Math.trunc(Number(apiPresetRowNumberEl.value) || 1),
         ))
         : null;
-      if (isEditing && !confirmEditedPresetOverwrite({
-        presetKind: "API 预设",
-        presetName: editingPreset?.name || name,
-      })) {
-        return;
-      }
       if (isEditing && !confirmApiApplyProxyRecommendationBeforeSave()) {
         return;
       }
@@ -1230,14 +974,6 @@
       apiClearInputButton.disabled = true;
 
       try {
-        if (isEditing && targetRowNumber) {
-          try {
-            await moveApiPresetToRowNumber(editingPresetId, targetRowNumber);
-          } catch (error) {
-            updateStatus(apiFormStatusEl, `保存行号失败：${error.message}`, "warn");
-            return;
-          }
-        }
         const response = await requestJson(
           isEditing
             ? `/api/auth/api-presets/${encodeURIComponent(editingPresetId)}`
@@ -1276,6 +1012,19 @@
           } else {
             state.apiPresets = [...state.apiPresets, response.preset];
           }
+          if (isEditing && targetRowNumber) {
+            try {
+              await moveApiPresetToRowNumber(response.preset.id, targetRowNumber);
+            } catch (error) {
+              await loadApiPresets();
+              updateStatus(
+                apiFormStatusEl,
+                `已更新预设：${response.preset.name}；但保存行号失败：${error.message}`,
+                "warn",
+              );
+              return;
+            }
+          }
           renderApiPresets(state.apiPresets);
           refreshBaseUrlPresetOptions();
           refreshConfigOverrideDatalists();
@@ -1303,6 +1052,8 @@
           "ok",
         );
         await loadApiPresets();
+        await window.loadCodexAccounts?.();
+        apiPresetFormSnapshot = null;
       } catch (error) {
         updateStatus(apiFormStatusEl, error.message, "warn");
       } finally {
@@ -1316,7 +1067,7 @@
 
     async function applyApiPreset(
       presetId,
-      statusElement = apiManagerStatusEl,
+      statusElement = apiFormStatusEl,
       { respectSavedProxyPreference = true } = {},
     ) {
       updateStatus(statusElement, "正在切换 API 预设并校正 config.toml…", "info");
@@ -1342,7 +1093,7 @@
         if (response.deferred) {
           updateStatus(
             statusElement,
-            `已登记 API 预设切换：${response.name}。当前指定 Agent 退出并恢复原配置后，将实际写入该预设。`,
+            `API 预设未被立即写入：${response.name}。已停止后续启动，请重试。`,
             "info",
           );
           await refreshAuthPanels();
@@ -1351,7 +1102,10 @@
         const note = response.local_config_file
           ? `（已同步项目本地配置：${response.local_config_file}）`
           : "";
-        updateStatus(statusElement, `已应用 API 预设：${response.name}${note}`, "ok");
+        const daemonNote = response.codex_daemon_restarted
+          ? "（已重启 Codex 后台守护进程使切换生效）"
+          : "";
+        updateStatus(statusElement, `已应用 API 预设：${response.name}${note}${daemonNote}`, "ok");
         await refreshAuthPanels();
         return true;
       } catch (error) {
@@ -1360,15 +1114,101 @@
       }
     }
 
-    async function applyApiPresetAndLaunch(presetId) {
-      const targetPreset = state.apiPresets.find((item) => item.id === presetId);
-      if (!targetPreset) {
-        updateStatus(apiManagerStatusEl, "找不到要切换的 API 预设。", "warn");
+    function cancelApiPresetEdit() {
+      if (!confirmDiscardApiPresetChanges()) return false;
+      resetApiPresetForm(state.editingApiPresetId ? "已取消编辑。" : "输入内容已清空。", "muted");
+      return true;
+    }
+
+    async function toggleApiPresetFavorite(presetId) {
+      const preset = state.apiPresets.find((item) => item.id === presetId);
+      if (!preset) {
+        setInlineStatus(apiFormStatusEl, "找不到要收藏的 API 预设。", "warn");
+        return;
+      }
+      try {
+        const response = await requestJson(
+          `/api/auth/api-presets/${encodeURIComponent(presetId)}/favorite`,
+          { method: "PUT" },
+        );
+        if (response?.preset?.id) {
+          const nextPresets = state.apiPresets.map((item) => (
+            item.id === response.preset.id ? response.preset : item
+          ));
+          state.apiPresets = nextPresets;
+          state.presetTableSort?.delete?.("api");
+          renderApiPresets(state.apiPresets);
+          refreshBaseUrlPresetOptions();
+          setInlineStatus(
+                  `${response.preset.favorite ? "已收藏" : "已取消收藏"}：${response.preset.name}`,
+            "success",
+          );
+        }
+      } catch (error) {
+        setInlineStatus(apiFormStatusEl, error.message, "warn");
+      }
+    }
+
+    async function renameApiPreset(presetId, nextName) {
+      const preset = state.apiPresets.find((item) => item.id === presetId);
+      if (!preset) {
+        updateStatus(apiFormStatusEl, "找不到要改名的 API 预设。", "warn");
+        return;
+      }
+      if (state.editingApiPresetId === presetId && hasApiPresetUnsavedChanges()) {
+        updateStatus(apiFormStatusEl, "请先保存或取消当前预设的未保存编辑。", "warn");
         return;
       }
 
-      updateStatus(apiManagerStatusEl, `正在切换到 ${targetPreset.name} 并启动 Codex…`, "info");
-      const applied = await applyApiPreset(presetId, apiManagerStatusEl);
+      updateStatus(apiFormStatusEl, `正在重命名 API 预设：${preset.name}…`, "info");
+      try {
+        const response = await requestJson(
+          `/api/auth/api-presets/${encodeURIComponent(presetId)}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: nextName,
+              provider_name: preset.provider_name || nextName,
+              api_key: preset.api_key,
+              access_mode: preset.access_mode || null,
+              base_url: preset.base_url,
+              wire_api: preset.wire_api || "responses",
+              responses_proxy: preset.responses_proxy || "direct",
+              management_url: preset.management_url || null,
+              management_url_same_as_base: !preset.management_url || preset.management_url === preset.base_url,
+              apply_upstream_proxy_on_switch: preset.apply_upstream_proxy_on_switch,
+              terminal_env: preset.terminal_env || [],
+              terminal_startup_script: preset.terminal_startup_script || "",
+              config_overrides: preset.config_overrides || [],
+            }),
+          },
+        );
+        if (response?.preset?.id) {
+          const nextPresets = state.apiPresets.map((item) => (
+            item.id === response.preset.id ? response.preset : item
+          ));
+          state.apiPresets = nextPresets;
+          renderApiPresets(state.apiPresets);
+          refreshBaseUrlPresetOptions();
+          refreshConfigOverrideDatalists();
+        }
+        updateStatus(apiFormStatusEl, `已重命名预设：${response.preset.name}`, "ok");
+      } catch (error) {
+        renderApiPresets(state.apiPresets);
+        updateStatus(apiFormStatusEl, error.message, "warn");
+      }
+    }
+
+    async function applyApiPresetAndLaunch(presetId) {
+      const targetPreset = state.apiPresets.find((item) => item.id === presetId);
+      if (!targetPreset) {
+        updateStatus(apiFormStatusEl, "找不到要切换的 API 预设。", "warn");
+        return;
+      }
+
+      updateStatus(apiFormStatusEl, `正在切换到 ${targetPreset.name} 并启动 Codex…`, "info");
+      const applied = await applyApiPreset(presetId, apiFormStatusEl);
       if (!applied) {
         return;
       }
@@ -1388,7 +1228,7 @@
         sessionId = session.id || "";
         sessionPath = session.path || currentDir;
       } catch (error) {
-        updateStatus(apiManagerStatusEl, `创建终端失败：${error.message}`, "warn");
+        updateStatus(apiFormStatusEl, `创建终端失败：${error.message}`, "warn");
         return;
       }
 
@@ -1414,9 +1254,11 @@
       await applyApiPreset(state.editingApiPresetId, apiFormStatusEl);
     }
 
-    async function testApiPreset(presetId, presetName) {
+    async function testApiPreset(presetId, presetName, statusElement = apiFormStatusEl) {
+      if (state.apiPresetsTesting.has(presetId)) return;
       state.apiPresetsTesting.add(presetId);
       presetTestPopup.hide();
+      updateStatus(statusElement, `正在测试 API 预设“${presetName || presetId}”…`, "info");
       renderApiPresets(state.apiPresets);
       try {
         const response = await requestJson(`/api/auth/api-presets/${encodeURIComponent(presetId)}/test`, {
@@ -1427,10 +1269,18 @@
           fallbackName: presetName,
         });
         state.apiPresetTestResults.set(presetId, result);
+        updateStatus(
+          statusElement,
+          `API 预设“${result.name || presetName || presetId}”测试${result.ok ? "通过" : "失败"}。`,
+          result.ok ? "ok" : "warn",
+        );
       } catch (error) {
-        state.apiPresetTestResults.set(
-          presetId,
-          errorTestResult(error, { presetId, fallbackName: presetName }),
+        const result = errorTestResult(error, { presetId, fallbackName: presetName });
+        state.apiPresetTestResults.set(presetId, result);
+        updateStatus(
+          statusElement,
+          `API 预设“${presetName || presetId}”测试请求失败：${error.message}`,
+          "warn",
         );
       } finally {
         state.apiPresetsTesting.delete(presetId);
@@ -1441,12 +1291,11 @@
 
     async function testAllApiPresets() {
       if (!state.apiPresets.length) {
-        updateStatus(apiManagerStatusEl, "没有可测试的 API 预设。", "warn");
+        updateStatus(apiFormStatusEl, "没有可测试的 API 预设。", "warn");
         return;
       }
 
       state.apiPresets.forEach((preset) => state.apiPresetsTesting.add(preset.id));
-      setButtonBusy(apiTestAllPresetsButton, true, "测试中…");
       presetTestPopup.hide();
       renderApiPresets(state.apiPresets);
       try {
@@ -1467,12 +1316,8 @@
         });
       } finally {
         state.apiPresetsTesting.clear();
-        setButtonBusy(apiTestAllPresetsButton, false);
         presetTestPopup.hide();
         renderApiPresets(state.apiPresets);
-        if (apiTestAllPresetsButton) {
-          apiTestAllPresetsButton.disabled = state.apiPresets.length === 0;
-        }
       }
     }
 
@@ -1481,7 +1326,7 @@
         return;
       }
 
-      updateStatus(apiManagerStatusEl, "正在删除 API 预设…", "info");
+      updateStatus(apiFormStatusEl, "正在删除 API 预设…", "info");
 
       try {
         await requestJson(`/api/auth/api-presets/${encodeURIComponent(presetId)}`, {
@@ -1490,125 +1335,27 @@
         if (state.editingApiPresetId === presetId) {
           resetApiPresetForm("正在编辑的 API 预设已删除。", "warn");
         }
-        updateStatus(apiManagerStatusEl, `已删除预设：${presetName}`, "ok");
+        updateStatus(apiFormStatusEl, `已删除预设：${presetName}`, "ok");
         await loadApiPresets();
       } catch (error) {
-        updateStatus(apiManagerStatusEl, error.message, "warn");
+        updateStatus(apiFormStatusEl, error.message, "warn");
       }
-    }
-
-    async function importApiAccountsFromText(rawText) {
-      const trimmedText = (rawText || "").trim();
-      if (!trimmedText) {
-        if (apiAccountImportStatusEl) {
-          updateStatus(apiAccountImportStatusEl, "先粘贴账号 JSON。", "warn");
-        }
-        return false;
-      }
-
-      if (apiAccountImportSubmitButton) apiAccountImportSubmitButton.disabled = true;
-      if (apiAccountImportTextButton) apiAccountImportTextButton.disabled = true;
-
-      try {
-        const result = await importAuthAccounts(trimmedText);
-        if (typeof refreshAuthPanels === "function") {
-          await refreshAuthPanels();
-        }
-        const statusEl = apiAccountImportStatusEl || apiFormStatusEl;
-        updateStatus(
-          statusEl,
-          result.saved_count > 1
-            ? `已导入 ${result.saved_count} 个 API 预设。`
-            : `已导入预设：${result.saved_names[0] || result.saved_count}。`,
-          "ok",
-        );
-        if (apiAccountImportDialogEl && apiAccountImportDialogEl.open) {
-          apiAccountImportDialogEl.close();
-        }
-        return true;
-      } catch (error) {
-        const statusEl = apiAccountImportStatusEl || apiFormStatusEl;
-        updateStatus(statusEl, error.message, "warn");
-        return false;
-      } finally {
-        if (apiAccountImportSubmitButton) apiAccountImportSubmitButton.disabled = false;
-        if (apiAccountImportTextButton) apiAccountImportTextButton.disabled = false;
-      }
-    }
-
-    async function importApiAccountsFromFiles(sourceFiles) {
-      const files = Array.from(sourceFiles || []).filter(Boolean);
-      if (!files.length) {
-        return false;
-      }
-      for (const sourceFile of files) {
-        const fileName = typeof sourceFile?.name === "string" ? sourceFile.name.toLowerCase() : "";
-        if (!/\.(json|zip|tar|tar\.gz|tgz|gz)$/.test(fileName)) {
-          const statusEl = apiManagerStatusEl || apiAccountImportStatusEl || apiFormStatusEl;
-          updateStatus(statusEl, "请选择 JSON、ZIP、TAR、TAR.GZ、TGZ 或 GZ 文件。", "warn");
-          return false;
-        }
-      }
-      const totalSize = files.reduce(
-        (sum, sourceFile) => sum + (Number.isFinite(sourceFile?.size) ? sourceFile.size : 0),
-        0,
-      );
-      if (totalSize > 32 * 1024 * 1024) {
-        const statusEl = apiManagerStatusEl || apiAccountImportStatusEl || apiFormStatusEl;
-        updateStatus(statusEl, "导入文件总大小不能超过 32 MiB。", "warn");
-        return false;
-      }
-
-      if (apiAccountImportFileButton) apiAccountImportFileButton.disabled = true;
-      const statusEl = apiManagerStatusEl || apiAccountImportStatusEl || apiFormStatusEl;
-      updateStatus(
-        statusEl,
-        files.length > 1 ? `正在导入 ${files.length} 个账号文件…` : `正在导入 ${files[0].name || "账号文件"}…`,
-        "info",
-      );
-
-      try {
-        const result = await importAuthAccountFiles(files);
-        if (typeof refreshAuthPanels === "function") {
-          await refreshAuthPanels();
-        }
-        const errorCount = Array.isArray(result.errors) ? result.errors.length : 0;
-        const message = result.saved_count > 1
-          ? `已导入 ${result.saved_count} 个 API 预设。`
-          : `已导入预设：${result.saved_names?.[0] || result.saved_count}。`;
-        updateStatus(
-          statusEl,
-          errorCount ? `${message} ${errorCount} 个文件未导入。` : message,
-          errorCount ? "warn" : "ok",
-        );
-        return true;
-      } catch (error) {
-        updateStatus(statusEl, error.message || "导入文件失败。", "warn");
-        return false;
-      } finally {
-        if (apiAccountImportFileButton) apiAccountImportFileButton.disabled = false;
-      }
-    }
-
-    async function importApiAccountsFromFile(sourceFile) {
-      return importApiAccountsFromFiles(sourceFile ? [sourceFile] : []);
     }
 
     initializeApiPresetGroupMode();
-    initializeApiPresetListControls();
 
     return {
       applyApiPreset,
       applyApiPresetAndLaunch,
       applyEditingApiPreset,
+      cancelApiPresetEdit,
       deleteApiPreset,
       editApiPreset,
       ensureApiPresetsLoaded,
-      importApiAccountsFromText,
-      importApiAccountsFromFile,
-      importApiAccountsFromFiles,
       loadApiPresets,
       renderApiPresets,
+      renameApiPreset,
+      toggleApiPresetFavorite,
       resetApiPresetForm,
       saveApiPreset,
       saveApiPresetAsNew,

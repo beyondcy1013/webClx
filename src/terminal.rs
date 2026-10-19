@@ -1,14 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
-    io::{BufRead, BufReader},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::Command,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -21,20 +20,15 @@ use auth_core::{
 use axum::{
     Json,
     body::Body,
-    extract::{
-        ConnectInfo, Multipart, Path as AxumPath, Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
-    http::{HeaderMap, header},
+    extract::{ConnectInfo, Multipart, Path as AxumPath, Query, State, ws::WebSocketUpgrade},
+    http::{HeaderMap, StatusCode, header},
     response::Response,
 };
-use futures_util::{Sink, SinkExt, StreamExt};
-use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use settings_core::TerminalQuickCommand;
 use terminal_core::*;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tracing::{info, warn};
 
 use crate::{ApiResult, AppError, AppState, filesystem, runtime_paths};
@@ -42,16 +36,28 @@ use crate::{ApiResult, AppError, AppState, filesystem, runtime_paths};
 mod activity;
 mod agent_session;
 mod codex_status;
+mod conversations;
+#[cfg(test)]
+use conversations::{
+    CodexConversationMetadata, codex_conversation_metadata, scan_codex_conversations,
+    scan_codex_conversations_for_cwd,
+};
+use conversations::{
+    delete_codex_conversation_files, scan_codex_conversations_for_cwd_since,
+    validated_codex_session_id,
+};
 mod docs;
 mod manager;
 mod session;
 mod tmux;
+mod websocket;
+use websocket::handle_socket_connect;
+#[cfg(test)]
+use websocket::{initial_replay_for_socket, is_mouse_only_input};
 
 pub use docs::{list_session_agents_docs, read_session_agents_doc, save_session_agents_doc};
 use manager::clamp_input_history_entries;
-use session::{TerminalOutputChunk, TerminalSession};
-#[cfg(not(windows))]
-use tmux::capture_tmux_initial_pane_snapshot;
+use session::TerminalSession;
 
 #[cfg(test)]
 use manager::{
@@ -63,21 +69,33 @@ use manager::{
 const DEFAULT_COLS: u16 = 120;
 const DEFAULT_ROWS: u16 = 32;
 const MAX_BACKLOG_BYTES: usize = 32 * 1024 * 1024;
-const MAX_INITIAL_BACKLOG_BYTES: usize = 1024 * 1024;
+/// 首屏回放（含 attach 深度快照种子）的最大字节数。超过时保留尾部，
+/// 保证回放流仍从某一字节边界连续延伸到当前输出。
+const MAX_INITIAL_REPLAY_BYTES: usize = 8 * 1024 * 1024;
 const SESSION_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// attach 时写入 backlog 前缀种子的 tmux 抓取行数，启动时取自设置
+/// `terminal_scrollback_lines`。它决定重连/刷新页面后可回看的终端历史深度；
+/// tmux 侧 history-limit 为 100000，取值范围与设置归一化一致。
+static TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT: AtomicU32 = AtomicU32::new(5_000);
+
+pub(crate) fn set_terminal_initial_snapshot_line_limit(value: u32) {
+    let clamped = value.clamp(100, 100_000);
+    TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT.store(clamped, Ordering::SeqCst);
+}
 const INITIAL_TMUX_REDRAW_SUPPRESS_MS: u64 = 160;
 const TERMINAL_RECENT_OUTPUT_ACTIVE_MS: u64 = 15_000;
 const MAX_TERMINAL_INPUT_HISTORY_ENTRIES: usize = 500;
 const MAX_TERMINAL_INPUT_HISTORY_LINE_BYTES: usize = 16 * 1024;
-const MAX_CODEX_CONVERSATION_SCAN_LINES: usize = 512;
-const MAX_CODEX_CONVERSATION_TITLE_MESSAGES: usize = 8;
-const MAX_CODEX_CONVERSATION_TITLE_CHARS: usize = 2048;
 const PASTE_ASSET_DIR_NAME: &str = ".webclx-paste";
 const SHUTDOWN_CTRL_C_DELAY_MS: u64 = 120;
 const SHUTDOWN_CTRL_C_CLAUDE_TOTAL_COUNT: usize = 3;
 const TERMINAL_MESSAGE_VERIFY_POLL_MS: u64 = 100;
-const TERMINAL_MESSAGE_VERIFY_POLLS: usize = 20;
+const TERMINAL_MESSAGE_VERIFY_POLLS: usize = 60;
 const TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS: [u64; 3] = [1_000, 2_000, 4_000];
+const TERMINAL_MESSAGE_DEDUP_TTL_SECS: u64 = 600;
+const TERMINAL_MESSAGE_SEND_TIMEOUT_SECS: u64 = 10;
+const TERMINAL_AUTO_TYPED_ENTER_DELAY_MS: u64 = 120;
 const TERMINAL_DELETE_CONFIRM_HEADER: &str = "x-webclx-confirm-session";
 const TERMINAL_DELETE_SOURCE_HEADER: &str = "x-webclx-delete-source";
 const TERMINAL_DELETE_AUDIT_HEADER_MAX_CHARS: usize = 256;
@@ -87,38 +105,14 @@ const TERMINAL_SCHEDULED_INPUT_FILE_NAME: &str = ".webclx-terminal-scheduled-inp
 const TERMINAL_AUTO_CONTINUE_SCHEDULE_FILE_NAME: &str =
     ".webclx-terminal-auto-continue-schedules.json";
 const TERMINAL_PENDING_BUILD_FILE_NAME: &str = ".webclx-terminal-pending-builds.json";
+const TERMINAL_MESSAGE_DELIVERY_LEDGER_FILE_NAME: &str = "terminal-message-deliveries.json";
 const TERMINAL_PENDING_BUILD_MAX_AGE_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_SCHEDULED_INPUT_BYTES: usize = 512 * 1024;
+const MIN_TERMINAL_SCHEDULED_REPEAT_INTERVAL_MILLIS: u64 = 1_000;
+const MAX_TERMINAL_SCHEDULED_REPEAT_INTERVAL_MILLIS: u64 = 9_007_199_254_740_991;
 const COMPLETION_BELL_SAMPLE_RATE: u32 = 22_050;
 const COMPLETION_BELL_DURATION_MS: u32 = 420;
 const CHILD_PROCESS_ENV_KEYS_TO_CLEAR: [&str; 25] = [
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "DYLD_LIBRARY_PATH",
-    "DYLD_FALLBACK_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "LIBRARY_PATH",
-    "HOME",
-    "WEBCLX_USER_HOME",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-    auth_core::WEBCLX_LOCAL_API_TOKEN_ENV,
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_SMALL_FAST_MODEL",
-];
-const TERMINAL_SESSION_ENV_KEYS_TO_CLEAR: [&str; 25] = [
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "DYLD_LIBRARY_PATH",
@@ -149,19 +143,25 @@ const TERMINAL_SESSION_ENV_KEYS_TO_CLEAR: [&str; 25] = [
 pub struct TerminalManager {
     state: Arc<RwLock<TerminalState>>,
     state_file: Arc<PathBuf>,
+    registry_write_lock: Arc<Mutex<()>>,
+    /// Serializes workspace-restore registry read/modify/write transactions.
+    workspace_restore_write_lock: Arc<Mutex<()>>,
+    /// (worker running, dirty); bounds input persistence to one background worker.
+    input_persist_work: Arc<Mutex<(bool, bool)>>,
     archive_file: Arc<PathBuf>,
     scheduled_input_file: Arc<PathBuf>,
     auto_continue_file: Arc<PathBuf>,
     pending_build_file: Arc<PathBuf>,
     shutdown_restore_file: Arc<PathBuf>,
+    workspace_restore_file: Arc<PathBuf>,
     env_snapshot: Arc<TerminalEnvironmentSnapshot>,
     next_id: Arc<AtomicU64>,
     event_sender: broadcast::Sender<TerminalManagerEvent>,
     auto_continue_schedules: Arc<Mutex<HashMap<String, TerminalAutoContinueTask>>>,
     auto_continue_notify: Arc<tokio::sync::Notify>,
-    canceled_auto_continue_signatures: Arc<Mutex<HashSet<String>>>,
-    error_auto_continue_records: Arc<Mutex<HashMap<String, TerminalErrorAutoContinueRecord>>>,
-    auto_continue_last_sent_at: Arc<Mutex<HashMap<String, u64>>>,
+    /// 每会话运行时状态（错误恢复记录、compact 标记、冷却时间戳、取消签名、
+    /// 启动/发送串行锁）合并为一个对象，随会话生命周期整体存取与清理。
+    per_session_runtime: Arc<Mutex<HashMap<String, SessionRuntimeState>>>,
     pending_build_requests: Arc<Mutex<HashMap<String, TerminalPendingBuildRequest>>>,
     auto_continue_interval_seconds: Arc<AtomicU64>,
     auto_continue_backoff_factor: Arc<AtomicU64>,
@@ -173,11 +173,63 @@ pub struct TerminalManager {
     scheduled_input_notify: Arc<tokio::sync::Notify>,
     activity_probe_cache: Arc<Mutex<manager::TerminalActivityProbeCache>>,
     activity_probe_scan_lock: Arc<Mutex<()>>,
+    /// 每会话活动探测快照复用缓存：live PTY 会话 `last_output_at` 未变时
+    /// 直接复用上次 capture-pane 快照，跳过昂贵的 tmux 子进程；匹配结果
+    /// 仍每轮基于缓存快照重算，设置变更即时生效。
+    probe_snapshot_cache: Arc<Mutex<manager::activity_probe::ProbeSnapshotCache>>,
+    /// Service restart keeps tmux-backed sessions available for reconnection.
+    service_restart_pending: Arc<AtomicBool>,
+    /// 持久化的终端消息投递账本：dedup/冲突状态跨重启保留，投递状态可查询。
+    terminal_message_ledger: Arc<Mutex<manager::message_ledger::TerminalMessageLedger>>,
+}
+
+/// 单个终端会话的内存运行时状态：原先分散在多张 per-session map 中的
+/// 错误恢复记录、compact 一次性标记、冷却时间戳、取消签名与生命周期锁
+/// 合并为一个对象，统一随会话存取与清理；会话 id 由外层 map 键承担，
+/// 各字段不再自带 `"{session}:"` 前缀。
+#[derive(Default)]
+struct SessionRuntimeState {
+    /// 当前错误自动继续记录（每会话至多一条）。
+    error_auto_continue: Option<TerminalErrorAutoContinueRecord>,
+    /// `/compact` 恢复的一次性标记：发送 `/compact` 时终端的错误签名。
+    /// `/compact` 不能因为旧错误仍留在 pane 尾部就重试。
+    auto_compact_signature: Option<String>,
+    /// 上次 continue/compact 发送完成时间（毫秒），驱动冷却与退避。
+    auto_continue_last_sent_at: Option<u64>,
+    /// 已取消的自动继续签名（裸签名；会话 id 由 map 键承担）。
+    canceled_signatures: HashSet<String>,
+    /// 串行化同一会话的 start/delete/restore/cleanup。
+    start_lock: Arc<Mutex<()>>,
+    /// 串行化同一会话的 continue/compact 发送（冷却检查+字节写入+记账）。
+    /// 旧实现由 last_sent map 锁顺带承担全局互斥；合并后的 map 锁不能
+    /// 压过发送——写路径会取 `state` 读锁，与 `state → per_session_runtime`
+    /// 的持锁顺序构成 ABBA——因此互斥下沉为每会话一把锁。
+    send_lock: Arc<Mutex<()>>,
+}
+
+impl SessionRuntimeState {
+    /// 除锁以外的业务字段是否已全部清空。
+    fn runtime_fields_cleared(&self) -> bool {
+        self.error_auto_continue.is_none()
+            && self.auto_compact_signature.is_none()
+            && self.auto_continue_last_sent_at.is_none()
+            && self.canceled_signatures.is_empty()
+    }
+
+    /// 条目可安全移除：业务字段为空，且两把锁都只剩 map 这一份引用
+    /// （没有等待中的 start/delete 或进行中的发送持有克隆）。
+    /// 只能在持有 `per_session_runtime` map 锁时调用。
+    fn prunable(&self) -> bool {
+        self.runtime_fields_cleared()
+            && Arc::strong_count(&self.start_lock) == 1
+            && Arc::strong_count(&self.send_lock) == 1
+    }
 }
 
 #[derive(Default)]
-struct TerminalState {
+pub(crate) struct TerminalState {
     sessions_by_id: HashMap<String, StoredTerminalSession>,
+    previous_terminal_names: HashMap<String, String>,
     sessions_by_path: HashMap<PathBuf, Vec<String>>,
     live_sessions: HashMap<String, Arc<TerminalSession>>,
     output_observations: HashMap<String, TerminalOutputObservation>,
@@ -258,9 +310,8 @@ struct TerminalErrorAutoContinueRecord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TerminalAutoContinueSendOutcome {
     Sent,
-    /// `/compact` was sent followed by "继续" because the context window was
-    /// exhausted. Distinct from `Sent` so the frontend can show a precise
-    /// status message.
+    /// `/compact` was sent because the context window was exhausted. Distinct
+    /// from `Sent` so the frontend can show a precise status message.
     CompactSent,
     Cooldown {
         last_sent_at_millis: u64,
@@ -285,6 +336,11 @@ struct StoredTerminalScheduledInputRegistry {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TerminalScheduledInputTask {
+    /// Empty means queued for backward compatibility. Nonempty tasks never resend.
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    last_error: String,
     id: String,
     session_id: String,
     #[serde(default)]
@@ -300,10 +356,16 @@ struct TerminalScheduledInputTask {
     task_type: String,
     #[serde(default)]
     working_dir: String,
+    #[serde(default)]
+    repeat_interval_millis: u64,
+    #[serde(default)]
+    parent_task_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TerminalScheduledInputTaskInfo {
+    pub(crate) status: String,
+    pub(crate) last_error: String,
     pub(crate) id: String,
     pub(crate) task_id: String,
     pub(crate) session_id: String,
@@ -317,6 +379,8 @@ pub(crate) struct TerminalScheduledInputTaskInfo {
     pub(crate) send_enter: bool,
     pub(crate) task_type: String,
     pub(crate) working_dir: String,
+    pub(crate) repeat_interval_millis: u64,
+    pub(crate) parent_task_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +403,34 @@ enum TerminalManagerEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 struct TerminalBacklogReplayControl<'a> {
     action: &'a str,
+    /// true 表示本次回放是按客户端上报的 seq 水位增量续传缺失 chunk，
+    /// 客户端保留现有终端缓冲区；false 为全量快照回放。
+    delta: bool,
+    /// 会话输出流实例标识：会话对象重建（服务重启、恢复重建）后 seq 重新
+    /// 从 0 计数，客户端必须匹配实例 id 才能安全使用 seq 水位续传。
+    instance: u64,
+}
+
+/// 通知新协议客户端：本连接的每条二进制输出帧带 8 字节大端 seq 前缀。
+/// 旧客户端不会请求 seq_framed，也就永远收不到该控制消息。
+#[derive(Debug, Serialize)]
+#[serde(rename = "terminal_output_framing")]
+#[serde(tag = "type", rename_all = "snake_case")]
+struct TerminalOutputFramingControl {
+    version: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename = "terminal_viewport_size")]
+#[serde(tag = "type", rename_all = "snake_case")]
+struct TerminalViewportSizeControl {
+    cols: u16,
+    rows: u16,
+}
+
+struct TerminalInitialReplay {
+    bytes: Vec<u8>,
+    last_output_seq: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -388,11 +480,25 @@ struct StoredTerminalSession {
     user_name: String,
     name: String,
     #[serde(default)]
+    previous_names: Vec<String>,
+    #[serde(default)]
     title: String,
     #[serde(default)]
     codex_api_preset_name: String,
     #[serde(default)]
     codex_api_base_url: String,
+    #[serde(default)]
+    group_token: String,
+    #[serde(default)]
+    group_color: String,
+    #[serde(default)]
+    group_name: String,
+    #[serde(default)]
+    group_role: String,
+    #[serde(default)]
+    group_order: u64,
+    #[serde(default)]
+    group_fixed_order: bool,
     #[serde(default)]
     origin: TerminalSessionOrigin,
     #[serde(default)]
@@ -401,6 +507,8 @@ struct StoredTerminalSession {
     manually_renamed: bool,
     #[serde(default)]
     idle: bool,
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     created_at: u64,
     #[serde(default)]
@@ -424,13 +532,21 @@ impl StoredTerminalSession {
             path,
             user_name,
             name,
+            previous_names: Vec::new(),
             title: String::new(),
             codex_api_preset_name,
             codex_api_base_url,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
             origin,
             owner_key,
             manually_renamed: false,
             idle: false,
+            hidden: false,
             created_at: timestamp,
             last_opened_at: timestamp,
         }
@@ -447,6 +563,7 @@ impl StoredTerminalSession {
         TerminalSessionInfo {
             id: self.id.clone(),
             name: self.name.clone(),
+            previous_names: self.previous_names.clone(),
             title: self.title(),
             user_name: self.user_name.clone(),
             codex_api_preset_name: self.codex_api_preset_name.clone(),
@@ -454,6 +571,9 @@ impl StoredTerminalSession {
             origin: self.origin,
             owner_key: self.owner_key.clone(),
             path: relative_to_string(&relative),
+            icon_project_path: relative_to_string(&filesystem::workspace_icon_project_path(
+                base_dir, &self.path,
+            )),
             display_path: filesystem::display_path(base_dir, display_root, &self.path),
             alive: true,
             connected,
@@ -461,6 +581,7 @@ impl StoredTerminalSession {
             activity_state: activity.state,
             activity_label: activity.label,
             activity_agent: activity.agent,
+            model_family: activity.model_family,
             activity_error_keyword: activity.error_keyword,
             activity_error_signature: activity.error_signature,
             activity_error_continue_sent: activity.error_continue_sent,
@@ -468,8 +589,15 @@ impl StoredTerminalSession {
             activity_error_auto_continue_at: activity.error_auto_continue_at,
             last_output_at: activity.last_output_at,
             idle: self.idle,
+            hidden: self.hidden,
             created_at: self.created_at,
             last_opened_at: self.last_opened_at,
+            group_token: self.group_token.clone(),
+            group_color: self.group_color.clone(),
+            group_name: self.group_name.clone(),
+            group_role: self.group_role.clone(),
+            group_order: self.group_order,
+            group_fixed_order: self.group_fixed_order,
         }
     }
 
@@ -484,6 +612,8 @@ struct TerminalActivitySnapshot {
     state: String,
     label: String,
     agent: Option<String>,
+    #[allow(dead_code)]
+    model_family: String,
     error_keyword: Option<String>,
     error_signature: Option<String>,
     error_continue_sent: bool,
@@ -499,6 +629,7 @@ impl TerminalActivitySnapshot {
             state: "idle".to_string(),
             label: "空闲".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -514,6 +645,7 @@ impl TerminalActivitySnapshot {
             state: "recent_output".to_string(),
             label: "输出中".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -529,6 +661,7 @@ impl TerminalActivitySnapshot {
             state: "completed".to_string(),
             label: "待查看".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -544,6 +677,7 @@ impl TerminalActivitySnapshot {
             state: "building".to_string(),
             label: "编译中".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -559,6 +693,7 @@ impl TerminalActivitySnapshot {
             state: "working".to_string(),
             label: "工作中".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -581,6 +716,7 @@ impl TerminalActivitySnapshot {
             state: "error".to_string(),
             label: "错误".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: Some(keyword),
             error_signature: Some(signature),
             error_continue_sent: continue_sent,
@@ -601,6 +737,7 @@ impl TerminalActivitySnapshot {
             state: "retrying".to_string(),
             label: "重试中".to_string(),
             agent: None,
+            model_family: String::new(),
             error_keyword: Some(keyword),
             error_signature: Some(signature),
             error_continue_sent: true,
@@ -610,12 +747,29 @@ impl TerminalActivitySnapshot {
         }
     }
 
-    fn agent(label: String, agent: Option<String>, last_output_at: u64) -> Self {
+    fn agent(agent: Option<String>, last_output_at: u64) -> Self {
+        Self {
+            busy: false,
+            state: "agent".to_string(),
+            label: "空闲".to_string(),
+            agent,
+            model_family: String::new(),
+            error_keyword: None,
+            error_signature: None,
+            error_continue_sent: false,
+            error_input_queued: false,
+            error_auto_continue_at: None,
+            last_output_at,
+        }
+    }
+
+    fn orphaned_agent(agent: Option<String>, last_output_at: u64) -> Self {
         Self {
             busy: true,
-            state: "agent".to_string(),
-            label,
+            state: "orphaned_agent".to_string(),
+            label: "Agent 异常".to_string(),
             agent,
+            model_family: String::new(),
             error_keyword: None,
             error_signature: None,
             error_continue_sent: false,
@@ -627,6 +781,11 @@ impl TerminalActivitySnapshot {
 
     fn with_agent(mut self, agent: Option<String>) -> Self {
         self.agent = agent;
+        self
+    }
+
+    fn with_model_family(mut self, model_family: String) -> Self {
+        self.model_family = model_family;
         self
     }
 }
@@ -686,12 +845,18 @@ pub struct ListSessionsQuery {
     path: String,
     #[serde(default)]
     all: bool,
+    #[serde(default)]
+    history: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CodexConversationsQuery {
     #[serde(default)]
     cwd: Option<String>,
+    #[serde(default)]
+    since_ms: Option<u64>,
+    #[serde(default)]
+    recent_days: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -706,8 +871,20 @@ pub struct TerminalSessionQuery {
     path: String,
     #[serde(default)]
     session_id: Option<String>,
-    #[serde(default = "default_true")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_lenient_bool_default_true"
+    )]
     visible: bool,
+    /// 客户端支持 seq 帧协议：二进制输出帧带 8 字节大端 seq 前缀。
+    #[serde(default, deserialize_with = "deserialize_lenient_bool")]
+    seq_framed: bool,
+    /// 客户端已应用到该 output seq，请求增量续传而非全量快照回放。
+    #[serde(default)]
+    resume_seq: Option<u64>,
+    /// 客户端记录的会话输出流实例 id，用于识别会话重建后的 seq 重置。
+    #[serde(default)]
+    resume_instance: Option<u64>,
 }
 
 /// Fields that may be changed on an existing scheduled input task. Any field
@@ -719,6 +896,8 @@ pub(crate) struct ScheduledInputUpdate {
     pub(crate) send_enter: Option<bool>,
     pub(crate) task_type: Option<String>,
     pub(crate) session_id: Option<String>,
+    pub(crate) label: Option<String>,
+    pub(crate) repeat_interval_millis: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -737,6 +916,26 @@ pub struct RenameSessionRequest {
     name: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerminalGroupRoleAssignment {
+    session_id: String,
+    #[serde(default)]
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSessionGroupRequest {
+    member_ids: Vec<String>,
+    #[serde(default)]
+    group_roles: Vec<TerminalGroupRoleAssignment>,
+    #[serde(default)]
+    fixed_order: Option<bool>,
+    #[serde(default)]
+    group_color: Option<String>,
+    #[serde(default)]
+    group_name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateSessionOriginRequest {
     origin: TerminalSessionOrigin,
@@ -747,6 +946,16 @@ pub struct UpdateSessionOriginRequest {
 #[derive(Debug, Deserialize)]
 pub struct TerminalInputRequest {
     data: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TerminalEnterRequest {
+    #[serde(default)]
+    submit_enters: u8,
+    #[serde(default)]
+    verify_submission: bool,
+    #[serde(default)]
+    delivery_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -771,6 +980,8 @@ pub struct TerminalScheduledInputRequest {
     /// "continue". Defaults to "paste".
     #[serde(default)]
     task_type: String,
+    #[serde(default)]
+    repeat_interval_millis: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -785,6 +996,10 @@ pub struct TerminalScheduledInputUpdateRequest {
     task_type: Option<String>,
     #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    repeat_interval_millis: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -841,6 +1056,45 @@ pub struct TerminalMessageRequest {
     delivery_id: String,
     #[serde(default)]
     completed_build_request_id: String,
+    #[serde(default)]
+    group: String,
+    #[serde(default)]
+    group_token: String,
+    #[serde(default)]
+    sender_session_id: String,
+}
+
+#[derive(Debug)]
+pub(crate) struct TerminalMessageDeliveryTarget {
+    session_id: String,
+    terminal_name: String,
+    renamed_target: bool,
+    current_terminal_name: String,
+}
+
+impl TerminalMessageDeliveryTarget {
+    fn deduplicated(session_id: String) -> Self {
+        Self {
+            session_id,
+            terminal_name: String::new(),
+            renamed_target: false,
+            current_terminal_name: String::new(),
+        }
+    }
+
+    fn delivered(
+        session_id: String,
+        requested_terminal_name: String,
+        current_terminal_name: String,
+    ) -> Self {
+        let renamed_target = requested_terminal_name != current_terminal_name;
+        Self {
+            session_id,
+            terminal_name: requested_terminal_name,
+            renamed_target,
+            current_terminal_name,
+        }
+    }
 }
 
 /// Request body for `/api/terminal/auto-typed-input`. Used for commands
@@ -861,11 +1115,57 @@ pub struct TerminalAutoTypedInputRequest {
     #[serde(default)]
     path: String,
     /// Number of trailing Enter keys to send after the command line.
-    /// The prepared string from `build_terminal_quick_command_input`
-    /// already ends in one `\n`, so this is only needed when the
-    /// caller wants extra submits.
+    /// The handler always submits the prepared command with one semantic
+    /// Enter, so this is only needed when the caller wants extra submits.
     #[serde(default)]
     submit_enters: u8,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SpecifiedPresetRunCommand {
+    kind: SpecifiedPresetRunKind,
+    preset_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SpecifiedPresetRunKind {
+    Api,
+    OAuth,
+    Claude,
+}
+
+/// Extract the exact preset selected by a webClx-generated temporary launch.
+///
+/// The command is inspected before model preparation rewrites the inner Codex
+/// command. Only shell-safe lexical tokens are accepted; shell syntax is not
+/// evaluated here.
+fn specified_preset_run_command(command_line: &str) -> Option<SpecifiedPresetRunCommand> {
+    let tokens = shell_words::split(command_line.trim()).ok()?;
+    if tokens.len() < 5 || !is_program_token(&tokens[0], "webclx") || tokens[1] != "run" {
+        return None;
+    }
+    let kind = match tokens[2].as_str() {
+        "api" => SpecifiedPresetRunKind::Api,
+        "oauth" => SpecifiedPresetRunKind::OAuth,
+        "claude" => SpecifiedPresetRunKind::Claude,
+        _ => return None,
+    };
+    let preset_id = tokens[3].trim();
+    let is_safe_preset_id = !preset_id.is_empty()
+        && preset_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'));
+    (is_safe_preset_id && tokens[4] == "--").then(|| SpecifiedPresetRunCommand {
+        kind,
+        preset_id: preset_id.to_string(),
+    })
+}
+
+fn is_program_token(candidate: &str, expected: &str) -> bool {
+    std::path::Path::new(candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(expected))
 }
 
 #[derive(Debug, Serialize)]
@@ -886,6 +1186,9 @@ pub struct TerminalInputHistoryEntry {
 struct TerminalInputHistoryCapture {
     buffer: String,
     entries: Vec<TerminalInputHistoryEntry>,
+    /// 是否正处于 bracketed paste 块内。粘贴块内的换行不切分历史条目，
+    /// 整块在提交 Enter 时作为一条对话历史。
+    paste_active: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -912,6 +1215,8 @@ pub struct TerminalPasteAssetsResponse {
 pub struct TerminalSessionInfo {
     id: String,
     name: String,
+    #[serde(default)]
+    previous_names: Vec<String>,
     title: Option<String>,
     user_name: String,
     codex_api_preset_name: String,
@@ -919,6 +1224,7 @@ pub struct TerminalSessionInfo {
     origin: TerminalSessionOrigin,
     owner_key: String,
     path: String,
+    icon_project_path: String,
     display_path: String,
     alive: bool,
     connected: bool,
@@ -926,6 +1232,8 @@ pub struct TerminalSessionInfo {
     activity_state: String,
     activity_label: String,
     activity_agent: Option<String>,
+    #[serde(default)]
+    model_family: String,
     activity_error_keyword: Option<String>,
     activity_error_signature: Option<String>,
     activity_error_continue_sent: bool,
@@ -933,8 +1241,21 @@ pub struct TerminalSessionInfo {
     activity_error_auto_continue_at: Option<String>,
     last_output_at: u64,
     idle: bool,
+    #[serde(default)]
+    pub hidden: bool,
     created_at: u64,
     last_opened_at: u64,
+    group_token: String,
+    #[serde(default)]
+    group_color: String,
+    #[serde(default)]
+    group_name: String,
+    #[serde(default)]
+    group_role: String,
+    #[serde(default)]
+    group_order: u64,
+    #[serde(default)]
+    group_fixed_order: bool,
 }
 
 impl TerminalSessionInfo {
@@ -1049,6 +1370,123 @@ pub struct CodexResumeArchivesResponse {
 }
 
 pub const TERMINAL_SHUTDOWN_RESTORE_FILE_NAME: &str = ".webclx-terminal-shutdown-restores.json";
+pub const TERMINAL_WORKSPACE_RESTORE_FILE_NAME: &str = ".webclx-terminal-workspace-restores.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalWorkspaceRestoreRecord {
+    pub session_id: String,
+    pub path: PathBuf,
+    pub user_name: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub codex_api_preset_name: String,
+    #[serde(default)]
+    pub codex_api_base_url: String,
+    #[serde(default)]
+    pub origin: TerminalSessionOrigin,
+    #[serde(default)]
+    pub owner_key: String,
+    #[serde(default)]
+    pub manually_renamed: bool,
+    #[serde(default)]
+    pub idle: bool,
+    #[serde(default)]
+    pub created_at: u64,
+    #[serde(default)]
+    pub last_opened_at: u64,
+    #[serde(default)]
+    pub group_token: String,
+    #[serde(default)]
+    pub group_color: String,
+    #[serde(default)]
+    pub group_name: String,
+    #[serde(default)]
+    pub group_role: String,
+    #[serde(default)]
+    pub group_order: u64,
+    #[serde(default)]
+    pub group_fixed_order: bool,
+    #[serde(default)]
+    pub input_history: Vec<TerminalInputHistoryEntry>,
+    #[serde(default)]
+    pub resume_id: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub restore_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TerminalWorkspaceRestoreRegistry {
+    #[serde(default)]
+    pub records: Vec<TerminalWorkspaceRestoreRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalWorkspaceRestoreInfo {
+    pub session_id: String,
+    pub name: String,
+    pub user_name: String,
+    pub path: String,
+    pub display_path: String,
+    pub group_name: String,
+    pub group_role: String,
+    pub group_token: String,
+    pub group_color: String,
+    pub group_order: u64,
+    pub group_fixed_order: bool,
+    pub program: String,
+    pub resume_id: String,
+    pub command: String,
+    pub updated_at: u64,
+    pub created_at: u64,
+    pub restore_count: u32,
+    pub recoverable: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TerminalWorkspaceRestoresResponse {
+    pub records: Vec<TerminalWorkspaceRestoreInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalWorkspaceRestoreFailure {
+    pub session_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalWorkspaceRestoreSkip {
+    pub session_id: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TerminalWorkspaceRestoreResult {
+    pub succeeded: Vec<String>,
+    pub skipped: Vec<TerminalWorkspaceRestoreSkip>,
+    pub failed: Vec<TerminalWorkspaceRestoreFailure>,
+}
+
+impl TerminalWorkspaceRestoreResult {
+    pub fn restored_count(&self) -> usize {
+        self.succeeded.len()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreTerminalWorkspacesRequest {
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalResumeRestoreRecord {
@@ -1074,6 +1512,18 @@ pub struct TerminalResumeRestoreRecord {
     pub created_at: u64,
     #[serde(default)]
     pub last_opened_at: u64,
+    #[serde(default)]
+    pub group_token: String,
+    #[serde(default)]
+    pub group_color: String,
+    #[serde(default)]
+    pub group_name: String,
+    #[serde(default)]
+    pub group_role: String,
+    #[serde(default)]
+    pub group_order: u64,
+    #[serde(default)]
+    pub group_fixed_order: bool,
     #[serde(default)]
     pub input_history: Vec<TerminalInputHistoryEntry>,
     pub resume_id: String,
@@ -1105,6 +1555,12 @@ impl Default for TerminalResumeRestoreRecord {
             idle: false,
             created_at: 0,
             last_opened_at: 0,
+            group_token: String::new(),
+            group_color: String::new(),
+            group_name: String::new(),
+            group_role: String::new(),
+            group_order: 0,
+            group_fixed_order: false,
             input_history: Vec::new(),
             resume_id: String::new(),
             command: String::new(),
@@ -1173,7 +1629,7 @@ pub fn sort_terminal_shutdown_restore_records(records: &mut [TerminalResumeResto
     });
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CodexConversationInfo {
     session_id: String,
     cwd: String,
@@ -1200,12 +1656,29 @@ pub struct DeleteCodexConversationResponse {
     resume_archive_deleted: bool,
 }
 
+impl DeleteCodexConversationResponse {
+    fn total_deleted(&self) -> usize {
+        self.rollout_files_deleted
+            + self.session_index_entries_deleted
+            + self.history_entries_deleted
+            + self.database_threads_deleted
+            + usize::from(self.resume_archive_deleted)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct CurrentAgentSessionResponse {
     resume_id: Option<String>,
     command: Option<String>,
     source: String,
+    #[serde(default)]
+    model_family: String,
     codex_status: Option<codex_status::CodexCompactStatus>,
+    /// pane 当前后代进程中真实挂着的 agent 名称（Codex/Claude/CodeBuddy 等）。
+    /// 进程 FD 检测可能在 rollout 文件未打开时拿不到 resume_id，该字段让
+    /// 前端在"agent 还在终端里运行"时仍可走 /status 探测兜底。
+    #[serde(default)]
+    agents: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1298,7 +1771,6 @@ pub(crate) struct TerminalEnvironmentSnapshot {
     pub workspace_root: PathBuf,
     pub display_root: PathBuf,
     pub user_profile: runtime_paths::UserProfile,
-    pub terminal_default_env: Vec<(String, String)>,
     pub proxy_env: Vec<(String, String)>,
 }
 
@@ -1309,6 +1781,30 @@ pub async fn list_sessions(
     let base_dir = state.workspace_root();
     let display_root = state.workspace_display_root();
     let terminal_manager = state.terminal_manager.clone();
+
+    if query.history {
+        if query.all {
+            let sessions = terminal_manager.list_all_sessions_lightweight(&base_dir, &display_root);
+            return Ok(Json(TerminalSessionsResponse {
+                all: true,
+                path: String::new(),
+                display_path: "全部目录".to_string(),
+                sessions,
+            }));
+        }
+
+        let directory = filesystem::resolve_directory_path(&base_dir, &query.path)?;
+        let relative = filesystem::relative_path(&base_dir, &directory)?;
+        let sessions =
+            terminal_manager.list_sessions_lightweight(&base_dir, &display_root, &directory);
+        return Ok(Json(TerminalSessionsResponse {
+            all: false,
+            path: relative_to_string(&relative),
+            display_path: filesystem::display_path(&base_dir, &display_root, &directory),
+            sessions,
+        }));
+    }
+
     let api_presets = state.auth_manager.api_presets_snapshot();
     let error_line_limit = state.workspace_settings.terminal_error_match_line_limit();
     let error_keywords = state.workspace_settings.terminal_error_keywords();
@@ -1550,10 +2046,14 @@ fn annotate_terminal_session_api_preset_names(
 }
 
 fn read_terminal_auto_continue_crontab() -> Result<String, String> {
-    let output = Command::new("crontab")
-        .arg("-l")
-        .output()
-        .map_err(|error| format!("读取 crontab 失败: {error}"))?;
+    let mut command = Command::new("crontab");
+    command.arg("-l");
+    let output = crate::process_exec::bounded_output(
+        command,
+        std::time::Duration::from_secs(10),
+        1024 * 1024,
+    )
+    .map_err(|error| format!("读取 crontab 失败: {error}"))?;
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
@@ -1696,22 +2196,10 @@ pub async fn create_session(
     let display_root = state.workspace_display_root();
     let directory = filesystem::resolve_terminal_directory_path(&base_dir, &payload.path)?;
     let terminal_manager = state.terminal_manager.clone();
-    let proxy_env = state.proxy_manager.get_terminal_proxy_env();
-    let requested_preset_id = payload.codex_api_preset_id.trim();
-    let startup = if requested_preset_id.is_empty() {
-        current_api_terminal_startup(&state).await
-    } else {
-        api_terminal_startup_for_preset(
-            &state.auth_manager.api_presets_snapshot(),
-            requested_preset_id,
-        )
-        .ok_or_else(|| AppError::bad_request("指定的 Codex API 预设不存在。"))?
-    };
     let terminal_user = state
         .workspace_settings
         .terminal_user_profile()
         .map_err(|error| AppError::bad_request(format!("用户身份无效: {error}")))?;
-    let terminal_default_env = state.workspace_settings.terminal_default_env_entries();
     let origin = payload.origin;
     let owner_key = normalize_terminal_session_owner_key(&payload.owner_key)
         .map_err(|error| AppError::bad_request(format!("终端归属标识无效: {error}")))?;
@@ -1722,11 +2210,10 @@ pub async fn create_session(
                 &display_root,
                 directory,
                 terminal_user,
-                terminal_default_env,
-                proxy_env,
+                Vec::new(),
                 None,
-                startup.codex_api_preset_name,
-                startup.codex_api_base_url,
+                String::new(),
+                String::new(),
                 origin,
                 owner_key,
             )
@@ -1766,6 +2253,28 @@ pub async fn rename_session(
     Ok(Json(session))
 }
 
+pub async fn update_session_group(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(payload): Json<UpdateSessionGroupRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let manager = state.terminal_manager.clone();
+    run_terminal_task(move || {
+        manager
+            .update_session_group(
+                &session_id,
+                &payload.member_ids,
+                &payload.group_roles,
+                payload.fixed_order.unwrap_or(false),
+                payload.group_color,
+                payload.group_name,
+            )
+            .map_err(|error| AppError::bad_request(format!("更新终端分组失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 pub async fn update_session_origin(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -1798,6 +2307,147 @@ pub async fn send_session_input(
     })
     .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+pub async fn send_session_enter(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(payload): Json<TerminalEnterRequest>,
+) -> ApiResult<Json<Value>> {
+    let submit_enters = payload.submit_enters.max(1).min(4);
+    let delivery_id = payload.delivery_id.trim().to_string();
+    if payload.verify_submission && delivery_id.is_empty() {
+        return Err(AppError::bad_request("verify_submission 需要 delivery_id"));
+    }
+
+    let terminal_manager = state.terminal_manager.clone();
+    let delivery_baseline = if payload.verify_submission {
+        let session_id = session_id.clone();
+        let delivery_id = delivery_id.clone();
+        run_terminal_task(move || {
+            terminal_manager
+                .session_agent_rollout_history(&session_id)
+                .map(|entries| {
+                    entries
+                        .as_deref()
+                        .map(|entries| {
+                            manager::terminal_message_delivery_count(entries, &delivery_id)
+                        })
+                        .unwrap_or(0)
+                })
+                .map_err(|error| AppError::internal(format!("读取终端消息提交基线失败: {error}")))
+        })
+        .await?
+    } else {
+        0
+    };
+
+    let terminal_manager = state.terminal_manager.clone();
+    let session_id_for_send = session_id.clone();
+    let verify_submission = payload.verify_submission;
+    let paste_settle_delay = manager::terminal_message_paste_settle_delay(&delivery_id, true);
+    run_terminal_task(move || {
+        if verify_submission {
+            terminal_manager
+                .ensure_session_agent_active(&session_id_for_send)
+                .map_err(|error| AppError::bad_request(format!("目标 Agent 已退出: {error}")))?;
+        }
+        std::thread::sleep(paste_settle_delay);
+        for index in 0..submit_enters {
+            terminal_manager
+                .send_session_enter_key(&session_id_for_send)
+                .map_err(|error| AppError::bad_request(format!("发送终端 Enter 失败: {error}")))?;
+            if index + 1 < submit_enters {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+        Ok(())
+    })
+    .await?;
+
+    let mut submitted = !payload.verify_submission;
+    let mut submit_attempts = usize::from(submit_enters);
+    if payload.verify_submission {
+        // delivery_id 非空已由入参校验保证；账本中无该记录时标记为空操作。
+        state
+            .terminal_manager
+            .record_terminal_message_submit_attempt(
+                &session_id,
+                &delivery_id,
+                submit_attempts as u32,
+            );
+        submitted = wait_for_terminal_message_delivery(
+            state.terminal_manager.clone(),
+            session_id.clone(),
+            delivery_id.clone(),
+            delivery_baseline,
+        )
+        .await?;
+        for delay_ms in TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS {
+            if submitted {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            let terminal_manager = state.terminal_manager.clone();
+            let session_id_for_send = session_id.clone();
+            let retry_result = run_terminal_task(move || {
+                terminal_manager
+                    .ensure_session_agent_active(&session_id_for_send)
+                    .map_err(|error| {
+                        AppError::bad_request(format!("目标 Agent 已退出，停止重试提交: {error}"))
+                    })?;
+                terminal_manager
+                    .retry_session_message_enter(&session_id_for_send)
+                    .map_err(|error| {
+                        AppError::bad_request(format!("重试终端消息提交失败: {error}"))
+                    })
+            })
+            .await;
+            if let Err(error) = retry_result {
+                state.terminal_manager.mark_terminal_message_failed(
+                    &session_id,
+                    &delivery_id,
+                    &error.to_string(),
+                );
+                return Err(error);
+            }
+            if matches!(retry_result, Ok(false)) {
+                submitted = true;
+                break;
+            }
+            submit_attempts += 1;
+            state
+                .terminal_manager
+                .record_terminal_message_submit_attempt(
+                    &session_id,
+                    &delivery_id,
+                    submit_attempts as u32,
+                );
+            submitted = wait_for_terminal_message_delivery(
+                state.terminal_manager.clone(),
+                session_id.clone(),
+                delivery_id.clone(),
+                delivery_baseline,
+            )
+            .await?;
+        }
+        if submitted {
+            state
+                .terminal_manager
+                .mark_terminal_message_confirmed(&session_id, &delivery_id);
+        } else {
+            state
+                .terminal_manager
+                .mark_terminal_message_unconfirmed(&session_id, &delivery_id);
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "submitted": submitted,
+        "submit_attempts": submit_attempts,
+    })))
 }
 
 /// Send Codex `/status` to one terminal and persist the provider reported by
@@ -1847,6 +2497,52 @@ pub async fn send_session_auto_continue(
     let interval_seconds = state
         .workspace_settings
         .terminal_auto_continue_interval_seconds();
+    let glm_quota_preflight_required = {
+        let terminal_manager = terminal_manager.clone();
+        let session_id = session_id.clone();
+        let error_keywords = error_keywords.clone();
+        let auto_continue_time_patterns = auto_continue_time_patterns.clone();
+        run_terminal_task(move || {
+            Ok(terminal_manager.glm_quota_auto_continue_requires_preflight(
+                &session_id,
+                error_line_limit,
+                &error_keywords,
+                &auto_continue_time_patterns,
+                respect_manual_interrupt,
+            ))
+        })
+        .await?
+    };
+    if glm_quota_preflight_required {
+        let api_presets = state.auth_manager.api_presets_snapshot();
+        terminal_manager.update_api_preset_snapshot(api_presets.clone());
+        let now_millis = current_timestamp_millis();
+        let cached_fresh = state
+            .quota_reset_cache
+            .get_latest_zhipu_reset()
+            .as_deref()
+            .and_then(|reset| manager::terminal_auto_continue_due_millis(reset, now_millis))
+            .is_some();
+        let preflight_status = if cached_fresh {
+            crate::quota::ZhipuQuotaPreflightStatus::Exhausted { reset_millis: 0 }
+        } else {
+            let quota_config = state.quota_manager.snapshot().await;
+            crate::quota::refresh_zhipu_quota_reset_cache_with_quota_config(
+                &api_presets,
+                &state.quota_reset_cache,
+                Some(&quota_config),
+            )
+            .await
+        };
+        if !matches!(preflight_status, crate::quota::ZhipuQuotaPreflightStatus::Available) {
+            return Ok(Json(TerminalAutoContinueSendResponse {
+                ok: true,
+                sent: false,
+                retry_after_millis: 0,
+                compact_sent: false,
+            }));
+        }
+    }
     let outcome = run_terminal_task(move || {
         terminal_manager
             .send_session_auto_continue_if_error(
@@ -1889,6 +2585,10 @@ pub async fn create_scheduled_input(
     State(state): State<AppState>,
     Json(payload): Json<TerminalScheduledInputRequest>,
 ) -> ApiResult<Json<TerminalScheduledInputResponse>> {
+    manager::scheduled_input::validate_scheduled_input_repeat_interval(
+        payload.repeat_interval_millis,
+    )
+    .map_err(|error| AppError::bad_request(format!("创建定时发送任务失败: {error}")))?;
     let terminal_mode = payload.terminal_mode.trim().to_lowercase();
     let is_new_terminal = terminal_mode == "new";
 
@@ -1903,13 +2603,10 @@ pub async fn create_scheduled_input(
         let display_root = state.workspace_display_root();
         let directory = filesystem::resolve_terminal_directory_path(&base_dir, &working_dir)?;
         let terminal_manager = state.terminal_manager.clone();
-        let proxy_env = state.proxy_manager.get_terminal_proxy_env();
-        let startup = current_api_terminal_startup(&state).await;
         let terminal_user = state
             .workspace_settings
             .terminal_user_profile()
             .map_err(|error| AppError::bad_request(format!("用户身份无效: {error}")))?;
-        let terminal_default_env = state.workspace_settings.terminal_default_env_entries();
         let session = run_terminal_task(move || {
             terminal_manager
                 .create_session(
@@ -1917,11 +2614,10 @@ pub async fn create_scheduled_input(
                     &display_root,
                     directory,
                     terminal_user,
-                    terminal_default_env,
-                    proxy_env,
+                    Vec::new(),
                     None,
-                    startup.codex_api_preset_name,
-                    startup.codex_api_base_url,
+                    String::new(),
+                    String::new(),
                 )
                 .map_err(|error| AppError::internal(format!("创建终端会话失败: {error}")))
         })
@@ -1947,6 +2643,7 @@ pub async fn create_scheduled_input(
                 payload.send_enter,
                 task_type,
                 payload.working_dir,
+                payload.repeat_interval_millis,
             )
             .map_err(|error| AppError::bad_request(format!("创建定时发送任务失败: {error}")))
     })
@@ -1957,6 +2654,20 @@ pub async fn create_scheduled_input(
         task,
         tasks,
     }))
+}
+
+pub async fn scheduled_input_status(
+    State(state): State<AppState>,
+    AxumPath(task_id): AxumPath<String>,
+) -> ApiResult<Json<TerminalScheduledInputTaskInfo>> {
+    let manager = state.terminal_manager.clone();
+    let info = run_terminal_task(move || {
+        manager
+            .scheduled_input_status(&task_id)
+            .map_err(|error| AppError::bad_request(error.to_string()))
+    })
+    .await?;
+    Ok(Json(info))
 }
 
 pub async fn delete_scheduled_input(
@@ -1998,6 +2709,8 @@ pub async fn update_scheduled_input(
         send_enter: payload.send_enter,
         task_type: payload.task_type,
         session_id: payload.session_id,
+        label: payload.label,
+        repeat_interval_millis: payload.repeat_interval_millis,
     };
     let terminal_manager = state.terminal_manager.clone();
     let task = run_terminal_task(move || {
@@ -2078,17 +2791,16 @@ pub async fn send_auto_typed_input(
     let terminal_manager = state.terminal_manager.clone();
     let submit_enters = payload.submit_enters.min(4);
     let session_id_for_send = session_id.clone();
-    let input_for_send = input.clone();
+    let command_body = input.trim_end_matches(['\r', '\n']).to_string();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || -> Result<()> {
-            terminal_manager.send_session_input_silent(&session_id_for_send, input_for_send)?;
-            for index in 0..submit_enters {
-                if index > 0 {
-                    std::thread::sleep(std::time::Duration::from_millis(120));
-                }
-                terminal_manager
-                    .send_session_input_silent(&session_id_for_send, "\r".to_string())?;
+            terminal_manager.send_session_input_silent(&session_id_for_send, command_body)?;
+            for _ in 0..=submit_enters {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    TERMINAL_AUTO_TYPED_ENTER_DELAY_MS,
+                ));
+                terminal_manager.send_session_enter_key(&session_id_for_send)?;
             }
             Ok(())
         }),
@@ -2104,7 +2816,7 @@ pub async fn send_auto_typed_input(
         }
         Err(_) => {
             return Err(AppError::internal(format!(
-                "终端任务超时（{} 秒），可能是 tmux 未安装或无响应。",
+                "终端任务超时（{} 秒），请检查会话锁等待、磁盘负载及 tmux 响应。",
                 TERMINAL_TASK_TIMEOUT_SECS
             )));
         }
@@ -2125,9 +2837,10 @@ pub async fn send_session_message(
     ])
     .ok_or_else(|| AppError::bad_request("缺少目标终端 target/name/session_id"))?
     .to_string();
-    let data = first_nonempty([payload.data.as_str(), payload.message.as_str()])
+    let message_body = first_nonempty([payload.data.as_str(), payload.message.as_str()])
         .ok_or_else(|| AppError::bad_request("缺少要发送的消息 data/message"))?
         .to_string();
+    let data = message_body.clone();
     let delivery_id = first_nonempty([payload.delivery_id.as_str()])
         .map(str::to_string)
         .unwrap_or_else(|| data.clone());
@@ -2145,6 +2858,82 @@ pub async fn send_session_message(
     if payload.verify_submission && submit_enters == 0 {
         return Err(AppError::bad_request("verify_submission 需要 submit/enter/submit_enters"));
     }
+    let bracketed_paste = payload.bracketed_paste;
+    let verify_submission = payload.verify_submission;
+
+    let group_target = first_nonempty([payload.group_token.as_str(), payload.group.as_str()]);
+    if let Some(group_target) = group_target {
+        let manager = state.terminal_manager.clone();
+        let sender_id = payload.sender_session_id.trim().to_string();
+        let group_target = group_target.to_string();
+        let response_group = group_target.clone();
+        let response_sender = sender_id.clone();
+        let data_for_group = data.clone();
+        let delivery_id_for_group = delivery_id.clone();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
+            tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, bool)> {
+                let mut ids = manager.resolve_group_session_ids(&group_target)?;
+                let sender_in_group = !sender_id.is_empty() && ids.iter().any(|id| id == &sender_id);
+                if sender_in_group { ids.retain(|id| id != &sender_id); }
+                let mut deliveries = Vec::with_capacity(ids.len());
+                for (index, id) in ids.into_iter().enumerate() {
+                    let per_delivery = format!("{delivery_id_for_group}:{index}");
+                    if verify_submission
+                        && !manager.claim_terminal_message_delivery(
+                            &id,
+                            &per_delivery,
+                            &data_for_group,
+                        )?
+                    {
+                        continue;
+                    }
+                    let sent = manager.send_session_message(&id, None, data_for_group.clone(), submit_enters, bracketed_paste, verify_submission);
+                    match sent {
+                        Ok((session_id, terminal_name, renamed_target, current_terminal_name)) => {
+                            if verify_submission {
+                                manager.mark_terminal_message_injected(&id, &per_delivery);
+                                manager.record_terminal_message_submit_attempt(
+                                    &id,
+                                    &per_delivery,
+                                    u32::from(submit_enters),
+                                );
+                            }
+                            deliveries.push(serde_json::json!({
+                                "session_id": session_id, "terminal_name": terminal_name,
+                                "renamed_target": renamed_target, "current_terminal_name": current_terminal_name,
+                                "submitted": !verify_submission
+                            }));
+                        }
+                        Err(error) => {
+                            if verify_submission { manager.release_terminal_message_delivery(&id, &per_delivery); }
+                            return Err(error);
+                        }
+                    }
+                }
+                Ok((deliveries, sender_in_group))
+            }),
+        ).await;
+        let deliveries = match result {
+            Ok(Ok(Ok(value))) => value,
+            Ok(Ok(Err(error))) => {
+                return Err(AppError::bad_request(format!("发送终端分组消息失败: {error}")));
+            }
+            Ok(Err(error)) => return Err(AppError::internal(format!("终端后台任务失败: {error}"))),
+            Err(_) => {
+                return Err(AppError::internal(format!(
+                    "终端分组消息任务超时（{} 秒）",
+                    TERMINAL_TASK_TIMEOUT_SECS
+                )));
+            }
+        };
+        let (deliveries, excluded_sender) = deliveries;
+        return Ok(Json(serde_json::json!({
+            "ok": true, "group": response_group, "sender_session_id": response_sender,
+            "excluded_sender": excluded_sender, "delivered": deliveries.len(), "deliveries": deliveries,
+            "submitted": !verify_submission || deliveries.iter().all(|item| item.get("submitted").and_then(Value::as_bool).unwrap_or(false))
+        })));
+    }
 
     let base_dir = state.workspace_root();
     let target_path = if payload.path.trim().is_empty() {
@@ -2153,37 +2942,77 @@ pub async fn send_session_message(
         Some(filesystem::resolve_directory_path(&base_dir, &payload.path)?)
     };
     let terminal_manager = state.terminal_manager.clone();
-    let bracketed_paste = payload.bracketed_paste;
-    let verify_submission = payload.verify_submission;
     let delivery_id_for_send = delivery_id.clone();
+    let delivery_id_in_closure = delivery_id.clone();
+    let message_body_for_send = message_body.clone();
+    let mut terminal_message_send_timed_out = false;
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(move || -> Result<((String, String), usize)> {
-            let (session_id, _) =
-                terminal_manager.resolve_session_target(&target, target_path.as_deref())?;
-            let delivery_baseline = if verify_submission {
-                terminal_manager
-                    .session_agent_rollout_history(&session_id)?
+        std::time::Duration::from_secs(TERMINAL_MESSAGE_SEND_TIMEOUT_SECS),
+        tokio::task::spawn_blocking(
+            move || -> Result<(TerminalMessageDeliveryTarget, usize, bool)> {
+                let (session_id, _) =
+                    terminal_manager.resolve_session_target(&target, target_path.as_deref())?;
+                let rollout_history = if verify_submission {
+                    terminal_manager.session_agent_rollout_history(&session_id)?
+                } else {
+                    None
+                };
+                let rollout_verifiable = rollout_history.is_some();
+                let delivery_baseline = rollout_history
                     .as_deref()
                     .map(|entries| {
-                        manager::terminal_message_delivery_count(entries, &delivery_id_for_send)
+                        manager::terminal_message_delivery_count(entries, &delivery_id_in_closure)
                     })
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-            let sent = terminal_manager.send_session_message(
-                &session_id,
-                None,
-                data,
-                submit_enters,
-                bracketed_paste,
-            )?;
-            Ok((sent, delivery_baseline))
-        }),
+                    .unwrap_or(0);
+                if verify_submission
+                    && !terminal_manager.claim_terminal_message_delivery(
+                        &session_id,
+                        &delivery_id_in_closure,
+                        &data,
+                    )?
+                {
+                    return Ok((
+                        TerminalMessageDeliveryTarget::deduplicated(session_id),
+                        delivery_baseline,
+                        rollout_verifiable,
+                    ));
+                }
+                let sent = terminal_manager.send_session_message(
+                    &session_id,
+                    None,
+                    message_body_for_send,
+                    submit_enters,
+                    bracketed_paste,
+                    verify_submission,
+                );
+                if sent.is_err() && verify_submission {
+                    terminal_manager
+                        .release_terminal_message_delivery(&session_id, &delivery_id_in_closure);
+                }
+                let (session_id, requested_terminal_name, _, current_terminal_name) = sent?;
+                if verify_submission {
+                    terminal_manager
+                        .mark_terminal_message_injected(&session_id, &delivery_id_in_closure);
+                    terminal_manager.record_terminal_message_submit_attempt(
+                        &session_id,
+                        &delivery_id_in_closure,
+                        u32::from(submit_enters),
+                    );
+                }
+                Ok((
+                    TerminalMessageDeliveryTarget::delivered(
+                        session_id,
+                        requested_terminal_name,
+                        current_terminal_name,
+                    ),
+                    delivery_baseline,
+                    rollout_verifiable,
+                ))
+            },
+        ),
     )
     .await;
-    let (sent, delivery_baseline) = match result {
+    let (sent, delivery_baseline, rollout_verifiable) = match result {
         Ok(Ok(Ok(sent))) => sent,
         Ok(Ok(Err(error))) => {
             return Err(AppError::bad_request(format!("发送终端消息失败: {error}")));
@@ -2192,47 +3021,140 @@ pub async fn send_session_message(
             return Err(AppError::internal(format!("终端后台任务失败: {join_error}")));
         }
         Err(_) => {
-            return Err(AppError::internal(format!(
-                "终端任务超时（{} 秒），可能是 tmux 未安装或无响应。",
-                TERMINAL_TASK_TIMEOUT_SECS
-            )));
+            // The background thread is not cancelled by an HTTP timeout. The
+            // body may already have reached the terminal, so retain the claim
+            // and report an explicit in-flight delivery for callers to poll.
+            terminal_message_send_timed_out = true;
+            (
+                TerminalMessageDeliveryTarget::delivered(
+                    delivery_id_for_send.clone(),
+                    String::new(),
+                    String::new(),
+                ),
+                0,
+                false,
+            )
         }
     };
+
+    if terminal_message_send_timed_out {
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "session_id": sent.session_id,
+            "terminal_name": sent.terminal_name,
+            "renamed_target": sent.renamed_target,
+            "current_terminal_name": sent.current_terminal_name,
+            "submitted": false,
+            "status": "in_flight",
+            "deduplicated": false,
+            "submit_attempts": 0,
+        })));
+    }
+
+    if sent.terminal_name.is_empty() && payload.verify_submission {
+        let status = state
+            .terminal_manager
+            .terminal_message_delivery_status(&sent.session_id, &delivery_id, &message_body)
+            .map_err(|error| AppError::bad_request(format!("delivery_id conflict: {error}")))?;
+        let submitted = matches!(status, "confirmed" | "submitted_unverifiable");
+        if submitted && !completed_build_request_id.is_empty() {
+            state
+                .terminal_manager
+                .complete_pending_build_request(&completed_build_request_id);
+        }
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "session_id": sent.session_id,
+            "terminal_name": "",
+            "renamed_target": false,
+            "current_terminal_name": "",
+            "submitted": submitted,
+            "deduplicated": true,
+            "status": status,
+            "submit_attempts": 0,
+        })));
+    }
 
     let mut submitted = !payload.verify_submission;
     let mut submit_attempts = usize::from(submit_enters);
     if payload.verify_submission {
-        submitted = wait_for_terminal_message_delivery(
-            state.terminal_manager.clone(),
-            sent.0.clone(),
-            delivery_id.clone(),
-            delivery_baseline,
-        )
-        .await?;
-
-        for delay_ms in TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS {
-            if submitted {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            let terminal_manager = state.terminal_manager.clone();
-            let session_id = sent.0.clone();
-            run_terminal_task(move || {
-                terminal_manager
-                    .send_session_message(&session_id, None, String::new(), 1, false)
-                    .map_err(|error| {
-                        AppError::bad_request(format!("重试终端消息提交失败: {error}"))
-                    })
-            })
-            .await?;
-            submit_attempts += 1;
+        if rollout_verifiable {
             submitted = wait_for_terminal_message_delivery(
                 state.terminal_manager.clone(),
-                sent.0.clone(),
+                sent.session_id.clone(),
                 delivery_id.clone(),
                 delivery_baseline,
             )
             .await?;
+
+            for delay_ms in TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS {
+                if submitted {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                let terminal_manager = state.terminal_manager.clone();
+                let session_id = sent.session_id.clone();
+                let retry_result = run_terminal_task(move || {
+                    terminal_manager
+                        .ensure_session_agent_active(&session_id)
+                        .map_err(|error| {
+                            AppError::bad_request(format!(
+                                "目标 Agent 已退出，停止重试提交: {error}"
+                            ))
+                        })?;
+                    terminal_manager
+                        .retry_session_message_enter(&session_id)
+                        .map_err(|error| {
+                            AppError::bad_request(format!("重试终端消息提交失败: {error}"))
+                        })
+                })
+                .await;
+                if let Err(error) = retry_result {
+                    state.terminal_manager.mark_terminal_message_failed(
+                        &sent.session_id,
+                        &delivery_id,
+                        &error.to_string(),
+                    );
+                    return Err(error);
+                }
+                if matches!(retry_result, Ok(false)) {
+                    submitted = true;
+                    break;
+                }
+                submit_attempts += 1;
+                state
+                    .terminal_manager
+                    .record_terminal_message_submit_attempt(
+                        &sent.session_id,
+                        &delivery_id,
+                        submit_attempts as u32,
+                    );
+                submitted = wait_for_terminal_message_delivery(
+                    state.terminal_manager.clone(),
+                    sent.session_id.clone(),
+                    delivery_id.clone(),
+                    delivery_baseline,
+                )
+                .await?;
+            }
+            if submitted {
+                state
+                    .terminal_manager
+                    .mark_terminal_message_confirmed(&sent.session_id, &delivery_id);
+            } else {
+                state
+                    .terminal_manager
+                    .mark_terminal_message_unconfirmed(&sent.session_id, &delivery_id);
+            }
+        } else {
+            // 该 agent 不产生 rollout 历史，没有可用于投递确认的证据面；正文与
+            // Enter 已在发送阶段成功写入终端即视为送达。继续 rollout 轮询与 Enter
+            // 重试只会让同一段正文被重复灌入终端，因此直接上报已提交，并把账本
+            // 记录为 unconfirmed，使后续相同 delivery_id 的调用被去重并读到同一状态。
+            submitted = true;
+            state
+                .terminal_manager
+                .mark_terminal_message_unconfirmed(&sent.session_id, &delivery_id);
         }
     }
 
@@ -2244,9 +3166,18 @@ pub async fn send_session_message(
 
     Ok(Json(serde_json::json!({
         "ok": true,
-        "session_id": sent.0,
-        "terminal_name": sent.1,
+        "session_id": sent.session_id,
+        "terminal_name": sent.terminal_name,
+        "renamed_target": sent.renamed_target,
+        "current_terminal_name": sent.current_terminal_name,
         "submitted": submitted,
+        "status": if submitted && payload.verify_submission && !rollout_verifiable {
+            "submitted_unverifiable"
+        } else if submitted {
+            "confirmed"
+        } else {
+            "pending"
+        },
         "submit_attempts": submit_attempts,
     })))
 }
@@ -2260,17 +3191,25 @@ async fn wait_for_terminal_message_delivery(
     for poll_index in 0..TERMINAL_MESSAGE_VERIFY_POLLS {
         let terminal_manager = terminal_manager.clone();
         let session_id = session_id.clone();
-        let entries = run_terminal_task(move || {
-            terminal_manager
+        let delivery_id = delivery_id.clone();
+        let confirmed = run_terminal_task(move || {
+            if terminal_manager
+                .session_message_input_queued(&session_id)
+                .map_err(|error| AppError::internal(format!("读取终端消息队列失败: {error}")))?
+            {
+                return Ok(true);
+            }
+            let entries = terminal_manager
                 .session_agent_rollout_history(&session_id)
-                .map_err(|error| AppError::internal(format!("确认终端消息提交失败: {error}")))
+                .map_err(|error| AppError::internal(format!("确认终端消息提交失败: {error}")))?;
+            Ok(manager::terminal_message_delivery_confirmed(
+                entries.as_deref(),
+                &delivery_id,
+                delivery_baseline,
+            ))
         })
         .await?;
-        if manager::terminal_message_delivery_confirmed(
-            entries.as_deref(),
-            &delivery_id,
-            delivery_baseline,
-        ) {
+        if confirmed {
             return Ok(true);
         }
         if poll_index + 1 < TERMINAL_MESSAGE_VERIFY_POLLS {
@@ -2293,6 +3232,50 @@ pub async fn get_session_input_history(
     })
     .await?;
     Ok(Json(TerminalInputHistoryResponse { entries }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TerminalMessageDeliveryQuery {
+    #[serde(default)]
+    pub delivery_id: String,
+    #[serde(default)]
+    pub data: String,
+}
+
+pub async fn get_session_message_delivery(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<TerminalMessageDeliveryQuery>,
+) -> ApiResult<Json<Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let delivery_id = query.delivery_id.trim().to_string();
+    let data = query.data;
+    let session_id_for_query = session_id.clone();
+    let status = run_terminal_task(move || {
+        terminal_manager
+            .terminal_message_delivery_status(&session_id_for_query, &delivery_id, &data)
+            .map_err(|error| AppError::bad_request(format!("delivery_id conflict: {error}")))
+    })
+    .await?;
+
+    let ledger = state
+        .terminal_manager
+        .terminal_message_delivery_record(&session_id, query.delivery_id.trim());
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "delivery_id": query.delivery_id.trim(),
+        "status": status,
+        "submitted": matches!(status, "confirmed" | "submitted_unverifiable"),
+        "ledger": ledger.map(|record| serde_json::json!({
+            "state": record.state,
+            "submit_attempts": record.submit_attempts,
+            "last_error": record.last_error,
+            "claimed_at": record.claimed_at,
+            "updated_at": record.updated_at,
+        })),
+    })))
 }
 
 fn first_nonempty<const N: usize>(values: [&str; N]) -> Option<&str> {
@@ -2329,32 +3312,37 @@ pub async fn upload_paste_assets(
             continue;
         }
         if assets.len() >= MAX_PASTE_ASSET_COUNT {
-            return Err(AppError::bad_request("一次最多粘贴 12 张图片。"));
+            return Err(AppError::bad_request("一次最多粘贴 12 个文件。"));
         }
 
         let mime = field
             .content_type()
             .map(str::to_string)
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let extension = paste_asset_extension(&mime)
-            .ok_or_else(|| AppError::bad_request(format!("不支持的图片类型: {mime}")))?;
+        let uploaded_name = field
+            .file_name()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string);
         let bytes = field
             .bytes()
             .await
-            .map_err(|error| AppError::bad_request(format!("读取图片数据失败: {error}")))?;
+            .map_err(|error| AppError::bad_request(format!("读取文件数据: {error}")))?;
         if bytes.is_empty() {
-            return Err(AppError::bad_request("图片数据为空。"));
+            return Err(AppError::bad_request("文件数据为空。"));
         }
         if bytes.len() > MAX_PASTE_ASSET_BYTES {
-            return Err(AppError::bad_request("单张图片不能超过 12 MB。"));
+            return Err(AppError::bad_request("单个文件不能超过 12 MB。"));
         }
 
         let ordinal = assets.len() + 1;
-        let file_name = unique_paste_asset_name(&asset_dir, extension, ordinal).await;
-        let file_path = asset_dir.join(&file_name);
+        let stored_name =
+            unique_paste_asset_name(&asset_dir, uploaded_name.as_deref(), mime.as_str(), ordinal)
+                .await;
+        let file_path = asset_dir.join(&stored_name);
         tokio::fs::write(&file_path, &bytes)
             .await
-            .map_err(|error| AppError::internal(format!("保存粘贴图片失败: {error}")))?;
+            .map_err(|error| AppError::internal(format!("保存粘贴文件失败: {error}")))?;
         info!(
             session_id,
             path = %file_path.display(),
@@ -2365,10 +3353,9 @@ pub async fn upload_paste_assets(
         let relative_path = filesystem::relative_path(&session_dir, &file_path)?;
         let relative_path_text = relative_to_string(&relative_path);
         let absolute_path_text = file_path.to_string_lossy().to_string();
-        let markdown =
-            format!("![{}]({})", paste_asset_alt_text(&relative_path_text), relative_path_text);
+        let markdown = relative_path_text.clone();
         assets.push(TerminalPasteAssetInfo {
-            name: file_name,
+            name: stored_name,
             path: absolute_path_text,
             relative_path: relative_path_text,
             markdown,
@@ -2378,7 +3365,7 @@ pub async fn upload_paste_assets(
     }
 
     if assets.is_empty() {
-        return Err(AppError::bad_request("没有可保存的图片。"));
+        return Err(AppError::bad_request("没有可保存的文件。"));
     }
 
     Ok(Json(TerminalPasteAssetsResponse { assets }))
@@ -2395,6 +3382,22 @@ pub async fn idle_session(
         terminal_manager
             .set_session_idle(&base_dir, &display_root, &session_id, true)
             .map_err(|error| AppError::bad_request(format!("闲置会话失败: {error}")))
+    })
+    .await?;
+    Ok(Json(session))
+}
+
+pub async fn hide_session(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<TerminalSessionInfo>> {
+    let base_dir = state.workspace_root();
+    let display_root = state.workspace_display_root();
+    let terminal_manager = state.terminal_manager.clone();
+    let session = run_terminal_task(move || {
+        terminal_manager
+            .set_session_hidden(&base_dir, &display_root, &session_id, true)
+            .map_err(|error| AppError::bad_request(format!("隐藏会话失败: {error}")))
     })
     .await?;
     Ok(Json(session))
@@ -2470,6 +3473,30 @@ fn require_terminal_delete_confirmation(headers: &HeaderMap, session_id: &str) -
     Ok(())
 }
 
+const TERMINAL_CLOSE_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(10);
+const TERMINAL_CLOSE_RATE_LIMIT_MAX: usize = 5;
+
+static TERMINAL_CLOSE_TRACKER: std::sync::LazyLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn check_terminal_close_rate_limit(ip: IpAddr) -> ApiResult<()> {
+    let now = Instant::now();
+    let mut tracker = match TERMINAL_CLOSE_TRACKER.lock() {
+        Ok(t) => t,
+        Err(_) => return Ok(()),
+    };
+    let timestamps = tracker.entry(ip).or_default();
+    timestamps.retain(|&ts| now.duration_since(ts) < TERMINAL_CLOSE_RATE_LIMIT_WINDOW);
+    if timestamps.len() >= TERMINAL_CLOSE_RATE_LIMIT_MAX {
+        return Err(AppError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "终端关闭或删除操作过于频繁，请稍候重试".to_string(),
+        });
+    }
+    timestamps.push(now);
+    Ok(())
+}
+
 pub async fn delete_session(
     State(state): State<AppState>,
     ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
@@ -2486,6 +3513,7 @@ pub async fn delete_session(
         target_session_id = %session_id,
         "terminal session delete requested"
     );
+    check_terminal_close_rate_limit(client_addr.ip())?;
     if let Err(error) = require_terminal_delete_confirmation(&headers, &session_id) {
         warn!(
             requester = %audit.requester,
@@ -2536,6 +3564,60 @@ pub async fn delete_session(
     Ok(Json(session))
 }
 
+pub async fn close_session(
+    State(state): State<AppState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let audit = terminal_delete_audit_context(&state, &headers, client_addr);
+    warn!(
+        requester = %audit.requester,
+        client_addr = %audit.client_addr,
+        user_agent = %audit.user_agent,
+        referer = %audit.referer,
+        request_source = %audit.request_source,
+        target_session_id = %session_id,
+        "terminal session close requested"
+    );
+    check_terminal_close_rate_limit(client_addr.ip())?;
+
+    let base_dir = state.workspace_root();
+    let display_root = state.workspace_display_root();
+    let terminal_manager = state.terminal_manager.clone();
+    let delete_session_id = session_id.clone();
+    let session = match run_terminal_task(move || {
+        terminal_manager
+            .delete_session(&base_dir, &display_root, &delete_session_id)
+            .map_err(|error| AppError::bad_request(format!("关闭会话失败: {error}")))
+    })
+    .await
+    {
+        Ok(session) => session,
+        Err(error) => {
+            warn!(
+                requester = %audit.requester,
+                client_addr = %audit.client_addr,
+                target_session_id = %session_id,
+                reason = %error,
+                "terminal session close failed"
+            );
+            return Err(error);
+        }
+    };
+    info!(
+        session_id = %session.id(),
+        session_name = %session.name,
+        "terminal session closed successfully"
+    );
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "name": session.name,
+        "message": "终端会话已关闭"
+    })))
+}
+
 pub async fn list_resume_archives(
     State(state): State<AppState>,
 ) -> ApiResult<Json<CodexResumeArchivesResponse>> {
@@ -2548,6 +3630,95 @@ pub async fn list_resume_archives(
             .map_err(|error| AppError::internal(format!("读取 Codex 归档失败: {error}")))
     })
     .await
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct CodexScanKey {
+    codex_home: PathBuf,
+    cwd_filter: Option<PathBuf>,
+    since_ms: Option<u64>,
+}
+
+type CodexScanShared = Arc<Result<Vec<CodexConversationInfo>, String>>;
+
+#[derive(Clone)]
+struct CodexScanSlot {
+    id: u64,
+    created_at: Instant,
+    result_tx: watch::Sender<Option<CodexScanShared>>,
+    result_rx: watch::Receiver<Option<CodexScanShared>>,
+}
+
+fn codex_scan_slots() -> &'static Mutex<HashMap<CodexScanKey, CodexScanSlot>> {
+    static SLOTS: std::sync::OnceLock<Mutex<HashMap<CodexScanKey, CodexScanSlot>>> =
+        std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers the caller for an in-flight Codex conversation scan. When an
+/// identical scan is already running (same `codex_home` + `cwd_filter`), the
+/// caller becomes a follower that waits for the shared result instead of
+/// starting a duplicate directory scan. Stale slots (leader exceeded the
+/// terminal task timeout window without completing) are taken over so a lost
+/// leader cannot block later requests forever.
+fn register_codex_scan_slot(key: &CodexScanKey) -> (CodexScanSlot, bool) {
+    let takeover_after = std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2);
+    static NEXT_SLOT_ID: AtomicU64 = AtomicU64::new(1);
+    let mut slots = crate::lock_or_recover!(codex_scan_slots().lock());
+    if let Some(existing) = slots.get(key)
+        && existing.created_at.elapsed() < takeover_after
+    {
+        return (existing.clone(), false);
+    }
+    let (result_tx, result_rx) = watch::channel(None);
+    let slot = CodexScanSlot {
+        id: NEXT_SLOT_ID.fetch_add(1, Ordering::Relaxed),
+        created_at: Instant::now(),
+        result_tx,
+        result_rx,
+    };
+    slots.insert(key.clone(), slot.clone());
+    (slot, true)
+}
+
+/// Publishes the shared scan outcome and drops this leader's slot from the
+/// registry so the next request starts a fresh scan. The slot is only removed
+/// when it is still the registered leader for `key`.
+fn complete_codex_scan_slot(key: &CodexScanKey, slot: &CodexScanSlot, shared: CodexScanShared) {
+    {
+        let mut slots = crate::lock_or_recover!(codex_scan_slots().lock());
+        if slots.get(key).map(|existing| existing.id) == Some(slot.id) {
+            slots.remove(key);
+        }
+    }
+    let _ = slot.result_tx.send(Some(shared));
+}
+
+async fn wait_codex_scan_result(
+    mut result_rx: watch::Receiver<Option<CodexScanShared>>,
+) -> ApiResult<Vec<CodexConversationInfo>> {
+    let wait_result = tokio::time::timeout(
+        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2),
+        async move {
+            loop {
+                if let Some(shared) = result_rx.borrow_and_update().clone() {
+                    return Arc::unwrap_or_clone(shared).map_err(AppError::internal);
+                }
+                if result_rx.changed().await.is_err() {
+                    return Err(AppError::internal("Codex 对话扫描任务已终止，请重试。"));
+                }
+            }
+        },
+    )
+    .await;
+
+    match wait_result {
+        Ok(result) => result,
+        Err(_) => Err(AppError::internal(format!(
+            "Codex 对话扫描等待超时（{} 秒），请点击“刷新对话”重试。",
+            TERMINAL_TASK_TIMEOUT_SECS + 2
+        ))),
+    }
 }
 
 pub async fn list_codex_conversations(
@@ -2565,17 +3736,46 @@ pub async fn list_codex_conversations(
         .map(str::trim)
         .filter(|cwd| !cwd.is_empty())
         .map(PathBuf::from);
+    let since_ms = query.since_ms.or_else(|| {
+        query.recent_days.map(|days| {
+            current_timestamp_millis()
+                .saturating_sub(days.clamp(1, 36_500).saturating_mul(86_400_000))
+        })
+    });
 
-    run_terminal_task(move || {
-        let conversations = scan_codex_conversations_for_cwd(&codex_home, cwd_filter.as_deref())
-            .map_err(|error| AppError::internal(format!("读取 Codex 对话列表失败: {error}")))?;
+    let scan_key = CodexScanKey {
+        codex_home: codex_home.clone(),
+        cwd_filter: cwd_filter.clone(),
+        since_ms,
+    };
+    let (slot, is_leader) = register_codex_scan_slot(&scan_key);
+    let conversations = if is_leader {
+        let scan_codex_home = codex_home.clone();
+        let scan_result = run_terminal_task(move || {
+            scan_codex_conversations_for_cwd_since(
+                &scan_codex_home,
+                cwd_filter.as_deref(),
+                since_ms,
+            )
+            .map_err(|error| AppError::internal(format!("读取 Codex 对话列表失败: {error}")))
+        })
+        .await;
+        let shared: CodexScanShared = match &scan_result {
+            Ok(conversations) => Arc::new(Ok(conversations.clone())),
+            Err(app_error) => Arc::new(Err(app_error.to_string())),
+        };
+        complete_codex_scan_slot(&scan_key, &slot, shared);
+        scan_result
+    } else {
+        wait_codex_scan_result(slot.result_rx).await
+    };
 
-        Ok(Json(CodexConversationsResponse {
+    conversations.map(|conversations| {
+        Json(CodexConversationsResponse {
             codex_home: codex_home.display().to_string(),
             conversations,
-        }))
+        })
     })
-    .await
 }
 
 pub async fn delete_codex_conversation(
@@ -2644,566 +3844,6 @@ pub async fn save_resume_archive(
     .await
 }
 
-#[cfg(test)]
-fn scan_codex_conversations(codex_home: &Path) -> Result<Vec<CodexConversationInfo>> {
-    scan_codex_conversations_for_cwd(codex_home, None)
-}
-
-fn scan_codex_conversations_for_cwd(
-    codex_home: &Path,
-    cwd_filter: Option<&Path>,
-) -> Result<Vec<CodexConversationInfo>> {
-    let sessions_dir = codex_home.join("sessions");
-    let mut conversations = Vec::new();
-    let metadata_index = codex_conversation_metadata_index(codex_home);
-    collect_codex_conversations(&sessions_dir, &metadata_index, cwd_filter, &mut conversations)?;
-    conversations.sort_by(|left, right| {
-        right
-            .updated_at
-            .cmp(&left.updated_at)
-            .then_with(|| right.size_bytes.cmp(&left.size_bytes))
-            .then_with(|| left.cwd.cmp(&right.cwd))
-            .then_with(|| left.session_id.cmp(&right.session_id))
-    });
-    Ok(conversations)
-}
-
-impl DeleteCodexConversationResponse {
-    fn total_deleted(&self) -> usize {
-        self.rollout_files_deleted
-            + self.session_index_entries_deleted
-            + self.history_entries_deleted
-            + self.database_threads_deleted
-            + usize::from(self.resume_archive_deleted)
-    }
-}
-
-fn delete_codex_conversation_files(
-    codex_home: &Path,
-    raw_session_id: &str,
-) -> Result<DeleteCodexConversationResponse> {
-    let session_id = validated_codex_session_id(raw_session_id)?;
-
-    let rollout_paths = codex_rollout_paths_for_session(&codex_home.join("sessions"), &session_id)?;
-    let session_index_entries_deleted =
-        rewrite_jsonl_without_session(&codex_home.join("session_index.jsonl"), "id", &session_id)?;
-    let history_entries_deleted = rewrite_jsonl_without_session(
-        &codex_home.join("history.jsonl"),
-        "session_id",
-        &session_id,
-    )?;
-    let database_threads_deleted =
-        delete_codex_state_thread(&codex_home.join("state_5.sqlite"), &session_id)?;
-
-    let mut rollout_files_deleted = 0;
-    for path in rollout_paths {
-        match fs::remove_file(&path) {
-            Ok(()) => rollout_files_deleted += 1,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("删除 Codex rollout 失败: {}", path.display()));
-            }
-        }
-    }
-
-    Ok(DeleteCodexConversationResponse {
-        session_id,
-        rollout_files_deleted,
-        session_index_entries_deleted,
-        history_entries_deleted,
-        database_threads_deleted,
-        resume_archive_deleted: false,
-    })
-}
-
-fn validated_codex_session_id(raw_session_id: &str) -> Result<String> {
-    let session_id = normalize_resume_id(raw_session_id)
-        .map_err(|error| anyhow::anyhow!("Codex session ID 无效: {error}"))?;
-    if !looks_like_codex_uuid(&session_id) {
-        anyhow::bail!("Codex session ID 无效。");
-    }
-    Ok(session_id)
-}
-
-fn looks_like_codex_uuid(session_id: &str) -> bool {
-    let bytes = session_id.as_bytes();
-    bytes.len() == 36
-        && [8, 13, 18, 23].iter().all(|index| bytes[*index] == b'-')
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
-}
-
-fn codex_rollout_paths_for_session(directory: &Path, session_id: &str) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    collect_codex_rollout_paths_for_session(directory, session_id, &mut paths)?;
-    Ok(paths)
-}
-
-fn collect_codex_rollout_paths_for_session(
-    directory: &Path,
-    session_id: &str,
-    paths: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取 Codex sessions 目录失败: {}", directory.display()));
-        }
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let file_type = entry.file_type()?;
-        if file_type.is_dir() {
-            collect_codex_rollout_paths_for_session(&path, session_id, paths)?;
-        } else if file_type.is_file()
-            && codex_session_id_from_path(&path).as_deref() == Some(session_id)
-        {
-            paths.push(path);
-        }
-    }
-    Ok(())
-}
-
-fn rewrite_jsonl_without_session(path: &Path, id_field: &str, session_id: &str) -> Result<usize> {
-    for _ in 0..3 {
-        let content = match fs::read(path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("读取 Codex 元数据失败: {}", path.display()));
-            }
-        };
-        let (replacement, removed) = filtered_jsonl_content(&content, id_field, session_id);
-        if removed == 0 {
-            return Ok(0);
-        }
-        if fs::read(path)? != content {
-            continue;
-        }
-        replace_file_contents(path, &replacement)?;
-        return Ok(removed);
-    }
-    anyhow::bail!("Codex 正在写入 {}，请稍后重试。", path.display())
-}
-
-fn filtered_jsonl_content(content: &[u8], id_field: &str, session_id: &str) -> (Vec<u8>, usize) {
-    let mut replacement = Vec::with_capacity(content.len());
-    let mut removed = 0;
-    for line in content.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let should_remove = serde_json::from_slice::<Value>(line)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get(id_field)
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            })
-            .is_some_and(|id| id == session_id);
-        if should_remove {
-            removed += 1;
-        } else {
-            replacement.extend_from_slice(line);
-            replacement.push(b'\n');
-        }
-    }
-    (replacement, removed)
-}
-
-fn replace_file_contents(path: &Path, content: &[u8]) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("Codex 元数据文件名无效")?;
-    let nonce = current_timestamp_millis();
-    let temp_path = path.with_file_name(format!(".{file_name}.webclx-{nonce}.tmp"));
-    let backup_path = path.with_file_name(format!(".{file_name}.webclx-{nonce}.bak"));
-    fs::write(&temp_path, content)
-        .with_context(|| format!("写入 Codex 元数据临时文件失败: {}", temp_path.display()))?;
-    if let Ok(metadata) = fs::metadata(path) {
-        fs::set_permissions(&temp_path, metadata.permissions())?;
-    }
-    fs::rename(path, &backup_path)
-        .with_context(|| format!("备份 Codex 元数据失败: {}", path.display()))?;
-    if let Err(error) = fs::rename(&temp_path, path) {
-        let _ = fs::rename(&backup_path, path);
-        let _ = fs::remove_file(&temp_path);
-        return Err(error).with_context(|| format!("替换 Codex 元数据失败: {}", path.display()));
-    }
-    fs::remove_file(&backup_path)
-        .with_context(|| format!("清理 Codex 元数据备份失败: {}", backup_path.display()))?;
-    Ok(())
-}
-
-fn delete_codex_state_thread(database_path: &Path, session_id: &str) -> Result<usize> {
-    if !database_path.exists() {
-        return Ok(0);
-    }
-    let mut connection = Connection::open(database_path)
-        .with_context(|| format!("打开 Codex 状态数据库失败: {}", database_path.display()))?;
-    connection.busy_timeout(std::time::Duration::from_secs(3))?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    delete_from_table_if_present(
-        &transaction,
-        "thread_dynamic_tools",
-        "DELETE FROM thread_dynamic_tools WHERE thread_id = ?1",
-        session_id,
-    )?;
-    delete_from_table_if_present(
-        &transaction,
-        "thread_spawn_edges",
-        "DELETE FROM thread_spawn_edges WHERE parent_thread_id = ?1 OR child_thread_id = ?1",
-        session_id,
-    )?;
-    if sqlite_table_exists(&transaction, "agent_job_items")? {
-        transaction.execute(
-            "UPDATE agent_job_items SET assigned_thread_id = NULL WHERE assigned_thread_id = ?1",
-            params![session_id],
-        )?;
-    }
-    let deleted = delete_from_table_if_present(
-        &transaction,
-        "threads",
-        "DELETE FROM threads WHERE id = ?1",
-        session_id,
-    )?;
-    transaction.commit()?;
-    Ok(deleted)
-}
-
-fn delete_from_table_if_present(
-    transaction: &Transaction<'_>,
-    table: &str,
-    statement: &str,
-    session_id: &str,
-) -> Result<usize> {
-    if !sqlite_table_exists(transaction, table)? {
-        return Ok(0);
-    }
-    Ok(transaction.execute(statement, params![session_id])?)
-}
-
-fn sqlite_table_exists(transaction: &Transaction<'_>, table: &str) -> Result<bool> {
-    Ok(transaction
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
-            params![table],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-fn collect_codex_conversations(
-    directory: &Path,
-    metadata_index: &HashMap<String, CodexConversationMetadata>,
-    cwd_filter: Option<&Path>,
-    conversations: &mut Vec<CodexConversationInfo>,
-) -> Result<()> {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return Ok(());
-    };
-
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
-            collect_codex_conversations(&path, metadata_index, cwd_filter, conversations)?;
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        let Some(session_id) = codex_session_id_from_path(&path) else {
-            continue;
-        };
-        let mut conversation_metadata =
-            metadata_index.get(&session_id).cloned().unwrap_or_default();
-        if let (Some(expected), Some(actual)) = (cwd_filter, conversation_metadata.cwd.as_deref())
-            && Path::new(actual).components().ne(expected.components())
-        {
-            continue;
-        }
-        if conversation_metadata.cwd.is_none() || conversation_metadata.title.is_empty() {
-            let rollout_metadata = codex_conversation_metadata(&path);
-            if conversation_metadata.cwd.is_none() {
-                conversation_metadata.cwd = rollout_metadata.cwd;
-            }
-            if conversation_metadata.title.is_empty() {
-                conversation_metadata.title = rollout_metadata.title;
-            }
-        }
-        if let Some(expected) = cwd_filter
-            && conversation_metadata
-                .cwd
-                .as_deref()
-                .is_none_or(|actual| Path::new(actual).components().ne(expected.components()))
-        {
-            continue;
-        }
-        conversations.push(CodexConversationInfo {
-            session_id,
-            cwd: conversation_metadata.cwd.unwrap_or_default(),
-            title: conversation_metadata.title,
-            file_path: path.display().to_string(),
-            size_bytes: metadata.len(),
-            updated_at: metadata
-                .modified()
-                .map(system_time_to_millis)
-                .unwrap_or_default(),
-            created_at: metadata
-                .created()
-                .map(system_time_to_millis)
-                .unwrap_or_default(),
-        });
-    }
-
-    Ok(())
-}
-
-#[derive(Debug, Clone, Default)]
-struct CodexConversationMetadata {
-    cwd: Option<String>,
-    title: String,
-    title_count: usize,
-}
-
-fn codex_conversation_metadata_index(
-    codex_home: &Path,
-) -> HashMap<String, CodexConversationMetadata> {
-    let mut metadata_by_session = HashMap::new();
-
-    if let Ok(file) = fs::File::open(codex_home.join("history.jsonl")) {
-        for line in BufReader::new(file)
-            .lines()
-            .map_while(std::result::Result::ok)
-        {
-            let Ok(record) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let Some(session_id) = record
-                .get("session_id")
-                .and_then(Value::as_str)
-                .filter(|session_id| looks_like_codex_uuid(session_id))
-            else {
-                continue;
-            };
-            let Some(text) = record
-                .get("text")
-                .and_then(Value::as_str)
-                .and_then(normalize_codex_conversation_user_text)
-            else {
-                continue;
-            };
-            let metadata = metadata_by_session
-                .entry(session_id.to_string())
-                .or_insert_with(CodexConversationMetadata::default);
-            append_codex_conversation_title(&mut metadata.title, &text, &mut metadata.title_count);
-        }
-    }
-
-    if let Ok(file) = fs::File::open(codex_home.join("session_index.jsonl")) {
-        for line in BufReader::new(file)
-            .lines()
-            .map_while(std::result::Result::ok)
-        {
-            let Ok(record) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            let Some(session_id) = record
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|session_id| looks_like_codex_uuid(session_id))
-            else {
-                continue;
-            };
-            let metadata = metadata_by_session
-                .entry(session_id.to_string())
-                .or_insert_with(CodexConversationMetadata::default);
-            if let Some(cwd) = record
-                .get("cwd")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|cwd| !cwd.is_empty())
-            {
-                metadata.cwd = Some(cwd.to_string());
-            }
-            if metadata.title.is_empty()
-                && let Some(title) = record
-                    .get("thread_name")
-                    .and_then(Value::as_str)
-                    .and_then(normalize_codex_conversation_user_text)
-            {
-                append_codex_conversation_title(
-                    &mut metadata.title,
-                    &title,
-                    &mut metadata.title_count,
-                );
-            }
-        }
-    }
-
-    metadata_by_session
-}
-
-fn codex_conversation_metadata(path: &Path) -> CodexConversationMetadata {
-    let mut metadata = CodexConversationMetadata::default();
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return metadata,
-    };
-    let reader = BufReader::new(file);
-
-    for line in reader
-        .lines()
-        .map_while(std::result::Result::ok)
-        .take(MAX_CODEX_CONVERSATION_SCAN_LINES)
-    {
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-
-        if metadata.cwd.is_none() {
-            metadata.cwd = codex_conversation_meta_cwd(&value);
-        }
-
-        for text in codex_conversation_user_texts(&value) {
-            append_codex_conversation_title(&mut metadata.title, &text, &mut metadata.title_count);
-            if metadata.title_count >= MAX_CODEX_CONVERSATION_TITLE_MESSAGES {
-                break;
-            }
-        }
-
-        if metadata.cwd.is_some() && metadata.title_count >= MAX_CODEX_CONVERSATION_TITLE_MESSAGES {
-            break;
-        }
-    }
-
-    metadata
-}
-
-fn codex_conversation_meta_cwd(value: &Value) -> Option<String> {
-    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
-        return None;
-    }
-    let cwd = value
-        .get("payload")
-        .and_then(|payload| payload.get("cwd"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if cwd.is_empty() {
-        return None;
-    }
-    Some(cwd.to_string())
-}
-
-fn codex_conversation_user_texts(value: &Value) -> Vec<String> {
-    let payload = if value.get("type").and_then(Value::as_str) == Some("response_item") {
-        value.get("payload").unwrap_or(value)
-    } else {
-        value
-    };
-    if payload.get("type").and_then(Value::as_str) != Some("message") {
-        return Vec::new();
-    }
-    if payload.get("role").and_then(Value::as_str) != Some("user") {
-        return Vec::new();
-    }
-
-    let Some(content) = payload.get("content") else {
-        return Vec::new();
-    };
-    if let Some(text) = content.as_str() {
-        return normalize_codex_conversation_user_text(text)
-            .into_iter()
-            .collect();
-    }
-
-    content
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|part| {
-            let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
-            if !matches!(kind, "input_text" | "text") {
-                return None;
-            }
-            let text = part.get("text").and_then(Value::as_str)?;
-            normalize_codex_conversation_user_text(text)
-        })
-        .collect()
-}
-
-fn normalize_codex_conversation_user_text(text: &str) -> Option<String> {
-    let normalized = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    if normalized.is_empty() || should_skip_codex_conversation_user_text(&normalized) {
-        return None;
-    }
-    Some(normalized)
-}
-
-fn should_skip_codex_conversation_user_text(text: &str) -> bool {
-    text == "继续"
-        || text.eq_ignore_ascii_case("continue")
-        || text.starts_with("[from webClx-compile-api]")
-        || text.starts_with("<turn_aborted>")
-        || text.starts_with("Skill descriptions were shortened to fit the 2% skills context budget")
-        || text.starts_with("service temporarily unavailable (source:")
-        || text.starts_with("# AGENTS.md instructions")
-        || text.starts_with("<environment_context>")
-        || text.starts_with("<permissions instructions>")
-        || text.starts_with("<collaboration_mode>")
-        || text.starts_with("<skills_instructions>")
-        || text.starts_with("<model_config>")
-}
-
-fn append_codex_conversation_title(title: &mut String, text: &str, title_count: &mut usize) {
-    if *title_count >= MAX_CODEX_CONVERSATION_TITLE_MESSAGES {
-        return;
-    }
-    let separator_chars = usize::from(!title.is_empty());
-    let used_chars = title.chars().count();
-    let remaining = MAX_CODEX_CONVERSATION_TITLE_CHARS.saturating_sub(used_chars + separator_chars);
-    if remaining == 0 {
-        return;
-    }
-
-    if !title.is_empty() {
-        title.push('\n');
-    }
-    title.push_str(&clamp_text_chars(text, remaining));
-    *title_count += 1;
-}
-
-fn clamp_text_chars(text: &str, max_chars: usize) -> String {
-    let mut output = String::new();
-    for (index, ch) in text.chars().enumerate() {
-        if index >= max_chars {
-            output.push('…');
-            break;
-        }
-        output.push(ch);
-    }
-    output
-}
-
 pub async fn touch_resume_archive(
     State(state): State<AppState>,
     AxumPath(archive_id): AxumPath<String>,
@@ -3217,6 +3857,102 @@ pub async fn touch_resume_archive(
             .map_err(|error| AppError::bad_request(format!("更新 Codex 归档失败: {error}")))
     })
     .await
+}
+
+pub async fn list_workspace_restores(
+    State(state): State<AppState>,
+) -> ApiResult<Json<TerminalWorkspaceRestoresResponse>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let base_dir = state.workspace_root();
+    let display_root = state.workspace_display_root();
+    let records = run_terminal_task(move || {
+        terminal_manager
+            .list_workspace_restores(&base_dir, &display_root)
+            .map_err(|error| AppError::internal(format!("读取终端工作现场失败：{error}")))
+    })
+    .await?;
+    Ok(Json(TerminalWorkspaceRestoresResponse { records }))
+}
+
+pub async fn refresh_workspace_restores(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let updated = run_terminal_task(move || {
+        terminal_manager
+            .persist_all_workspace_restores()
+            .map_err(|error| AppError::internal(format!("刷新终端工作现场失败：{error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({ "ok": true, "updated": updated })))
+}
+
+pub async fn delete_workspace_restore(
+    State(state): State<AppState>,
+    ConnectInfo(client_addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let audit = terminal_delete_audit_context(&state, &headers, client_addr);
+    let session_id = session_id.trim().to_string();
+    warn!(
+        requester = %audit.requester,
+        client_addr = %audit.client_addr,
+        user_agent = %audit.user_agent,
+        referer = %audit.referer,
+        request_source = %audit.request_source,
+        target_session_id = %session_id,
+        "terminal workspace restore delete requested"
+    );
+    if let Err(error) = require_terminal_delete_confirmation(&headers, &session_id) {
+        warn!(
+            requester = %audit.requester,
+            client_addr = %audit.client_addr,
+            request_source = %audit.request_source,
+            target_session_id = %session_id,
+            reason = %error,
+            "terminal workspace restore delete failed"
+        );
+        return Err(error);
+    }
+
+    let terminal_manager = state.terminal_manager.clone();
+    let delete_session_id = session_id.clone();
+    let removed = run_terminal_task(move || {
+        terminal_manager
+            .delete_workspace_restore_record(&delete_session_id)
+            .map_err(|error| AppError::bad_request(format!("删除工作现场记录失败: {error}")))
+    })
+    .await?;
+    warn!(
+        requester = %audit.requester,
+        client_addr = %audit.client_addr,
+        request_source = %audit.request_source,
+        target_session_id = %session_id,
+        removed,
+        "terminal workspace restore delete completed"
+    );
+    Ok(Json(serde_json::json!({ "ok": true, "removed": removed })))
+}
+
+pub async fn restore_terminal_workspaces(
+    State(state): State<AppState>,
+    Json(payload): Json<RestoreTerminalWorkspacesRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let result = run_terminal_task(move || {
+        terminal_manager
+            .restore_terminal_workspaces(&payload.session_ids)
+            .map_err(|error| AppError::internal(format!("恢复终端工作现场失败：{error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "restored": result.restored_count(),
+        "succeeded": result.succeeded,
+        "skipped": result.skipped,
+        "failed": result.failed,
+    })))
 }
 
 pub async fn delete_resume_archive(
@@ -3299,6 +4035,16 @@ async fn current_agent_session_response(
         }
         .map_err(|error| AppError::bad_request(format!("读取当前会话失败: {error}")))?;
 
+        let lightweight_session = terminal_manager
+            .list_all_sessions_lightweight(&state.workspace_root(), &state.workspace_display_root())
+            .into_iter()
+            .find(|session| session.id == session_id);
+        let model_family = lightweight_session
+            .map(|session| session.model_family)
+            .unwrap_or_default();
+        let agents = activity::TerminalAgentDetector::new()
+            .detect(&session_id)
+            .agents;
         Ok(Json(CurrentAgentSessionResponse {
             resume_id: detected
                 .as_ref()
@@ -3310,7 +4056,9 @@ async fn current_agent_session_response(
                 .as_ref()
                 .map(|session| session.source.to_string())
                 .unwrap_or_else(|| "process_fd".to_string()),
+            model_family,
             codex_status: codex_status::detect_current_codex_status(&session_id),
+            agents,
         }))
     })
     .await
@@ -3326,8 +4074,9 @@ pub async fn terminal_ws(
 
 async fn terminal_session_for_socket(
     state: &AppState,
-    query: TerminalSessionQuery,
+    query: &TerminalSessionQuery,
 ) -> ApiResult<(Arc<TerminalSession>, TerminalManager, bool)> {
+    let started_at = Instant::now();
     let manager = state.terminal_manager.clone();
     let connect_manager = manager.clone();
     let requested_session_id = query
@@ -3336,9 +4085,22 @@ async fn terminal_session_for_socket(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    let requested_session_id_for_log = requested_session_id
+        .clone()
+        .unwrap_or_else(|| "<latest>".to_string());
     let output_visible = query.visible;
+    let session_lookup_started_at = Instant::now();
+    let lookup_manager = manager.clone();
+    let lookup_id = requested_session_id.clone();
+    let registered_session_path = run_terminal_task(move || {
+        Ok(lookup_id
+            .as_deref()
+            .and_then(|id| lookup_manager.session_path(id)))
+    })
+    .await?;
+    let session_lookup_completed_at = Instant::now();
     let directory = match requested_session_id.as_deref() {
-        Some(session_id) => match manager.session_path(session_id) {
+        Some(_) => match registered_session_path {
             Some(path) => path,
             None => {
                 filesystem::resolve_terminal_directory_path(&state.workspace_root(), &query.path)?
@@ -3346,29 +4108,54 @@ async fn terminal_session_for_socket(
         },
         None => filesystem::resolve_terminal_directory_path(&state.workspace_root(), &query.path)?,
     };
-    let proxy_env = state.proxy_manager.get_terminal_proxy_env();
-    let startup = current_api_terminal_startup(state).await;
+    let path_resolved_at = Instant::now();
+    let startup_loaded_at = Instant::now();
     let terminal_user = state
         .workspace_settings
         .terminal_user_profile()
         .map_err(|error| AppError::bad_request(format!("用户身份无效: {error}")))?;
-    let terminal_default_env = state.workspace_settings.terminal_default_env_entries();
-    let session = run_terminal_task(move || {
+    let session_result = run_terminal_task(move || {
         connect_manager
             .get_for_connection(
                 directory,
                 requested_session_id.as_deref(),
                 terminal_user,
-                terminal_default_env,
-                proxy_env,
+                Vec::new(),
                 None,
-                startup.codex_api_preset_name,
-                startup.codex_api_base_url,
+                String::new(),
+                String::new(),
                 output_visible,
             )
             .map_err(|error| AppError::internal(format!("创建终端会话失败: {error}")))
     })
-    .await?;
+    .await;
+
+    let completed_at = Instant::now();
+    let elapsed = completed_at.duration_since(started_at);
+    if elapsed >= std::time::Duration::from_millis(250) || session_result.is_err() {
+        warn!(
+            requested_session_id = requested_session_id_for_log,
+            session_lookup_ms = session_lookup_completed_at
+                .duration_since(session_lookup_started_at)
+                .as_millis(),
+            path_validate_ms = path_resolved_at
+                .duration_since(session_lookup_completed_at)
+                .as_millis(),
+            path_ms = path_resolved_at.duration_since(started_at).as_millis(),
+            startup_ms = startup_loaded_at
+                .duration_since(path_resolved_at)
+                .as_millis(),
+            session_ms = completed_at.duration_since(startup_loaded_at).as_millis(),
+            total_ms = elapsed.as_millis(),
+            outcome = if session_result.is_ok() {
+                "ok"
+            } else {
+                "error"
+            },
+            "slow terminal websocket session preparation"
+        );
+    }
+    let session = session_result?;
 
     Ok((session, manager, output_visible))
 }
@@ -3534,26 +4321,50 @@ fn resolve_terminal_quick_command_input<'a>(
     })
 }
 
-fn paste_asset_extension(mime: &str) -> Option<&'static str> {
-    match mime
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "image/png" => Some("png"),
-        "image/jpeg" | "image/jpg" => Some("jpg"),
-        "image/gif" => Some("gif"),
-        "image/webp" => Some("webp"),
-        "image/bmp" => Some("bmp"),
-        _ => None,
-    }
+fn paste_asset_extension(file_name: Option<&str>, mime: &str) -> String {
+    let extension = file_name
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .map(str::trim)
+        .filter(|extension| {
+            !extension.is_empty()
+                && extension.len() <= 24
+                && extension.chars().all(|char| char.is_ascii_alphanumeric())
+        })
+        .map(str::to_ascii_lowercase);
+    extension.unwrap_or_else(|| {
+        match mime
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "image/png" => "png",
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/bmp" => "bmp",
+            "text/plain" => "txt",
+            "text/markdown" => "md",
+            "application/pdf" => "pdf",
+            "application/json" => "json",
+            "application/zip" => "zip",
+            _ => "bin",
+        }
+        .to_string()
+    })
 }
 
-async fn unique_paste_asset_name(dir: &Path, extension: &str, ordinal: usize) -> String {
+async fn unique_paste_asset_name(
+    dir: &Path,
+    uploaded_name: Option<&str>,
+    mime: &str,
+    ordinal: usize,
+) -> String {
     let timestamp = current_timestamp_millis();
+    let extension = paste_asset_extension(uploaded_name, mime);
     for attempt in 0..1000 {
         let suffix = if attempt == 0 {
             String::new()
@@ -3568,16 +4379,9 @@ async fn unique_paste_asset_name(dir: &Path, extension: &str, ordinal: usize) ->
     format!("clipboard-{timestamp}-{ordinal}-fallback.{extension}")
 }
 
-fn paste_asset_alt_text(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or("clipboard-image")
-        .to_string()
-}
-
 const TERMINAL_TASK_TIMEOUT_SECS: u64 = 10;
+const TERMINAL_TASK_QUEUE_WARN_MILLIS: u128 = 1000;
+const TERMINAL_TASK_EXECUTE_WARN_MILLIS: u128 = 2000;
 const TERMINAL_OUTPUT_VIEWED_MARK_INTERVAL_MS: u128 = 1000;
 
 pub(in crate::terminal) async fn run_terminal_task<T, F>(task: F) -> ApiResult<T>
@@ -3585,9 +4389,25 @@ where
     T: Send + 'static,
     F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
+    let queued_at = Instant::now();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
-        tokio::task::spawn_blocking(task),
+        tokio::task::spawn_blocking(move || {
+            let queue_wait_millis = queued_at.elapsed().as_millis();
+            let started_at = Instant::now();
+            let output = task();
+            let execution_millis = started_at.elapsed().as_millis();
+            if queue_wait_millis >= TERMINAL_TASK_QUEUE_WARN_MILLIS
+                || execution_millis >= TERMINAL_TASK_EXECUTE_WARN_MILLIS
+            {
+                warn!(
+                    queue_ms = queue_wait_millis,
+                    execution_ms = execution_millis,
+                    "slow terminal background task"
+                );
+            }
+            output
+        }),
     )
     .await;
 
@@ -3595,10 +4415,17 @@ where
         Ok(Ok(Ok(value))) => Ok(value),
         Ok(Ok(Err(error))) => Err(AppError::internal(format!("终端后台任务失败: {error}"))),
         Ok(Err(join_error)) => Err(AppError::internal(format!("终端后台任务失败: {join_error}"))),
-        Err(_) => Err(AppError::internal(format!(
-            "终端任务超时（{} 秒），可能是 tmux 未安装或无响应。",
-            TERMINAL_TASK_TIMEOUT_SECS
-        ))),
+        Err(_) => {
+            warn!(
+                timeout_secs = TERMINAL_TASK_TIMEOUT_SECS,
+                elapsed_ms = queued_at.elapsed().as_millis(),
+                "terminal task timed out; blocking work continues in background"
+            );
+            Err(AppError::internal(format!(
+                "终端任务超时（{} 秒），请检查会话锁等待、磁盘负载及 tmux 响应。",
+                TERMINAL_TASK_TIMEOUT_SECS
+            )))
+        }
     }
 }
 
@@ -3616,451 +4443,105 @@ fn default_true() -> bool {
     true
 }
 
-async fn handle_socket_connect(socket: WebSocket, state: AppState, query: TerminalSessionQuery) {
-    let requested_session_id = query
-        .session_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("<latest>")
-        .to_string();
-    let session_result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2),
-        terminal_session_for_socket(&state, query),
-    )
-    .await;
-
-    match session_result {
-        Ok(Ok((session, manager, output_visible))) => {
-            handle_socket(socket, session, manager, output_visible).await;
-        }
-        Ok(Err(error)) => {
-            warn!("terminal websocket session prepare failed: {requested_session_id}: {error}");
-            send_socket_connection_error(socket, error.to_string()).await;
-        }
-        Err(_) => {
-            warn!("terminal websocket session prepare timed out: {requested_session_id}");
-            send_socket_connection_error(
-                socket,
-                format!(
-                    "终端连接超时（{} 秒），可能是 tmux 或会话恢复无响应。",
-                    TERMINAL_TASK_TIMEOUT_SECS + 2
-                ),
-            )
-            .await;
-        }
-    }
-}
-
-async fn send_socket_connection_error(mut socket: WebSocket, message: String) {
-    let payload = serde_json::to_string(&TerminalConnectionError { message: &message })
-        .unwrap_or_else(|_| {
-            "{\"type\":\"terminal_connection_error\",\"message\":\"终端连接失败。\"}".to_string()
-        });
-    let _ = socket.send(Message::Text(payload.into())).await;
-}
-
-async fn handle_socket(
-    socket: WebSocket,
-    session: Arc<TerminalSession>,
-    manager: TerminalManager,
-    initially_visible: bool,
-) {
-    let viewport_id = session.register_viewport(initially_visible);
-    handle_registered_socket(socket, session.clone(), manager, initially_visible, viewport_id)
-        .await;
-    if let Err(error) = session.unregister_viewport(viewport_id).await {
-        warn!("terminal websocket viewport cleanup failed: {error}");
-    }
-}
-
-async fn handle_registered_socket(
-    socket: WebSocket,
-    session: Arc<TerminalSession>,
-    manager: TerminalManager,
-    initially_visible: bool,
-    viewport_id: u64,
-) {
-    // 先订阅 broadcast 再读取 seq，最后抓 backlog snapshot。
-    // 顺序很关键：subscribe(T2) -> read_seq(S1) -> snapshot(T3)。
-    //  - subscribe 之前的历史 chunk (seq <= S1) 会被 socket_loop 跳过；这些内容
-    //    必然已被更晚的 snapshot(T3) 覆盖，不会丢。
-    //  - subscribe 之后产生的新 chunk seq > S1，会被正常发送。
-    //  - read_seq 到 snapshot 之间的 chunk 会同时被发送和出现在 snapshot 里，
-    //    属于重复显示，xterm 幂等，无害。
-    // 这样既不重放历史（修复切换终端"滚一遍"），也不丢任何新输出。
-    let mut receiver = session.subscribe();
-    let live_output_start_seq = session.current_output_seq();
-    let backlog = initial_backlog_for_socket(&session);
-    let mut event_receiver = manager.subscribe_events();
-    let (mut sender, mut socket_receiver) = socket.split();
-    let input_session = session.clone();
-    let input_manager = manager.clone();
-    let output_visible = Arc::new(AtomicBool::new(initially_visible));
-    let input_output_visible = output_visible.clone();
-
-    let mut input_task = tokio::spawn(async move {
-        while let Some(next_input) = socket_receiver.next().await {
-            match next_input {
-                Ok(message) => {
-                    if process_socket_message(
-                        &input_session,
-                        &input_manager,
-                        &input_output_visible,
-                        viewport_id,
-                        message,
-                    )
-                    .await
-                    .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    warn!("terminal websocket receive error: {error}");
-                    break;
-                }
-            }
-        }
-    });
-
-    let connect_event = TerminalManagerEvent::SessionListChanged {
-        action: "connected".to_string(),
-        session_id: session.id.clone(),
-    };
-    if let Ok(payload) = serde_json::to_string(&connect_event)
-        && sender.send(Message::Text(payload.into())).await.is_err()
-    {
-        input_task.abort();
-        return;
-    }
-
-    if send_backlog_replay_control(&mut sender, "start")
-        .await
-        .is_err()
-    {
-        input_task.abort();
-        return;
-    }
-
-    if !backlog.is_empty() && send_binary_chunks(&mut sender, &backlog).await.is_err() {
-        input_task.abort();
-        return;
-    }
-
-    if send_backlog_replay_control(&mut sender, "end")
-        .await
-        .is_err()
-    {
-        input_task.abort();
-        return;
-    }
-
-    let output_viewed_mark_interval_duration =
-        std::time::Duration::from_millis(TERMINAL_OUTPUT_VIEWED_MARK_INTERVAL_MS as u64);
-    let mut output_viewed_mark_interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + output_viewed_mark_interval_duration,
-        output_viewed_mark_interval_duration,
-    );
-    output_viewed_mark_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut pending_output_viewed_mark = false;
-    let mut last_output_seq_sent = live_output_start_seq;
-    'socket_loop: loop {
-        tokio::select! {
-            _ = &mut input_task => break,
-            _ = output_viewed_mark_interval.tick(), if pending_output_viewed_mark => {
-                if output_visible.load(Ordering::SeqCst) {
-                    manager.mark_session_output_viewed_in_memory(&session.id);
-                    pending_output_viewed_mark = false;
-                }
-            }
-            next_output = receiver.recv() => {
-                match next_output {
-                    Ok(chunk) => {
-                        if chunk.seq <= last_output_seq_sent {
-                            continue;
-                        }
-                        if chunk.seq > last_output_seq_sent + 1 {
-                            warn!(
-                                "terminal websocket observed output gap before chunk {}, recovering from backlog after {}",
-                                chunk.seq, last_output_seq_sent
-                            );
-                            for recovered in session.backlog_chunks_after(last_output_seq_sent) {
-                                if recovered.seq <= last_output_seq_sent {
-                                    continue;
-                                }
-                                if recovered.seq > last_output_seq_sent + 1 {
-                                    warn!(
-                                        "terminal websocket backlog recovery has unrecoverable gap before chunk {} after {}",
-                                        recovered.seq, last_output_seq_sent
-                                    );
-                                }
-                                if send_terminal_output_chunk(&mut sender, &recovered).await.is_err() {
-                                    break 'socket_loop;
-                                }
-                                last_output_seq_sent = recovered.seq;
-                                if output_visible.load(Ordering::SeqCst) {
-                                    pending_output_viewed_mark = true;
-                                }
-                            }
-                            continue;
-                        }
-                        if send_terminal_output_chunk(&mut sender, &chunk).await.is_err() {
-                            break;
-                        }
-                        last_output_seq_sent = chunk.seq;
-                        if output_visible.load(Ordering::SeqCst) {
-                            pending_output_viewed_mark = true;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(
-                            "terminal websocket lagged by {skipped} chunks, recovering from backlog after {}",
-                            last_output_seq_sent
-                        );
-                        let recovered_chunks = session.backlog_chunks_after(last_output_seq_sent);
-                        if recovered_chunks.is_empty() {
-                            warn!(
-                                "terminal websocket lagged but no backlog chunks are available after {}",
-                                last_output_seq_sent
-                            );
-                            continue;
-                        }
-                        for recovered in recovered_chunks {
-                            if recovered.seq <= last_output_seq_sent {
-                                continue;
-                            }
-                            if recovered.seq > last_output_seq_sent + 1 {
-                                warn!(
-                                    "terminal websocket backlog recovery has unrecoverable gap before chunk {} after {}",
-                                    recovered.seq, last_output_seq_sent
-                                );
-                            }
-                            if send_terminal_output_chunk(&mut sender, &recovered).await.is_err() {
-                                break 'socket_loop;
-                            }
-                            last_output_seq_sent = recovered.seq;
-                            if output_visible.load(Ordering::SeqCst) {
-                                pending_output_viewed_mark = true;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            next_event = event_receiver.recv() => {
-                match next_event {
-                    Ok(event) => {
-                        let payload = match serde_json::to_string(&event) {
-                            Ok(payload) => payload,
-                            Err(error) => {
-                                warn!("serialize terminal session event failed: {error}");
-                                continue;
-                            }
-                        };
-
-                        if sender.send(Message::Text(payload.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!("terminal websocket lagged, skipped {skipped} session events");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        }
-    }
-
-    if output_visible.load(Ordering::SeqCst) {
-        manager.mark_session_output_viewed(&session.id);
-    }
-    input_task.abort();
-}
-
-async fn send_terminal_output_chunk<S>(socket: &mut S, chunk: &TerminalOutputChunk) -> Result<()>
+pub(crate) fn deserialize_lenient_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
-    S: Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
+    D: serde::Deserializer<'de>,
 {
-    socket
-        .send(Message::Binary(chunk.bytes.clone().into()))
-        .await
-        .context("send terminal output chunk failed")?;
-    Ok(())
-}
+    struct LenientBoolVisitor;
 
-fn initial_backlog_for_socket(session: &TerminalSession) -> Vec<u8> {
-    session
-        .initial_backlog_snapshot()
-        .unwrap_or_else(|| backend_snapshot_or_backlog(session))
-}
+    impl<'de> serde::de::Visitor<'de> for LenientBoolVisitor {
+        type Value = bool;
 
-#[cfg(windows)]
-fn backend_snapshot_or_backlog(session: &TerminalSession) -> Vec<u8> {
-    session.backlog_tail_snapshot(MAX_INITIAL_BACKLOG_BYTES)
-}
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or boolean-like value ('true', 'false', '1', '0')")
+        }
 
-#[cfg(not(windows))]
-fn backend_snapshot_or_backlog(session: &TerminalSession) -> Vec<u8> {
-    capture_tmux_initial_pane_snapshot(&session.id)
-        .ok()
-        .filter(|snapshot| !snapshot.is_empty())
-        .unwrap_or_else(|| session.backlog_tail_snapshot(MAX_INITIAL_BACKLOG_BYTES))
-}
-
-async fn send_binary_chunks<S>(socket: &mut S, bytes: &[u8]) -> Result<()>
-where
-    S: Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    const CHUNK_SIZE: usize = 64 * 1024;
-
-    for chunk in bytes.chunks(CHUNK_SIZE) {
-        socket.send(Message::Binary(chunk.to_vec().into())).await?;
-    }
-
-    Ok(())
-}
-
-async fn send_backlog_replay_control<S>(socket: &mut S, action: &str) -> Result<()>
-where
-    S: Sink<Message> + Unpin,
-    S::Error: std::error::Error + Send + Sync + 'static,
-{
-    let payload = serde_json::to_string(&TerminalBacklogReplayControl { action })?;
-    socket.send(Message::Text(payload.into())).await?;
-    Ok(())
-}
-
-/// 判断输入是否仅由 xterm 鼠标报告序列组成。
-///
-/// 对应前端 `filterTerminalMouseInput` 识别的两种鼠标报告：
-/// - SGR（DECSET 1006）：`\x1b[<<btn>;<col>;<row>(M|m)`
-/// - X10/普通（DECSET 9/1000）：`\x1b[M<b1><b2><b3>`（三个任意 payload 字节）
-///
-/// 鼠标报告是尽力而为的交互输入，单次写入失败时降级丢弃而非断开整条连接，
-/// 避免拖动选区时高频鼠标报告偶发写失败导致连接震荡闪烁。
-fn is_mouse_only_input(data: &str) -> bool {
-    let bytes = data.as_bytes();
-    let mut cursor = 0;
-    let mut matched_any = false;
-
-    while cursor < bytes.len() {
-        // SGR 鼠标报告：ESC [ < digits ; digits ; digits (M|m)
-        if bytes[cursor] == 0x1b
-            && cursor + 2 < bytes.len()
-            && bytes[cursor + 1] == b'['
-            && bytes[cursor + 2] == b'<'
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
         {
-            let mut scan = cursor + 3;
-            // 三个由 ';' 分隔的非空数字段
-            let mut fields = 0;
-            while fields < 3 && scan < bytes.len() && bytes[scan].is_ascii_digit() {
-                while scan < bytes.len() && bytes[scan].is_ascii_digit() {
-                    scan += 1;
-                }
-                fields += 1;
-                if fields < 3 {
-                    if scan >= bytes.len() || bytes[scan] != b';' {
-                        return false;
-                    }
-                    scan += 1;
-                }
-            }
-            if fields != 3 {
-                return false;
-            }
-            if scan >= bytes.len() || (bytes[scan] != b'M' && bytes[scan] != b'm') {
-                return false;
-            }
-            cursor = scan + 1;
-            matched_any = true;
-            continue;
+            Ok(v)
         }
 
-        // X10 鼠标报告：ESC [ M <b1> <b2> <b3>
-        if bytes[cursor] == 0x1b
-            && cursor + 5 < bytes.len()
-            && bytes[cursor + 1] == b'['
-            && bytes[cursor + 2] == b'M'
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
         {
-            cursor += 6;
-            matched_any = true;
-            continue;
+            Ok(v != 0)
         }
 
-        return false;
-    }
-
-    matched_any
-}
-
-/// 写入终端输入，对纯鼠标报告的写入失败降级处理。
-///
-/// 真实键盘输入/粘贴/控制字符写失败仍返回 Err 以触发断连，因为那说明 PTY
-/// 确实不可用；纯鼠标报告写失败只记日志并丢弃，避免选区拖动产生的高频报告
-/// 偶发撞上 PTY 关闭窗口时整条连接反复断连重放。
-async fn write_terminal_input(
-    session: &TerminalSession,
-    manager: &TerminalManager,
-    data: &str,
-) -> Result<()> {
-    match session.write_input(data.to_string()).await {
-        Ok(()) => {
-            manager.record_session_input(&session.id, data);
-            Ok(())
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v != 0)
         }
-        Err(error) if is_mouse_only_input(data) => {
-            warn!("dropping mouse-only terminal input after write failure: {error}");
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
-}
 
-async fn process_socket_message(
-    session: &TerminalSession,
-    manager: &TerminalManager,
-    output_visible: &AtomicBool,
-    viewport_id: u64,
-    message: Message,
-) -> Result<()> {
-    match message {
-        Message::Text(text) => {
-            if let Ok(client_message) = serde_json::from_str::<ClientMessage>(&text) {
-                match client_message {
-                    ClientMessage::Input { data } => {
-                        write_terminal_input(session, manager, &data).await?;
-                    }
-                    ClientMessage::Resize { cols, rows } => {
-                        session.resize_viewport(viewport_id, cols, rows).await?
-                    }
-                    ClientMessage::Visibility { visible } => {
-                        session
-                            .set_viewport_visibility(viewport_id, visible)
-                            .await?;
-                        let was_visible = output_visible.swap(visible, Ordering::SeqCst);
-                        if visible {
-                            manager.mark_session_opened(&session.id);
-                            manager.mark_session_output_viewed(&session.id);
-                        } else if was_visible {
-                            manager.mark_session_output_viewed(&session.id);
-                        }
-                    }
-                }
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match v.trim() {
+                "1" | "true" | "TRUE" | "True" | "yes" | "on" => Ok(true),
+                "0" | "false" | "FALSE" | "False" | "no" | "off" | "" => Ok(false),
+                _ => Err(E::custom(format!("invalid boolean: {v}"))),
             }
         }
-        Message::Binary(bytes) => {
-            if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                write_terminal_input(session, manager, &text).await?;
-            }
-        }
-        Message::Ping(_) | Message::Pong(_) => {}
-        Message::Close(_) => return Err(anyhow::anyhow!("websocket closed")),
     }
 
-    Ok(())
+    deserializer.deserialize_any(LenientBoolVisitor)
+}
+
+pub(crate) fn deserialize_lenient_bool_default_true<'de, D>(
+    deserializer: D,
+) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct LenientBoolVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for LenientBoolVisitor {
+        type Value = bool;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or boolean-like value ('true', 'false', '1', '0')")
+        }
+
+        fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v)
+        }
+
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v != 0)
+        }
+
+        fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(v != 0)
+        }
+
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            match v.trim() {
+                "1" | "true" | "TRUE" | "True" | "yes" | "on" => Ok(true),
+                "0" | "false" | "FALSE" | "False" | "no" | "off" => Ok(false),
+                "" => Ok(true),
+                _ => Err(E::custom(format!("invalid boolean: {v}"))),
+            }
+        }
+    }
+
+    deserializer.deserialize_any(LenientBoolVisitor)
 }
 
 #[cfg(test)]

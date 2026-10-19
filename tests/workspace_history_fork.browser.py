@@ -15,7 +15,7 @@ def main() -> None:
     console_errors = []
     page_errors = []
     failed_responses = []
-    preset_apply_requests = []
+    preset_lease_calls = []
     results = {"viewports": {}}
 
     with sync_playwright() as playwright:
@@ -52,12 +52,13 @@ def main() -> None:
         )
         page.evaluate(
             """() => {
-                const cwd = '/home/codes/webClx';
+                const cwd = '/home/codes/tools/webClx';
                 const codexId = '019f2350-db5f-7cf0-b476-1cf14855b05d';
                 const claudeId = '019f2350-db5f-7cf0-b476-1cf14855b05e';
                 const now = Date.now();
                 window.__workspaceHistoryForkCalls = [];
                 window.__workspaceHistoryPresetForkCalls = [];
+                window.__workspaceHistoryPresetLeaseCalls = [];
                 openFreshTerminalRunLink = (event, path, command, options = {}) => {
                     event?.preventDefault?.();
                     window.__workspaceHistoryForkCalls.push({
@@ -73,6 +74,22 @@ def main() -> None:
                         terminalName: options.terminalName || '',
                         quickStart: options.quickStart,
                     });
+                    return { id: 's-workspace-history-fork' };
+                };
+                acquireSpecifiedPresetLease = async (options) => {
+                    window.__workspaceHistoryPresetLeaseCalls.push(['acquire', options]);
+                    return {
+                        lease_id: 'lease-workspace-history-fork',
+                        preset_id: options.presetId,
+                        name: 'Backup Terra',
+                    };
+                };
+                waitForSpecifiedPresetAgentStart = async (sessionId, leaseId) => {
+                    window.__workspaceHistoryPresetLeaseCalls.push(['wait', sessionId, leaseId]);
+                    return true;
+                };
+                releaseSpecifiedPresetLease = async (leaseId) => {
+                    window.__workspaceHistoryPresetLeaseCalls.push(['release', leaseId]);
                 };
 
                 state.workspaceDir = cwd;
@@ -124,6 +141,7 @@ def main() -> None:
         assert claude_row.get_by_role("link", name="fork", exact=True).count() == 0
         assert codex_row.locator(".session-action-cell .mini-button").all_inner_texts() == [
             "恢复",
+            "复制 ID",
             "fork",
             "模型",
             "更多",
@@ -160,21 +178,6 @@ def main() -> None:
                 ),
             ),
         )
-        def fulfill_preset_apply(route) -> None:
-            preset_apply_requests.append(
-                {"method": route.request.method, "url": route.request.url}
-            )
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps({"id": "api-backup", "name": "Backup Terra"}),
-            )
-
-        page.route(
-            "**/api/auth/api-presets/api-backup/apply",
-            fulfill_preset_apply,
-        )
-
         codex_row.get_by_role("button", name="指定大模型", exact=True).click()
         preset_dialog = page.locator("#workspace-history-preset-dialog")
         assert preset_dialog.is_visible()
@@ -246,16 +249,19 @@ def main() -> None:
             "() => window.__workspaceHistoryPresetForkCalls.length === 1"
         )
         results["presetClick"] = page.evaluate("window.__workspaceHistoryPresetForkCalls")
-        results["presetApplyRequests"] = preset_apply_requests
-        assert results["presetApplyRequests"] == [
-            {
-                "method": "PUT",
-                "url": f"{BASE_URL}/api/auth/api-presets/api-backup/apply",
-            }
+        results["presetLeaseCalls"] = page.evaluate(
+            "window.__workspaceHistoryPresetLeaseCalls"
+        )
+        assert results["presetLeaseCalls"][0][0] == "acquire"
+        assert results["presetLeaseCalls"][0][1]["presetId"] == "api-backup"
+        assert results["presetLeaseCalls"][0][1]["projectPath"] == "/home/codes/tools/webClx"
+        assert results["presetLeaseCalls"][1:] == [
+            ["wait", "s-workspace-history-fork", "lease-workspace-history-fork"],
+            ["release", "lease-workspace-history-fork"],
         ]
         assert results["presetClick"] == [
             {
-                "path": "/home/codes/webClx",
+                "path": "/home/codes/tools/webClx",
                 "command": "codex fork 019f2350-db5f-7cf0-b476-1cf14855b05d",
                 "terminalName": "webClx_QA_fork",
                 "quickStart": False,
@@ -267,7 +273,7 @@ def main() -> None:
         results["click"] = page.evaluate("window.__workspaceHistoryForkCalls")
         assert results["click"] == [
             {
-                "path": "/home/codes/webClx",
+                "path": "/home/codes/tools/webClx",
                 "command": "codex fork 019f2350-db5f-7cf0-b476-1cf14855b05d",
                 "terminalName": "webClx_QA_fork",
             }
@@ -301,7 +307,8 @@ def main() -> None:
                         ),
                         separated: buttons.every(
                             (rect, index) => index === 0
-                                || rect.left >= buttons[index - 1].right - 0.5,
+                                || rect.left >= buttons[index - 1].right - 0.5
+                                || rect.top >= buttons[index - 1].bottom - 0.5,
                         ),
                         pageOverflow: document.documentElement.scrollWidth
                             > document.documentElement.clientWidth,

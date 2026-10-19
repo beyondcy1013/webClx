@@ -77,11 +77,12 @@ function createHarness() {
     codexConversations: [],
     workspaceDir: "/home/codes",
     workspaceHistory: [
-      { path: "/home/codes/webClx", last_opened_at: 1 },
+      { path: "/home/codes/tools/webClx", last_opened_at: 1 },
       { path: "/home/codes/other", last_opened_at: 0 },
     ],
-    workspaceHistorySelectedPath: "/home/codes/webClx",
+    workspaceHistorySelectedPath: "/home/codes/tools/webClx",
     workspaceHistorySearchAllWorkspaces: false,
+    workspaceHistoryRecentOnly: true,
   };
   const context = vm.createContext({
     console,
@@ -89,6 +90,7 @@ function createHarness() {
     workspaceHistoryRefreshButton: refreshButton,
     workspaceHistoryStatusEl: {},
     workspaceHistoryListEl: historyList,
+    workspaceHistoryPathCopyButton: null,
     workspaceHistoryPathSelectEl: pathSelect,
     workspaceHistoryOpenButton: null,
     workspaceHistoryTerminalButton: null,
@@ -159,6 +161,7 @@ test("workspace history waits for settings before its first directory request", 
     claudeViewEl: null,
     settingsViewEl: null,
     desktopViewEl: null,
+    agyViewEl: null,
     workspaceDirInputEl: {},
     window: { requestAnimationFrame() {} },
     setTabPanelActive() {},
@@ -209,23 +212,25 @@ test("workspace history shows core and enrichment progress before reporting load
   assert.equal(harness.refreshButton.disabled, true);
   assert.match(harness.statuses.at(-1).message, /0\/3/);
 
-  harness.requests.get("/api/terminal/sessions?path=webClx").resolve({
+  harness.requests.get("/api/terminal/sessions?path=webClx&history=true").resolve({
     sessions: [
-      { id: "terminal-1", path: "webClx", display_path: "/home/codes/webClx" },
+      { id: "terminal-1", path: "webClx", display_path: "/home/codes/tools/webClx" },
       { id: "terminal-other", path: "other", display_path: "/home/codes/other" },
     ],
   });
   await flushPromises();
   assert.match(harness.statuses.at(-1).message, /1\/3/);
+  assert.match(harness.statuses.at(-1).message, /已获取 2 条/);
 
   harness.requests.get("/api/terminal/resume-archives").resolve({ archives: [] });
-  harness.requests.get("/api/terminal/codex-conversations?cwd=%2Fhome%2Fcodes%2FwebClx").resolve({
+  harness.requests.get("/api/terminal/codex-conversations?cwd=%2Fhome%2Fcodes%2FwebClx&recent_days=7").resolve({
     conversations: [
-      { session_id: "conversation-1", cwd: "/home/codes/webClx" },
+      { session_id: "conversation-1", cwd: "/home/codes/tools/webClx" },
       { session_id: "conversation-other", cwd: "/home/codes/other" },
     ],
   });
   await flushPromises();
+  assert.match(harness.statuses.at(-1).message, /已获取 4 条/);
 
   assert.equal(harness.state.workspaceHistoryLoadState, "enriching");
   assert.ok(
@@ -254,7 +259,7 @@ test("workspace history keeps a visible error state when a core request fails", 
   const harness = createHarness();
   const refreshPromise = harness.context.refreshWorkspaceHistoryConversations();
 
-  harness.requests.get("/api/terminal/sessions?path=webClx").reject(new Error("会话接口不可用"));
+  harness.requests.get("/api/terminal/sessions?path=webClx&history=true").reject(new Error("会话接口不可用"));
   await refreshPromise;
 
   assert.equal(harness.state.workspaceHistoryLoadState, "error");
@@ -266,16 +271,16 @@ test("workspace history keeps a visible error state when a core request fails", 
 
 test("workspace history prefers the browser current directory on first open", () => {
   const harness = createHarness();
-  harness.state.currentWorkspaceDirectoryPath = "/home/codes/webClx";
+  harness.state.currentWorkspaceDirectoryPath = "/home/codes/tools/webClx";
   harness.state.workspaceHistorySelectedPath = "";
 
   harness.context.syncWorkspaceHistoryPathSelect([
     { path: "/home/codes/deleted", lastActivity: 2 },
-    { path: "/home/codes/webClx", lastActivity: 1 },
+    { path: "/home/codes/tools/webClx", lastActivity: 1 },
   ]);
 
-  assert.equal(harness.state.workspaceHistorySelectedPath, "/home/codes/webClx");
-  assert.equal(harness.pathSelect.children.find((option) => option.selected)?.value, "/home/codes/webClx");
+  assert.equal(harness.state.workspaceHistorySelectedPath, "/home/codes/tools/webClx");
+  assert.equal(harness.pathSelect.children.find((option) => option.selected)?.value, "/home/codes/tools/webClx");
 });
 
 test("workspace history keeps conversations when the selected directory no longer exists", async () => {
@@ -284,10 +289,10 @@ test("workspace history keeps conversations when the selected directory no longe
   const refreshPromise = harness.context.refreshWorkspaceHistoryConversations();
 
   harness.requests
-    .get("/api/terminal/sessions?path=deleted")
+    .get("/api/terminal/sessions?path=deleted&history=true")
     .reject(new Error("路径不存在: No such file or directory (os error 2)"));
   harness.requests.get("/api/terminal/resume-archives").resolve({ archives: [] });
-  harness.requests.get("/api/terminal/codex-conversations?cwd=%2Fhome%2Fcodes%2Fdeleted").resolve({
+  harness.requests.get("/api/terminal/codex-conversations?cwd=%2Fhome%2Fcodes%2Fdeleted&recent_days=7").resolve({
     conversations: [{ session_id: "conversation-deleted", cwd: "/home/codes/deleted" }],
   });
   await refreshPromise;
@@ -305,13 +310,13 @@ test("workspace history loads all directories only after an explicit all-workspa
   harness.state.workspaceHistorySearchAllWorkspaces = true;
   const refreshPromise = harness.context.refreshWorkspaceHistoryConversations();
 
-  assert.ok(harness.requests.has("/api/terminal/sessions?all=true"));
-  assert.ok(harness.requests.has("/api/terminal/codex-conversations"));
-  assert.equal(harness.requests.has("/api/terminal/sessions?path=webClx"), false);
+  assert.ok(harness.requests.has("/api/terminal/sessions?all=true&history=true"));
+  assert.ok(harness.requests.has("/api/terminal/codex-conversations?recent_days=7"));
+  assert.equal(harness.requests.has("/api/terminal/sessions?path=webClx&history=true"), false);
 
-  harness.requests.get("/api/terminal/sessions?all=true").resolve({ sessions: [] });
+  harness.requests.get("/api/terminal/sessions?all=true&history=true").resolve({ sessions: [] });
   harness.requests.get("/api/terminal/resume-archives").resolve({ archives: [] });
-  harness.requests.get("/api/terminal/codex-conversations").resolve({ conversations: [] });
+  harness.requests.get("/api/terminal/codex-conversations?recent_days=7").resolve({ conversations: [] });
   await refreshPromise;
 
   assert.equal(harness.state.workspaceHistoryLoadState, "loaded");
@@ -342,12 +347,12 @@ test("workspace history labels a completed empty result instead of looking unfin
 test("workspace history deletion removes only the matching local conversation state", () => {
   const harness = createHarness();
   harness.state.codexConversations = [
-    { session_id: "target-session", cwd: "/home/codes/webClx" },
-    { session_id: "kept-session", cwd: "/home/codes/webClx" },
+    { session_id: "target-session", cwd: "/home/codes/tools/webClx" },
+    { session_id: "kept-session", cwd: "/home/codes/tools/webClx" },
   ];
   harness.state.terminalArchives = [
-    { resume_id: "target-session", cwd: "/home/codes/webClx" },
-    { resume_id: "kept-session", cwd: "/home/codes/webClx" },
+    { resume_id: "target-session", cwd: "/home/codes/tools/webClx" },
+    { resume_id: "kept-session", cwd: "/home/codes/tools/webClx" },
   ];
 
   harness.context.removeWorkspaceHistoryConversationLocally("target-session");

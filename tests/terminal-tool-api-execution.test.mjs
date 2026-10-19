@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
+import { createRequire } from "node:module";
+const workflowSettings = createRequire(import.meta.url)("../static/terminal-settings.js");
 
 const toolActionsSource = readFileSync(
   new URL("../static/terminal-tool-actions.js", import.meta.url),
@@ -64,6 +66,7 @@ function createHarness() {
     TERMINAL_TOOL_ACTION_TYPES: [],
     terminalToolMenuStatusEl: null,
     terminalToolMenuEl: null,
+    terminalToolsMenuEl: null,
     state: {
       activeSessionId: "session-old",
       currentPath: "webClx",
@@ -181,9 +184,10 @@ function createHarness() {
     },
   };
 
+  sandbox.WebClxTerminalSettings = workflowSettings;
   vm.createContext(sandbox);
   vm.runInContext(
-    `let mobileKeySendQueue = Promise.resolve();
+    `var mobileKeySendQueue = Promise.resolve();
      const MOBILE_SLASH_COMMAND_ENTER_DELAY_MS = 5;
      const MOBILE_SLASH_COMMAND_CONFIRM_DELAY_MS = 1;
      const MOBILE_TEXT_COMMAND_ENTER_DELAY_MS = 5;
@@ -231,6 +235,87 @@ test("new-terminal tool waits for replay settlement before advancing", async () 
   harness.setReplaySettled(true);
   await pending;
   assert.equal(execution.sessionId, "session-new");
+  assert.equal(harness.createCalls[0].path, "webClx");
+});
+
+test("create_terminal keeps frozen source path while focus moves to another project", async () => {
+  const harness = createHarness();
+  harness.setReplaySettled(true);
+  const execution = {
+    sessionId: "session-old",
+    sourceSessionId: "session-old",
+    sourcePath: "project-a",
+  };
+  harness.sandbox.state.currentPath = "project-b";
+  harness.sandbox.state.activeSessionId = "session-focus-b";
+
+  await harness.sandbox.executeTerminalToolAction(
+    { kind: "create_terminal" },
+    execution,
+  );
+
+  assert.equal(harness.createCalls.length, 1);
+  assert.equal(harness.createCalls[0].path, "project-a");
+  assert.equal(harness.createCalls[0].origin, "workflow");
+  assert.equal(execution.sessionId, "session-new");
+
+  await harness.sandbox.executeTerminalToolAction(
+    { kind: "send_command", value: "load project-a context" },
+    execution,
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(harness.apiCalls)), [
+    {
+      command: "load project-a context",
+      options: { sessionId: "session-new", throwOnError: true },
+    },
+  ]);
+});
+
+test("create_terminal preserves the frozen empty workspace root", async () => {
+  const harness = createHarness();
+  harness.setReplaySettled(true);
+  harness.sandbox.state.currentPath = "project-b";
+  const execution = { sourcePath: "" };
+
+  await harness.sandbox.executeTerminalToolAction(
+    { kind: "create_terminal" },
+    execution,
+  );
+
+  assert.equal(harness.createCalls.length, 1);
+  assert.equal(harness.createCalls[0].path, "");
+  assert.equal(execution.sessionId, "session-new");
+});
+
+test("create_terminal failure prevents later workflow actions", async () => {
+  const harness = createHarness();
+  harness.setReplaySettled(true);
+  harness.sandbox.state.currentPath = "project-b";
+  const statuses = [];
+  harness.sandbox.updateStatus = (message, tone) => {
+    statuses.push({ message: String(message || ""), tone });
+  };
+  harness.sandbox.createSession = async () => {
+    throw new Error("创建终端失败");
+  };
+  const entry = {
+    id: "project-a-takeover",
+    kind: "action",
+    label: "项目接手",
+    actions: [
+      { kind: "create_terminal" },
+      { kind: "send_command", value: "must not run" },
+    ],
+  };
+
+  await harness.sandbox.executeTerminalToolEntry(entry);
+
+  assert.deepEqual(harness.apiCalls, []);
+  assert.equal(
+    statuses.some((item) => item.tone === "warn" && item.message.includes("创建终端失败")),
+    true,
+  );
 });
 
 test("tool commands use the auto-typed API for the stable target session", async () => {
@@ -333,6 +418,72 @@ test("targeted slash input writes only to the frozen session socket", () => {
   assert.equal(sandbox.sendTerminalInputToSession("\r", "missing"), false);
 });
 
+test("compact slash command sends Esc and command as separate PTY input events", async () => {
+  const activeMessages = [];
+  const activeTerminalContext = {
+    sessionId: "session-active",
+    socket: { readyState: 1, send: (message) => activeMessages.push(JSON.parse(message)) },
+    pendingInputQueue: [],
+    pendingInputChars: 0,
+    inputFlushTimer: null,
+  };
+  const sandbox = {
+    activeTerminalContext,
+    window: {
+      location: { protocol: "http:", host: "webclx.test" },
+      setTimeout(callback, _delay) {
+        callback();
+        return 1;
+      },
+      clearTimeout() {},
+      requestAnimationFrame(callback) {
+        callback();
+      },
+    },
+    state: { activeSessionId: "session-active" },
+    WebSocket: { OPEN: 1 },
+    document: { visibilityState: "visible" },
+    TERMINAL_EMPTY_CONTEXT_ID: "__empty__",
+    TERMINAL_INPUT_FLUSH_DELAY_MS: 0,
+    interruptTerminalBacklogReplayForInput() {},
+    refreshTerminalInputVisibilityAfterUserInput() {},
+    updateSessionStatus() {},
+    focusTerminalAfterSoftKeyboardInput() {},
+    ensureTerminalSessionCache() {
+      return {
+        get(sessionId) {
+          return sessionId === "session-active" ? activeTerminalContext : null;
+        },
+      };
+    },
+    terminalContextSocketOpen(context) {
+      return context?.sessionId === "session-active";
+    },
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(inputTransportSource, sandbox);
+  vm.runInContext(
+    `var mobileKeySendQueue = Promise.resolve();
+     const MOBILE_ESCAPE_COMMAND_SEPARATION_MS = 0;
+     const MOBILE_SLASH_COMMAND_ENTER_DELAY_MS = 0;
+     const MOBILE_SLASH_COMMAND_CONFIRM_DELAY_MS = 0;
+     const MOBILE_KEY_SEQUENCES = { escape: String.fromCharCode(27), enter: String.fromCharCode(13) };
+`,
+    sandbox,
+  );
+  vm.runInContext(mobileKeysSource, sandbox);
+
+  assert.equal(sandbox.sendSlashCommand("/compact"), true);
+  await sandbox.mobileKeySendQueue;
+
+  assert.deepEqual(activeMessages, [
+    { type: "input", data: "\u001b" },
+    { type: "input", data: "/compact" },
+    { type: "input", data: "\r" },
+    { type: "input", data: "\r" },
+  ]);
+});
+
 test("fork tool reads source UUID, creates a terminal, and runs codex fork there", async () => {
   const harness = createHarness();
   harness.setReplaySettled(true);
@@ -429,19 +580,9 @@ test("fork resume waiting accepts the rendered baseline Session within the lates
   assert.equal(harness.bufferReadLimits.at(-1), 20);
 });
 
-test("terminal page cache-busts every script changed by the API execution fix", () => {
-  assert.match(terminalHtml, /terminal-settings\.js\?v=20260812c/);
-  assert.match(terminalHtml, /terminal-focus-selection\.js\?v=20260803b/);
-  assert.match(terminalHtml, /terminal-input-transport\.js\?v=20260801a/);
-  assert.match(terminalHtml, /specified-preset-actions\.js\?v=20260812a/);
-  assert.match(terminalHtml, /terminal-command-quickstart\.js\?v=20260803b/);
-  assert.match(terminalHtml, /terminal-tools\.js\?v=20260725a/);
-  assert.match(terminalHtml, /terminal-specified-task\.js\?v=20260812a/);
-  assert.match(terminalHtml, /terminal-tool-actions\.js\?v=20260727i/);
-  assert.match(terminalHtml, /terminal-settings-loader\.js\?v=20260803f/);
-  assert.match(terminalHtml, /terminal-sessions\.js\?v=20260731a/);
-  assert.match(terminalHtml, /terminal-mobile-keys\.js\?v=20260812a/);
-  assert.match(terminalHtml, /terminal\.js\?v=20260810a/);
+test("terminal page cache-busts the workflow path fix exactly once", () => {
+  assert.match(terminalHtml, /terminal-tool-actions\.js\?v=20260926-workflow-history/);
+  assert.equal((terminalHtml.match(/src="\/assets\/terminal-tool-actions\.js\?/g) || []).length, 1);
 });
 
 test("auto-typed API failures can propagate to the tool workflow", async () => {
@@ -521,6 +662,7 @@ test("codex_launch resolves preset and launches with configured fields", async (
   assert.equal(launch.sessionAction, "new");
   assert.equal(launch.terminalName, "代理设置");
   assert.equal(launch.quickStart, false);
+  assert.equal(launch.temporary, true);
   assert.equal(launch.origin, "agent");
   assert.equal(launch.ownerKey, "");
   assert.equal(

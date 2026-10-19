@@ -49,6 +49,17 @@ function buildWorkspaceUrl(homePath = "/workspace") {
   return `${homePath || "/"}${query ? `?${query}` : ""}`;
 }
 
+// The floating schedule counter opens a compact task editor for this terminal.
+function openScheduledTaskManagement() {
+  // 定时任务管理器是页面内对话框，不打开真实浏览器窗口。
+  const dialog = document.getElementById("terminal-scheduled-tasks-dialog");
+  if (dialog && typeof openScheduledTasksDialog === "function") {
+    openScheduledTasksDialog();
+    return;
+  }
+  dialog?.showModal();
+}
+
 function currentLocationSessionId() {
   return readLocationState().sessionId;
 }
@@ -182,7 +193,17 @@ function syncTerminalHostHeight() {
     `${Math.ceil(mobileKeyboardReserve)}px`,
   );
 
-  const nextHeight = Math.max(Math.round(viewportBounds.bottom - hostTop - reserve), 0);
+  const availableHeight = Math.max(viewportBounds.bottom - hostTop - reserve, 0);
+  // Keep a usable terminal viewport, but never collapse page scrolling to zero.
+  // Runtime height otherwise equalled the remaining visible space on phones,
+  // leaving users no way to scroll back to navigation or history.
+  const minimumHeight = Math.round(Math.max(140, window.innerHeight * 0.60));
+  const heightScale = 1;
+  const nextHeight = Math.max(
+    Math.round(availableHeight * heightScale),
+    minimumHeight,
+    0,
+  );
   const nextValue = `${nextHeight}px`;
   if (nextValue === lastTerminalHostHeight) {
     return;
@@ -316,7 +337,25 @@ function updateTerminalScrollBottomButton() {
   }
 }
 
-function handleTerminalViewportScroll() {
+function repairTerminalViewportScrollArea(event) {
+  if (event?.currentTarget && event.currentTarget !== terminalViewportElement()) {
+    return;
+  }
+  const metrics = terminalScrollMetrics();
+  if (metrics && metrics.maxScroll > Math.max(
+    metrics.viewport.scrollHeight - metrics.viewport.clientHeight, 0,
+  ) + 1) {
+    // The browser clamps scrollTop when xterm's asynchronous scroll-area
+    // refresh temporarily shrinks it. Repair the projection in capture phase
+    // before xterm reads that clamp as a request to scroll its buffer upward.
+    syncTerminalViewportDomToBuffer();
+  }
+}
+
+function handleTerminalViewportScroll(event) {
+  if (event?.currentTarget && event.currentTarget !== terminalViewportElement()) {
+    return;
+  }
   if (!terminalBacklogReplayActive && !terminalScrollSaveSuppressed()) {
     saveTerminalScrollPositionForSession(state.activeSessionId);
   }
@@ -324,8 +363,17 @@ function handleTerminalViewportScroll() {
   syncTerminalSelectionHandles();
 }
 
-function saveTerminalScrollPositionForSession(sessionId) {
-  if (!sessionId) {
+function noteTerminalUserScrollIntent() {
+  if (!activeTerminalContext) {
+    return;
+  }
+  activeTerminalContext.scrollIntentRevision = (activeTerminalContext.scrollIntentRevision || 0) + 1;
+  terminalScrollLayoutRestoreToken += 1;
+  cancelTerminalBottomAnchor();
+}
+
+function saveTerminalScrollPositionForSession(sessionId, { userIntent = false } = {}) {
+  if (!sessionId || sessionId !== state.activeSessionId || activeTerminalContext?.sessionId !== sessionId) {
     return;
   }
 
@@ -334,19 +382,32 @@ function saveTerminalScrollPositionForSession(sessionId) {
     return;
   }
 
-  terminalScrollPositions.set(sessionId, {
-    scrollTop: metrics.scrollTop,
-    maxScroll: metrics.maxScroll,
-    atBottom: metrics.atBottom,
-  });
   const context = terminalSessionCache?.get(sessionId);
+  const saved = terminalScrollPositions.get(sessionId);
+  // Layout and an unfinished write can temporarily move the viewport away
+  // from the bottom. A dropdown switch must save the intent, not that frame.
+  const preserveIntent = !userIntent && context && (
+    terminalScrollSaveSuppressed() || context.outputWriteInFlight || context.backlogReplayActive
+  );
+  const atBottom = preserveIntent ? context.followOutput !== false : metrics.atBottom;
+  const preserveReadingPosition = preserveIntent && saved?.atBottom === false &&
+    saved.scrollIntentRevision === context.scrollIntentRevision;
+  terminalScrollPositions.set(sessionId, {
+    scrollTop: atBottom ? metrics.maxScroll : preserveReadingPosition ? saved.scrollTop : metrics.scrollTop,
+    maxScroll: metrics.maxScroll,
+    atBottom,
+    scrollIntentRevision: context?.scrollIntentRevision,
+  });
   if (context) {
-    context.followOutput = metrics.atBottom;
+    context.followOutput = atBottom;
   }
 }
 
 function captureTerminalScrollSnapshotForSession(sessionId) {
-  if (!sessionId || terminalBacklogReplayActive) {
+  if (
+    !sessionId || terminalBacklogReplayActive ||
+    activeTerminalContext?.sessionId !== sessionId
+  ) {
     return null;
   }
 
@@ -358,7 +419,8 @@ function captureTerminalScrollSnapshotForSession(sessionId) {
   return {
     sessionId,
     scrollTop: metrics.scrollTop,
-    atBottom: metrics.atBottom,
+    atBottom: activeTerminalContext?.followOutput ?? metrics.atBottom,
+    scrollIntentRevision: activeTerminalContext?.scrollIntentRevision,
   };
 }
 
@@ -419,6 +481,12 @@ function suppressTerminalScrollSaveForLayout(ms = TERMINAL_LAYOUT_SCROLL_SUPPRES
 
 function restoreTerminalScrollSnapshot(snapshot) {
   if (!snapshot || snapshot.sessionId !== state.activeSessionId || terminalBacklogReplayActive) {
+    return;
+  }
+  if (
+    snapshot.scrollIntentRevision !== undefined &&
+    snapshot.scrollIntentRevision !== activeTerminalContext?.scrollIntentRevision
+  ) {
     return;
   }
 
@@ -488,11 +556,18 @@ function refreshTerminalInputVisibilityAfterPaste() {
   if (!sessionId) {
     return;
   }
+  noteTerminalUserScrollIntent();
+  const context = activeTerminalContext;
+  if (context) context.followOutput = true;
+  const scrollIntentRevision = context?.scrollIntentRevision;
   const startedAt = Date.now();
   const followUpDelays = [80, 180, 360, 720, 1200, 1800];
 
   const refresh = () => {
-    if (sessionId !== state.activeSessionId) {
+    if (
+      sessionId !== state.activeSessionId || context !== activeTerminalContext ||
+      scrollIntentRevision !== context?.scrollIntentRevision
+    ) {
       return;
     }
     scheduleTerminalRenderRefresh();
@@ -518,12 +593,19 @@ function refreshTerminalInputVisibilityAfterUserInput() {
   if (!sessionId) {
     return;
   }
+  noteTerminalUserScrollIntent();
+  const context = activeTerminalContext;
+  if (context) context.followOutput = true;
+  const scrollIntentRevision = context?.scrollIntentRevision;
 
   const startedAt = Date.now();
   const followUpDelays = [60, 140, 280, 560];
 
   const refresh = () => {
-    if (sessionId !== state.activeSessionId) {
+    if (
+      sessionId !== state.activeSessionId || context !== activeTerminalContext ||
+      scrollIntentRevision !== context?.scrollIntentRevision
+    ) {
       return;
     }
     scheduleTerminalRenderRefresh();

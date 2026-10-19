@@ -29,13 +29,28 @@ function terminalNativeKeyboardVisible() {
       return window.WebClxAndroid.isSystemKeyboardVisible() === true;
     }
   } catch {}
+  if (typeof terminalHelperTextareaFocused === "function" && terminalHelperTextareaFocused() && terminalSystemImeEnabled) {
+    return true;
+  }
   const viewportHeight = Number(window.visualViewport?.height);
   const layoutHeight = Number(window.innerHeight);
-  return (
+  if (
     Number.isFinite(viewportHeight) &&
     Number.isFinite(layoutHeight) &&
     layoutHeight - viewportHeight >= 80
-  );
+  ) {
+    return true;
+  }
+  const screenHeight = Number(window.screen?.height);
+  if (
+    Number.isFinite(screenHeight) &&
+    Number.isFinite(layoutHeight) &&
+    screenHeight - layoutHeight >= 150 &&
+    terminalSystemImeEnabled
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function terminalEditableFocusTarget(target) {
@@ -67,6 +82,9 @@ function terminalActionControlTarget(target) {
   if (!(target instanceof Element)) {
     return null;
   }
+  if (target.closest("select")) {
+    return null;
+  }
   return target.closest(
     'button, [role="button"], input[type="button"], input[type="submit"], input[type="reset"], input[type="checkbox"], label',
   );
@@ -95,9 +113,11 @@ function guardTerminalActionEditableFocus(event) {
   terminalActionKeyboardPolicyActive = true;
   terminalActionEditableFocusBlocked = !terminalActionNativeKeyboardWasVisible;
   if (terminalActionEditableFocusBlocked) {
-    blurTerminalHelperTextarea();
+    if (!(typeof softKeyboardFocusPreservingControl === "function" && softKeyboardFocusPreservingControl(target))) {
+      blurTerminalHelperTextarea();
+    }
   }
-  if (event.type === "pointerdown") {
+  if (event.type === "pointerdown" || event.type === "mousedown") {
     event.preventDefault();
   }
 }
@@ -109,7 +129,9 @@ function terminalActionPreservesVisibleNativeKeyboard() {
 function terminalActionFocusGateExempt(target) {
   return Boolean(
     target instanceof HTMLElement &&
-      (target.dataset?.terminalClipboardHelper === "true" || target.id === "session-rename-input"),
+      (target.dataset?.terminalClipboardHelper === "true" ||
+        target.id === "session-rename-input" ||
+        terminalAgentsDocDialogEl?.contains(target)),
   );
 }
 
@@ -204,6 +226,10 @@ function focusTerminalForUserInput() {
   }
 
   if (terminalSoftKeyboardVisible()) {
+    if (terminalActionPreservesVisibleNativeKeyboard()) {
+      focusTerminalForDirectInput();
+      return;
+    }
     focusTerminalAfterSoftKeyboardInput();
     return;
   }
@@ -246,8 +272,10 @@ function terminalImeResetInput() {
   return input;
 }
 
-function focusTerminalImeResetTarget() {
-  if (!terminalSoftKeyboardVisible()) {
+function focusTerminalImeResetTarget({ desktopInput = false } = {}) {
+  // Desktop soft keys do not imply a touch IME. Windows still needs an
+  // editable focus transition to rebuild the input context after a dialog.
+  if (!hasPrimaryTouchInput() && (desktopInput || !terminalSoftKeyboardVisible())) {
     const input = terminalImeResetInput();
     input.value = "";
     input.focus({ preventScroll: true });
@@ -266,7 +294,15 @@ function focusTerminalImeResetTarget() {
   }
 }
 
-function resetTerminalImeFocusContext() {
+function resetTerminalImeFocusContext({ desktopInput = false } = {}) {
+  if (!hasPrimaryTouchInput() && desktopInput) {
+    // Clear the action gate before focusing the neutral textarea, rather
+    // than after a blocked focus attempt. Native IME visibility is a touch
+    // keyboard policy and must not skip desktop input-context recovery.
+    terminalActionKeyboardPolicyActive = false;
+    terminalActionEditableFocusBlocked = false;
+    terminalActionNativeKeyboardWasVisible = false;
+  }
   if (terminalActionPreservesVisibleNativeKeyboard()) {
     syncTerminalImePolicy();
     return;
@@ -285,27 +321,64 @@ function resetTerminalImeFocusContext() {
   if (helper) {
     helper.blur();
   }
-  focusTerminalImeResetTarget();
+  focusTerminalImeResetTarget({ desktopInput });
   syncTerminalImePolicy();
 }
 
-function restoreTerminalFocusAfterDialogClose() {
-  if (terminalAutoFocusSuppressedByEditor()) {
+let terminalDialogFocusRecoveryRevision = 0;
+
+function installTerminalDialogCloseRecovery() {
+  // close does not bubble. Observe it in capture phase, then let the dialog's
+  // own handlers finish (including opening a replacement/parent dialog).
+  document.addEventListener("close", (event) => {
+    if (!(event.target instanceof HTMLDialogElement) || hasPrimaryTouchInput()) {
+      return;
+    }
+    const revision = terminalDialogFocusRecoveryRevision;
+    queueMicrotask(() => {
+      if (revision === terminalDialogFocusRecoveryRevision) {
+        restoreTerminalFocusAfterDialogClose({ desktopInput: true });
+      }
+    });
+  }, true);
+}
+
+function restoreTerminalFocusAfterDialogClose({ desktopInput = false } = {}) {
+  if (terminalAutoFocusSuppressedByEditor() || document.querySelector("dialog[open]")) {
     return;
   }
 
-  resetTerminalImeFocusContext();
-  window.requestAnimationFrame(() => {
-    window.requestAnimationFrame(() => {
+  terminalDialogFocusRecoveryRevision += 1;
+  const restoreDesktopInput = !hasPrimaryTouchInput();
+  resetTerminalImeFocusContext({ desktopInput: restoreDesktopInput });
+  const sessionId = state.activeSessionId;
+  const restore = () => {
+    if (
+      state.activeSessionId !== sessionId ||
+      terminalAutoFocusSuppressedByEditor() ||
+      document.querySelector("dialog[open]")
+    ) {
+      return;
+    }
+    if (!restoreDesktopInput) {
       focusTerminalForUserInput();
-    });
+      return;
+    }
+    const activeElement = document.activeElement;
+    if (
+      terminalActionKeyboardPolicyActive ||
+      terminalHelperTextareaFocused() ||
+      (activeElement !== document.body && activeElement !== terminalImeResetInputEl)
+    ) {
+      return;
+    }
+    focusTerminalForDirectInput();
+  };
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(restore);
   });
-  window.setTimeout(() => {
-    focusTerminalForUserInput();
-  }, 80);
-  window.setTimeout(() => {
-    focusTerminalForUserInput();
-  }, 180);
+  window.setTimeout(restore, 80);
+  window.setTimeout(restore, 180);
 }
 
 function focusTerminalAfterTransientControl() {
@@ -323,6 +396,141 @@ function focusTerminalAfterTransientControl() {
   });
 }
 
+let terminalSessionSwitchFocusInProgress = false;
+
+function terminalWorkspaceIconSelectParts(sourceSelect) {
+  if (!(sourceSelect instanceof HTMLSelectElement)) {
+    return null;
+  }
+  // The custom dropdown host is inserted as a sibling before the native
+  // select, not as an ancestor, so closest() cannot reach the trigger.
+  const trigger = sourceSelect.parentElement?.querySelector(
+    ":scope > .workspace-icon-select .workspace-icon-select-trigger"
+  );
+  const menu = sourceSelect.ownerDocument?.getElementById(
+    `${sourceSelect.id || "workspace-icon-select"}-image-menu`
+  );
+  if (!(trigger instanceof HTMLElement) && !(menu instanceof HTMLElement)) {
+    return null;
+  }
+  return { trigger, menu };
+}
+
+function focusTerminalAfterSessionSwitch(sourceSelect) {
+  // Native select popups can finish closing after their change event. Blur the
+  // control first, then retry while that transition may still own focus.
+  // The workspace-icon custom dropdown hides the native select behind a
+  // trigger button and its own menu: the controller closes the menu and
+  // re-focuses the trigger right after dispatching the change event, so real
+  // focus starts on those elements and they must count as part of the select
+  // for the retry guard below.
+  const customParts = terminalWorkspaceIconSelectParts(sourceSelect);
+  if (sourceSelect instanceof HTMLSelectElement) {
+    sourceSelect.blur();
+  }
+  customParts?.trigger?.blur();
+
+  if (terminalAutoFocusSuppressedByEditor()) {
+    return;
+  }
+
+  const restore = () => {
+    const activeElement = document.activeElement;
+    const helper = terminalHelperTextarea();
+    const activeInCustomSelect = Boolean(
+      (customParts?.trigger &&
+        (activeElement === customParts.trigger ||
+          customParts.trigger.contains(activeElement))) ||
+        (customParts?.menu &&
+          (activeElement === customParts.menu ||
+            customParts.menu.contains(activeElement)))
+    );
+    if (
+      activeElement !== sourceSelect &&
+      activeElement !== document.body &&
+      activeElement !== helper &&
+      !activeInCustomSelect
+    ) {
+      return;
+    }
+    terminalSessionSwitchFocusInProgress = true;
+    try {
+      // Clicking a custom dropdown option <button> marks the action-focus
+      // gate as blocked; a session switch must still land focus on the
+      // terminal helper, so clear the gate before focusing.
+      terminalActionKeyboardPolicyActive = false;
+      terminalActionEditableFocusBlocked = false;
+      term.focus();
+    } finally {
+      terminalSessionSwitchFocusInProgress = false;
+    }
+    syncTerminalImePolicy();
+  };
+
+  window.requestAnimationFrame(restore);
+  window.setTimeout(restore, 0);
+  window.setTimeout(restore, 80);
+  window.setTimeout(restore, 180);
+}
+
+let pendingNewTerminalLaunchFocusSessionId = "";
+
+function focusTerminalAfterNewTerminalLaunch(sessionId, sourceControl = null) {
+  const targetSessionId = String(sessionId || "").trim();
+  if (!targetSessionId) {
+    return;
+  }
+
+  pendingNewTerminalLaunchFocusSessionId = targetSessionId;
+  if (sourceControl instanceof HTMLElement && document.activeElement === sourceControl) {
+    sourceControl.blur();
+  }
+  focusTerminalForDirectInput();
+
+  const restore = () => {
+    if (pendingNewTerminalLaunchFocusSessionId !== targetSessionId) {
+      return;
+    }
+    if (state.activeSessionId !== targetSessionId) {
+      return;
+    }
+    if (!terminalContextSocketOpen(activeTerminalContext)) {
+      return;
+    }
+    if (!terminalInitialReplaySettled(activeTerminalContext)) {
+      return;
+    }
+
+    const activeElement = document.activeElement;
+    const helper = terminalHelperTextarea();
+    if (
+      activeElement !== sourceControl &&
+      activeElement !== document.body &&
+      activeElement !== helper
+    ) {
+      pendingNewTerminalLaunchFocusSessionId = "";
+      return;
+    }
+
+    pendingNewTerminalLaunchFocusSessionId = "";
+    terminalSessionSwitchFocusInProgress = true;
+    try {
+      terminalActionKeyboardPolicyActive = false;
+      terminalActionEditableFocusBlocked = false;
+      term.focus();
+    } finally {
+      terminalSessionSwitchFocusInProgress = false;
+    }
+    syncTerminalImePolicy();
+  };
+
+  window.requestAnimationFrame(restore);
+  window.setTimeout(restore, 0);
+  window.setTimeout(restore, 80);
+  window.setTimeout(restore, 280);
+  window.setTimeout(restore, 800);
+}
+
 function preventPointerFocus(element) {
   if (!element) {
     return;
@@ -330,6 +538,12 @@ function preventPointerFocus(element) {
 
   element.addEventListener("pointerdown", (event) => {
     if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+  });
+  element.addEventListener("mousedown", (event) => {
+    if (event.button !== 0) {
       return;
     }
     event.preventDefault();
@@ -378,6 +592,8 @@ function syncTerminalImePolicy() {
     syncTerminalSoftKeyboardCursor();
     return;
   }
+
+  installTerminalCursorCorrectionImeAnchor(helper);
 
   helper.setAttribute(
     "inputmode",
@@ -549,16 +765,23 @@ function handleTerminalTouchScrollMove(event) {
     rowHeight: terminalViewportRowHeight(),
   });
   const intendedLines = step.lines || Math.sign(step.remainderPixels || deltaPixels);
-  if (!terminalCanScrollTouchLines(intendedLines)) {
+  const canConsumeGesture =
+    term?.buffer?.active?.type === "alternate"
+      ? true
+      : terminalCanScrollTouchLines(intendedLines);
+  if (!canConsumeGesture) {
     terminalTouchScrollGesture.remainderPixels = 0;
+    // At the boundary, let the browser continue page scrolling. Consuming the
+    // gesture here strands the page whenever the terminal itself cannot move.
     return false;
   }
 
   terminalTouchScrollGesture.remainderPixels = step.remainderPixels;
   if (step.lines) {
+    noteTerminalUserScrollIntent();
     term.scrollLines(step.lines);
+    saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
     clearTerminalTouchSelectionCandidate(touch.identifier);
-    cancelTerminalBottomAnchor();
   }
   event.preventDefault();
   event.stopPropagation();
@@ -806,11 +1029,20 @@ function currentTerminalSelectionMetrics() {
     height: screenRect.height,
     shellLeft: shellRect.left,
     shellTop: shellRect.top,
+    shellWidth: shellRect.width,
+    shellHeight: shellRect.height,
     columns,
     rows,
     viewportY,
     maxRow: Math.max(bufferLength - 1, viewportY + rows - 1, 0),
   };
+}
+
+function resetTerminalSelectionCopyButtonPosition() {
+  terminalSelectionCopyButton?.style.removeProperty("left");
+  terminalSelectionCopyButton?.style.removeProperty("top");
+  terminalSelectionCopyButton?.style.removeProperty("bottom");
+  terminalSelectionCopyButton?.style.removeProperty("visibility");
 }
 
 function positionTerminalSelectionHandle(handle, point, metrics) {
@@ -857,7 +1089,63 @@ function syncTerminalSelectionCopyButton() {
   const hasSelection =
     (typeof term.hasSelection === "function" && term.hasSelection()) ||
     Boolean(typeof term.getSelection === "function" && term.getSelection());
-  terminalSelectionCopyButton.hidden = !hasSelection;
+  if (!hasSelection) {
+    terminalSelectionCopyButton.hidden = true;
+    return;
+  }
+
+  const selection = currentTerminalSelectionPosition();
+  const metrics = currentTerminalSelectionMetrics();
+  if (!selection || !metrics) {
+    resetTerminalSelectionCopyButtonPosition();
+    terminalSelectionCopyButton.hidden = false;
+    return;
+  }
+
+  const cellWidth = metrics.width / metrics.columns;
+  const cellHeight = metrics.height / metrics.rows;
+  const start = clampTerminalSelectionPoint(selection.start, metrics.columns, metrics.maxRow);
+  const end = clampTerminalSelectionPoint(selection.end, metrics.columns, metrics.maxRow);
+  const firstRow = Math.min(start.row, end.row);
+  const lastRow = Math.max(start.row, end.row);
+  const visibleFirstRow = Math.max(firstRow, metrics.viewportY);
+  const visibleLastRow = Math.min(lastRow, metrics.viewportY + metrics.rows - 1);
+  if (visibleFirstRow > visibleLastRow) {
+    resetTerminalSelectionCopyButtonPosition();
+    terminalSelectionCopyButton.hidden = false;
+    return;
+  }
+
+  const screenLeft = metrics.left - metrics.shellLeft;
+  const isSingleRow = firstRow === lastRow;
+  const firstColumn = isSingleRow ? Math.min(start.column, end.column) : 0;
+  const lastColumn = isSingleRow ? Math.max(start.column, end.column) : metrics.columns - 1;
+  const selectionLeft = screenLeft + firstColumn * cellWidth;
+  const selectionRight = screenLeft + (lastColumn + 1) * cellWidth;
+  const lowerSelectionTop =
+    metrics.top - metrics.shellTop + (visibleLastRow - metrics.viewportY) * cellHeight;
+  const selectionBottom = lowerSelectionTop + cellHeight;
+  const gap = 8;
+
+  // Measure after showing the button, then keep it inside the terminal host.
+  terminalSelectionCopyButton.hidden = false;
+  terminalSelectionCopyButton.style.visibility = "hidden";
+  const buttonWidth = terminalSelectionCopyButton.offsetWidth;
+  const buttonHeight = terminalSelectionCopyButton.offsetHeight;
+  const minLeft = 8;
+  const maxLeft = Math.max(minLeft, metrics.shellWidth - buttonWidth - 8);
+  const centeredLeft = (selectionLeft + selectionRight - buttonWidth) / 2;
+  const left = Math.min(Math.max(centeredLeft, minLeft), maxLeft);
+  const belowTop = selectionBottom + gap;
+  const maxTop = Math.max(8, metrics.shellHeight - buttonHeight - 8);
+  const top = belowTop <= maxTop
+    ? belowTop
+    : Math.max(8, lowerSelectionTop - buttonHeight - gap);
+
+  terminalSelectionCopyButton.style.left = `${Math.round(left)}px`;
+  terminalSelectionCopyButton.style.top = `${Math.round(Math.min(top, maxTop))}px`;
+  terminalSelectionCopyButton.style.bottom = "auto";
+  terminalSelectionCopyButton.style.visibility = "";
 }
 
 function syncTerminalSelectionControls() {
@@ -1042,17 +1330,41 @@ function terminalContextMenuEventIsTouch(event) {
 
 function closeTerminalContextMenu() {
   if (!terminalContextMenuEl || terminalContextMenuEl.hidden) {
+    terminalContextMenuCopyAction = null;
     return;
   }
 
   terminalContextMenuEl.hidden = true;
+  terminalContextMenuCopyAction = null;
 }
 
-function openTerminalContextMenu(clientX, clientY) {
+function openTerminalContextMenu(clientX, clientY, copyAction, container = document.body) {
   if (!terminalContextMenuEl) {
     return;
   }
+  if (container instanceof Node && terminalContextMenuEl.parentElement !== container) {
+    container.appendChild(terminalContextMenuEl);
+  }
 
+  terminalContextMenuCopyAction = typeof copyAction === "function" ? copyAction : null;
+  const contextAction = terminalContextMenuCopyAction?.() || null;
+  const hasSelection = contextAction
+    ? Boolean(String(contextAction.text || "").trim())
+    : Boolean(typeof term?.hasSelection === "function" && term.hasSelection());
+  if (terminalContextCopyAllButton) {
+    terminalContextCopyAllButton.textContent = contextAction?.label || (hasSelection ? "复制选中文本" : "复制全部文本");
+    terminalContextCopyAllButton.setAttribute(
+      "aria-label",
+      terminalContextCopyAllButton.textContent,
+    );
+  }
+  if (terminalContextSelectAllButton) {
+    terminalContextSelectAllButton.hidden = Boolean(hasSelection || contextAction);
+  }
+  const terminalContextAgentPromptButton = document.getElementById("terminal-context-agent-prompt");
+  if (terminalContextAgentPromptButton) {
+    terminalContextAgentPromptButton.hidden = !hasSelection || Boolean(contextAction);
+  }
   terminalContextMenuEl.hidden = false;
   terminalContextMenuEl.style.left = "0px";
   terminalContextMenuEl.style.top = "0px";
@@ -1070,6 +1382,23 @@ function openTerminalContextMenu(clientX, clientY) {
   terminalContextMenuEl.style.left = `${left}px`;
   terminalContextMenuEl.style.top = `${top}px`;
   terminalContextCopyAllButton?.focus({ preventScroll: true });
+}
+
+async function copyTerminalContextMenuSelection() {
+  const getAction = terminalContextMenuCopyAction;
+  if (typeof getAction !== "function") {
+    return false;
+  }
+
+  const action = getAction();
+  if (!action || typeof action !== "object") {
+    return false;
+  }
+
+  closeTerminalContextMenu();
+  const copied = await copyTextToClipboard(String(action.text || ""));
+  action.onCopied?.(copied);
+  return true;
 }
 
 function closeTerminalContextMenuFromOutside(event) {

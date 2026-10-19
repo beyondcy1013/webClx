@@ -46,13 +46,13 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /styles-terminal\.css\?v=20260804b/,
+  /styles-terminal\.css\?v=20260912c/,
   "terminal page should refresh the keyboard-safe FAB styles",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-navigation-layout\.js\?v=20260803b/,
+  /terminal-navigation-layout\.js\?v=20260821f/,
   "terminal page should refresh the output-anchored FAB layout script",
 );
 

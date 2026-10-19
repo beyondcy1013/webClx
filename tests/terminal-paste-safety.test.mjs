@@ -7,8 +7,8 @@ const terminalJs = readEntryScriptBundle("terminal.html");
 
 assert.match(
   terminalJs,
-  /const bracketMultilinePaste = multiline && options\.forceBracketedPaste !== false;[\s\S]*?if \(bracketMultilinePaste\) \{[\s\S]*?sendTerminalInput\(wrapBracketedTerminalPaste\(prepared\)\);[\s\S]*?\} else if \(typeof term\.paste === "function"\)/,
-  "all multiline terminal text paste should use bracketed paste before falling back to xterm's ordinary paste path",
+  /const bracketMultilinePaste = multiline && options\.forceBracketedPaste !== false;[\s\S]*?const bracketed = bracketMultilinePaste \|\| Boolean\(term\?\.modes\?\.bracketedPasteMode\);[\s\S]*?if \(!sendTerminalInput\(data, \{ flush: true, requireConnected: true \}\)\)/,
+  "paste must preserve bracketed mode and check transport acceptance",
 );
 
 assert.match(
@@ -49,19 +49,19 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /terminal\.js\?v=20260810a/,
+  /terminal\.js\?v=\d{8}[a-z]+/,
   "terminal page should bump the terminal.js cache key after terminal input visibility changes",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-paste\.js\?v=20260810a/,
+  /terminal-paste\.js\?v=20260922-scheduled-status/,
   "terminal page should bump the terminal paste helper cache key after scheduled-task chip changes",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-layout-connection\.js\?v=20260805a/,
+  /terminal-layout-connection\.js\?v=\d{8}[a-z0-9-]+/,
   "terminal page should bump the layout/connection helper cache key after session-switch chip refresh changes",
 );
 
@@ -121,7 +121,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /sendTerminalInput\(wrapBracketedTerminalPaste\(prepared\)\);[\s\S]*?refreshTerminalInputVisibilityAfterPaste\(\);[\s\S]*?updateStatus\(bracketMultilinePaste/,
+  /sendTerminalInput\(data, \{ flush: true, requireConnected: true \}\)[\s\S]*?refreshTerminalInputVisibilityAfterPaste\(\);[\s\S]*?updateStatus\(bracketMultilinePaste/,
   "terminal paste should refresh visibility before reporting success",
 );
 

@@ -39,27 +39,61 @@ function terminalShouldStickToBottomForOutput(context = activeTerminalContext) {
   if (!context) {
     return true;
   }
-  if (context !== activeTerminalContext) {
-    return context.followOutput !== false;
-  }
   if (context.backlogReplayActive) {
     return true;
   }
-
-  const metrics = terminalScrollMetrics();
-  if (!terminalScrollSaveSuppressed()) {
-    return metrics?.atBottom ?? true;
-  }
-
-  const saved = context.sessionId ? terminalScrollPositions.get(context.sessionId) : null;
-  return saved?.atBottom ?? metrics?.atBottom ?? true;
+  return context.followOutput !== false;
 }
 
-function beginTerminalBacklogReplay(context = activeTerminalContext) {
+function followBackgroundTerminalOutput(context) {
+  if (!context || context.disposed || context === activeTerminalContext) {
+    return;
+  }
+  // Background output follows even when this session was left reading history.
+  // Use its own xterm: the foreground viewport and reading intent stay intact.
+  context.followOutput = true;
+  const buffer = context.term?.buffer?.active;
+  if (buffer && buffer.viewportY !== buffer.baseY) {
+    context.term.scrollToBottom();
+  }
+  terminalScrollPositions.set(context.sessionId, {
+    scrollTop: 0,
+    maxScroll: 0,
+    atBottom: true,
+    scrollIntentRevision: context.scrollIntentRevision,
+  });
+}
+
+function beginTerminalBacklogReplay(context = activeTerminalContext, message = null) {
   if (!context || context.disposed) {
     return;
   }
   context.initialReplayPending = false;
+  const resumeAttempted = context.pendingDeltaReplay === true;
+  context.pendingDeltaReplay = false;
+  const deltaReplay = resumeAttempted && message?.delta === true;
+  if (resumeAttempted && !deltaReplay) {
+    // 客户端请求了 seq 水位续传但服务端拒绝（实例重建、backlog 缺口或
+    // 旧服务端不理解续传参数）：此刻才重建终端，旧画面保留到全量回放
+    // 结束时一次性切换，与 connectTerminal 直接重置的效果一致。
+    resetTerminalContextInstance(context);
+  }
+  // 回放 start 携带的实例标识是当前会话输出流的权威值，必须晚于上面的
+  // 重建步骤写入（重建会清空实例记录）。
+  if (message && message.instance !== undefined && message.instance !== null) {
+    context.outputInstanceId = String(message.instance);
+  }
+  context.deltaReplayActive = deltaReplay;
+  if (deltaReplay) {
+    // 增量续传只补发断线期间缺失的 chunk：缓冲区和滚动位置原样保留，
+    // 缺失字节按 live 输出路径追加，不进入隐藏式全量回放流程。
+    // 此前若因用户输入把回放打断置位，必须清除——delta chunk 是缺失
+    // 输出的唯一副本，queueTerminalOutput 的打断丢弃会永久丢内容。
+    context.backlogReplayInterrupted = false;
+    context.backlogReplayEndQueued = false;
+    syncActiveTerminalContextAliases(context);
+    return;
+  }
   if (context.backlogReplayInterrupted) {
     syncActiveTerminalContextAliases(context);
     return;
@@ -91,15 +125,29 @@ function endTerminalBacklogReplay(
   }
   context.initialReplayPending = false;
   context.hasLoadedOutput = true;
+  context.deltaReplayActive = false;
   completeTerminalContextReconnect(context);
   if (!context.backlogReplayActive) {
     if (!preserveInterrupted) {
       context.backlogReplayEndQueued = false;
       context.backlogReplayInterrupted = false;
+      // 增量续传（delta）或干净的空回放结束后缓冲区与服务端一致。
+      context.outputStreamGap = false;
+      // A cleanly finished replay is the real proof the connection is
+      // healthy again: only here do we reset reconnect backoff counters.
+      context.reconnectAttempts = 0;
+      if (typeof resetTerminalReconnectFailures === "function") {
+        resetTerminalReconnectFailures();
+      }
+      if (typeof trimTerminalSessionCache === "function") {
+        trimTerminalSessionCache();
+      }
     }
     syncActiveTerminalContextAliases(context);
     if (context === activeTerminalContext) {
       maybeRunTerminalStartupActions();
+    } else {
+      followBackgroundTerminalOutput(context);
     }
     return;
   }
@@ -108,11 +156,18 @@ function endTerminalBacklogReplay(
   context.backlogReplayActive = false;
   context.backlogReplayEndQueued = keepEndQueued;
   context.backlogReplayInterrupted = preserveInterrupted && context.backlogReplayInterrupted;
+  // 一次未被打断的回放结束后，缓冲区重新与服务端输出流一致，可以再次
+  // 作为 seq 水位续传的基线。
+  if (!context.backlogReplayInterrupted) {
+    context.outputStreamGap = false;
+    context.reconnectAttempts = 0;
+    if (typeof resetTerminalReconnectFailures === "function") {
+      resetTerminalReconnectFailures();
+    }
+  }
   syncActiveTerminalContextAliases(context);
   if (context !== activeTerminalContext) {
-    if (context.followOutput !== false) {
-      context.term.scrollToBottom?.();
-    }
+    followBackgroundTerminalOutput(context);
     return;
   }
 
@@ -142,7 +197,7 @@ let terminalBottomAnchorToken = 0;
 let terminalBottomAnchorSessionId = null;
 
 function scheduleTerminalBottomAnchorAfterReplay(sessionId) {
-  if (!sessionId || terminalBacklogReplayInterrupted) {
+  if (!sessionId || terminalBacklogReplayInterrupted || activeTerminalContext?.followOutput === false) {
     return;
   }
 
@@ -156,7 +211,8 @@ function scheduleTerminalBottomAnchorAfterReplay(sessionId) {
       if (
         token !== terminalBottomAnchorToken ||
         sessionId !== state.activeSessionId ||
-        sessionId !== terminalBottomAnchorSessionId
+        sessionId !== terminalBottomAnchorSessionId ||
+        activeTerminalContext?.followOutput === false
       ) {
         return;
       }
@@ -199,6 +255,7 @@ function resetTerminalOutputQueue(context = activeTerminalContext) {
   context.synchronizedOutputTransformer = null;
   context.outputQueue = [];
   context.outputWriteInFlight = false;
+  context.outputReplayWriteInFlight = false;
   context.outputWriteId += 1;
   syncActiveTerminalContextAliases(context);
 }
@@ -341,6 +398,9 @@ function drainTerminalOutputQueue(context = activeTerminalContext) {
 
   let nextItem = context.outputQueue.shift();
   if (!nextItem) {
+    if (typeof trimTerminalSessionCache === "function") {
+      trimTerminalSessionCache();
+    }
     return;
   }
 
@@ -355,10 +415,17 @@ function drainTerminalOutputQueue(context = activeTerminalContext) {
     return;
   }
 
+  if (nextItem.kind === "viewport_size") {
+    applyTerminalCanonicalViewportSize(nextItem.size, context);
+    drainTerminalOutputQueue(context);
+    return;
+  }
+
   nextItem = mergeQueuedTerminalOutputItem(nextItem, context);
   context.outputWriteInFlight = true;
+  // Only replay writes gate startup; live output may never become idle.
+  context.outputReplayWriteInFlight = Boolean(nextItem.replay);
   const writeId = ++context.outputWriteId;
-  const stickToBottom = terminalShouldStickToBottomForOutput(context);
   context.hasLoadedOutput = true;
   syncActiveTerminalContextAliases(context);
   if (context === activeTerminalContext) {
@@ -374,7 +441,10 @@ function drainTerminalOutputQueue(context = activeTerminalContext) {
     }
 
     context.outputWriteInFlight = false;
-    context.followOutput = stickToBottom;
+    context.outputReplayWriteInFlight = false;
+    // User input/scroll and dropdown switches can happen while xterm parses.
+    // Use the latest session intent instead of a pre-write viewport snapshot.
+    const stickToBottom = terminalShouldStickToBottomForOutput(context);
     syncActiveTerminalContextAliases(context);
     scheduleTerminalRenderRefresh(context);
     if (context === activeTerminalContext) {
@@ -386,8 +456,8 @@ function drainTerminalOutputQueue(context = activeTerminalContext) {
       if (!context.backlogReplayActive) {
         syncTerminalCursorCorrection();
       }
-    } else if (stickToBottom) {
-      context.term.scrollToBottom?.();
+    } else {
+      followBackgroundTerminalOutput(context);
     }
     const followingItem = context.outputQueue[0];
     if (followingItem?.kind === "output" && !followingItem.replay) {
@@ -431,6 +501,31 @@ function queueTerminalOutput(bytes, token, context = activeTerminalContext) {
   }
 }
 
+function queueTerminalViewportSize(size, token, context = activeTerminalContext) {
+  const cols = Math.trunc(Number(size?.cols));
+  const rows = Math.trunc(Number(size?.rows));
+  if (
+    !context ||
+    context.disposed ||
+    token !== context.connectionToken ||
+    !Number.isFinite(cols) ||
+    !Number.isFinite(rows) ||
+    cols < 2 ||
+    rows < 2
+  ) {
+    return;
+  }
+
+  const previous = context.outputQueue[context.outputQueue.length - 1];
+  if (previous?.kind === "viewport_size" && previous.token === token) {
+    previous.size = { cols, rows };
+  } else {
+    context.outputQueue.push({ kind: "viewport_size", size: { cols, rows }, token });
+  }
+  syncActiveTerminalContextAliases(context);
+  drainTerminalOutputQueue(context);
+}
+
 function queueTerminalBacklogReplayEnd(token, context = activeTerminalContext) {
   if (!context || context.disposed) {
     return;
@@ -468,10 +563,13 @@ function interruptTerminalBacklogReplayForInput() {
   if (!context) {
     return;
   }
+  // 被打断的回放会丢弃队列中的回放字节，缓冲区自此与服务端输出流不再
+  // 一致；在下一次完整回放重建缓冲前，禁止用它做 seq 水位续传的基线。
   if (!context.backlogReplayActive) {
     if (context.initialReplayPending) {
       context.initialReplayPending = false;
       context.backlogReplayInterrupted = true;
+      context.outputStreamGap = true;
       context.outputQueue = context.outputQueue.filter((item) => !item.replay);
       syncActiveTerminalContextAliases(context);
     }
@@ -479,6 +577,7 @@ function interruptTerminalBacklogReplayForInput() {
   }
 
   context.backlogReplayInterrupted = true;
+  context.outputStreamGap = true;
   context.outputQueue = context.outputQueue.filter((item) => !item.replay);
   syncActiveTerminalContextAliases(context);
   endTerminalBacklogReplay({ preserveInterrupted: true }, context);
@@ -494,7 +593,7 @@ function handleTerminalBacklogReplayControl(
   }
 
   if (message.action === "start") {
-    beginTerminalBacklogReplay(context);
+    beginTerminalBacklogReplay(context, message);
   } else if (message.action === "end") {
     queueTerminalBacklogReplayEnd(token, context);
   }
@@ -522,8 +621,80 @@ function scrollTerminalToTop() {
 // immediately but leave scrollTop and sometimes _scrollArea height stale until
 // the next frame. Use the buffer position as the canonical value and keep the
 // DOM projection synchronized before xterm interprets more scroll input.
-function syncTerminalViewportScrollBeforeWheel() {
-  syncTerminalViewportDomToBuffer();
+function syncTerminalViewportScrollBeforeWheel(event) {
+  // Real wheel input targets the canvas inside .xterm-screen; .xterm-viewport
+  // is a sibling, so a viewport-level wheel listener never fires. Guard at
+  // document level and only act when the wheel is over the terminal.
+  if (!isTerminalEventTarget(event?.target)) {
+    return;
+  }
+  const synced = syncTerminalViewportDomToBuffer();
+  if (
+    Number(event.deltaY) &&
+    term?.buffer?.active?.type !== "alternate" &&
+    !term?._core?.coreMouseService?.areMouseEventsActive
+  ) {
+    noteTerminalUserScrollIntent();
+    const context = activeTerminalContext;
+    const scrollIntentRevision = context?.scrollIntentRevision;
+    if (context && Number(event.deltaY) < 0 && !terminalScrollMetrics()?.atTop) {
+      context.followOutput = false;
+    }
+    // xterm's wheel handler runs after this capture listener. Save after it
+    // scrolls, even within the layout suppression window of a fresh switch.
+    window.requestAnimationFrame(() => {
+      if (context === activeTerminalContext && scrollIntentRevision === context?.scrollIntentRevision) {
+        saveTerminalScrollPositionForSession(context?.sessionId, { userIntent: true });
+      }
+    });
+  }
+
+  // xterm scrolls by mutating scrollTop itself and never preventDefaults, so
+  // on a page with scrollable overflow below the terminal every wheel step
+  // also chained into the page scroll, sliding the terminal out of view. The
+  // terminal consumes the gesture entirely; page scrolling happens outside the
+  // terminal (page scroll rail, non-terminal areas, touch outside term).
+  // Consume the gesture only when the terminal can actually move in this
+  // direction. Letting boundary wheel events pass restores scrolling to the
+  // rest of the page, which had become unreachable in common terminal views.
+  // In headless Chrome, canceling the untrusted-looking terminal wheel still
+  // suppresses synthetic wheel chaining even when defaultPrevented reads false.
+  // Keep an explicit browser-side page scroll for valid upward boundary input.
+  if (
+    synced &&
+    Number(event?.deltaY) < 0 &&
+    terminalScrollMetrics()?.atTop &&
+    window.scrollY > 0
+  ) {
+    event.preventDefault();
+    window.scrollBy({ top: Number(event.deltaY), behavior: "auto" });
+    return;
+  }
+  if (
+    synced &&
+    Number(event?.deltaY) > 0 &&
+    terminalScrollMetrics()?.atBottom
+  ) {
+    event.preventDefault();
+  }
+}
+
+// xterm.js translates wheel input into up/down arrow key sequences whenever
+// the active buffer has no scrollback — that is the alternate buffer used by
+// Codex/Claude TUIs. Their input box then interprets those injected arrow keys
+// as history navigation. Only real arrow keys may navigate history, so block
+// the event before it reaches xterm's screen-level handler. Mouse tracking
+// stays untouched so apps like htop keep receiving wheel events.
+function blockTerminalAlternateBufferWheelHistory(event) {
+  const buffer = term?.buffer?.active;
+  if (!buffer || buffer.type !== "alternate") {
+    return;
+  }
+  if (term?._core?.coreMouseService?.areMouseEventsActive) {
+    return;
+  }
+  event.preventDefault();
+  event.stopImmediatePropagation();
 }
 
 function syncTerminalViewportDomToBuffer() {
@@ -548,8 +719,14 @@ function syncTerminalViewportDomToBuffer() {
   const canvasHeight = dimensions?.canvasHeight;
   if (Number.isFinite(canvasHeight) && canvasHeight > 0) {
     const viewportHeight = viewport.offsetHeight;
+    // The canonical shared viewport can have more rows than this browser's
+    // visible host (for example, a desktop and a phone viewing one session).
+    // In that case the canvas is taller than the DOM viewport, but it must not
+    // reduce the scroll area: doing so makes the lower buffer rows unreachable
+    // until a later input/layout pass happens to refit xterm.
+    const viewportCanvasDifference = Math.max(viewportHeight - canvasHeight, 0);
     const desiredBufferHeight =
-      Math.round(rowHeight * buffer.length) + (viewportHeight - canvasHeight);
+      Math.round(rowHeight * buffer.length) + viewportCanvasDifference;
     if (Number.isFinite(desiredBufferHeight) && desiredBufferHeight > 0) {
       const scrollArea = coreViewport._scrollArea;
       if (
@@ -619,17 +796,23 @@ function bindTerminalViewportScroll() {
     return;
   }
 
+  terminalViewportScrollEl?.removeEventListener("scroll", repairTerminalViewportScrollArea, true);
   terminalViewportScrollEl?.removeEventListener("scroll", handleTerminalViewportScroll);
   terminalViewportScrollEl?.removeEventListener("wheel", syncTerminalViewportScrollBeforeWheel, true);
+  // addEventListener dedupes identical (type, listener, capture) pairs, so
+  // rebinding per terminal element does not stack document-level listeners.
+  document.addEventListener("wheel", syncTerminalViewportScrollBeforeWheel, {
+    passive: false,
+    capture: true,
+  });
   terminalViewportScrollEl = viewport;
+  terminalViewportScrollEl.addEventListener("scroll", repairTerminalViewportScrollArea, {
+    passive: true,
+    capture: true,
+  });
   terminalViewportScrollEl.addEventListener("scroll", handleTerminalViewportScroll, {
     passive: true,
   });
-  terminalViewportScrollEl.addEventListener(
-    "wheel",
-    syncTerminalViewportScrollBeforeWheel,
-    { passive: true, capture: true },
-  );
 }
 
 function clampNumber(value, min, max) {

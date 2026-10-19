@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ffi::{OsStr, OsString},
+    fs,
     path::PathBuf,
     time::Duration,
 };
@@ -9,10 +10,10 @@ use anyhow::{Context, Result};
 use auth_core::*;
 use axum::{
     Json,
-    extract::{Multipart, Path as AxumPath, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use terminal_core::current_timestamp_millis;
 use tokio::process::Command;
 use tracing::warn;
@@ -23,7 +24,9 @@ pub use auth_core::{AuthPresetManager, CodexOAuthManager};
 
 mod account_import;
 mod apply;
-mod preset_run_lease;
+mod model_catalog_policy;
+mod sub2api;
+pub use model_catalog_policy::{get_model_catalog_policy, save_model_catalog_policy};
 
 #[cfg(test)]
 use account_import::API_ACCOUNT_IMPORT_MAX_ARCHIVE_DEPTH;
@@ -35,20 +38,13 @@ use account_import::collect_accounts_from_uploads;
 #[cfg(test)]
 use apply::verify_api_preset_targets;
 use apply::{
-    activate_dynamic_claude_relay_if_needed, claude_preset_with_global_defaults,
+    activate_dynamic_claude_relay_if_needed, apply_api_preset_locked, apply_auth_preset_locked,
+    claude_preset_with_global_defaults, lock_active_config_for_request,
     write_claude_preset_to_targets,
 };
 pub use apply::{
     apply_api_preset, apply_auth_preset, apply_claude_preset, apply_claude_preset_to_opencode,
-    apply_current_auth, verify_api_preset,
-};
-pub(crate) use preset_run_lease::{
-    AcquiredPresetRunLease, PresetRunKind, PresetRunLeaseManager, begin_preset_run_lease,
-    heartbeat_preset_run_lease_internal, recover_stale_preset_run_lease,
-    release_preset_run_lease_internal,
-};
-pub use preset_run_lease::{
-    acquire_preset_run_lease, heartbeat_preset_run_lease, release_preset_run_lease,
+    apply_current_auth, clear_current_auth, verify_api_preset,
 };
 
 const PRESET_TEST_TIMEOUT_SECS: u64 = 45;
@@ -87,6 +83,59 @@ pub struct ReorderPresetsRequest {
 pub struct ReorderPresetsResponse {
     pub ok: bool,
     pub ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SaveCurrentAuthPresetRequest {
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CurrentAuthActionResponse {
+    pub ok: bool,
+    pub account: Option<CurrentAuthSummary>,
+    pub preset: Option<AuthPresetSummary>,
+    pub auth_file: String,
+    /// See `CodexAccountApplyResponse::codex_daemon_restarted`.
+    #[serde(default)]
+    pub codex_daemon_restarted: bool,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ZcodeMigrationRequest {
+    #[serde(default)]
+    pub tools: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ZcodeMigrationItem {
+    pub tool: String,
+    pub imported: usize,
+    pub skipped: usize,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ZcodeMigrationResponse {
+    pub ok: bool,
+    pub source_root: String,
+    pub items: Vec<ZcodeMigrationItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToggleApiPresetFavoriteResponse {
+    pub ok: bool,
+    pub preset: ApiPresetSummary,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CodexAccountApplyQuery {
+    #[serde(default)]
+    project_path: String,
+    /// See `ApplyApiPresetQuery::skip_daemon_restart`.
+    #[serde(default)]
+    skip_daemon_restart: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -526,13 +575,15 @@ async fn sync_api_model_catalog(
     path: &std::path::Path,
     targets: &[ResolvedConfigTarget],
     bundled_catalog: Option<&Value>,
+    suppress_comp_hash_changes: bool,
 ) -> ApiResult<()> {
-    auth_core::sync_api_model_catalog(path, targets, bundled_catalog)
+    auth_core::sync_api_model_catalog(path, targets, bundled_catalog, suppress_comp_hash_changes)
         .await
         .map_err(|error| map_internal("更新 Codex 模型 metadata 失败", error))
 }
 
 async fn sync_api_model_catalogs(
+    state: &AppState,
     auth_targets: &[TerminalAuthFiles],
     config_targets: &[ResolvedConfigTarget],
 ) -> ApiResult<()> {
@@ -543,6 +594,9 @@ async fn sync_api_model_catalogs(
         return Ok(());
     }
 
+    let suppress = model_catalog_policy::load(state)
+        .await?
+        .suppress_comp_hash_changes;
     for target in auth_targets {
         let (bundled_catalog, bundled_error) =
             match read_codex_bundled_model_catalog(&target.user_name).await {
@@ -552,9 +606,13 @@ async fn sync_api_model_catalogs(
                     (None, Some(error))
                 }
             };
-        if let Err(sync_error) =
-            sync_api_model_catalog(&target.config_file, config_targets, bundled_catalog.as_ref())
-                .await
+        if let Err(sync_error) = sync_api_model_catalog(
+            &target.config_file,
+            config_targets,
+            bundled_catalog.as_ref(),
+            suppress,
+        )
+        .await
         {
             if let Some(bundled_error) = bundled_error {
                 return Err(AppError::internal(format!(
@@ -711,9 +769,13 @@ pub async fn list_auth_presets(
         current_api,
     ) = read_codex_current_state(&auth_files.auth_file, &auth_files.config_file, &api_presets)
         .await?;
-    let current_login_auth = current_auth_value
-        .as_ref()
-        .and_then(CurrentAuthState::as_login);
+    let current_login_auth = (current_mode == CurrentAuthMode::Auth)
+        .then(|| {
+            current_auth_value
+                .as_ref()
+                .and_then(CurrentAuthState::as_login)
+        })
+        .flatten();
 
     Ok(Json(AuthPresetListResponse {
         auth_file: auth_files.auth_file.display().to_string(),
@@ -789,6 +851,137 @@ pub async fn list_api_presets(
     }))
 }
 
+pub async fn list_codex_accounts(
+    State(state): State<AppState>,
+) -> ApiResult<Json<CodexAccountListResponse>> {
+    let auth_files = terminal_auth_files(&state)?;
+    let auth_presets = state.auth_manager.auth_presets_snapshot();
+    let api_presets = state.auth_manager.api_presets_snapshot();
+    let (current_auth, _, _, _, current_mode, current_api) =
+        read_codex_current_state(&auth_files.auth_file, &auth_files.config_file, &api_presets)
+            .await?;
+    let current_login = current_auth.as_ref().and_then(CurrentAuthState::as_login);
+    let upstream_proxy = state.auth_manager.upstream_proxy_settings();
+
+    let accounts = auth_presets
+        .iter()
+        .map(|preset| {
+            let summary = preset_summary(preset, current_login);
+            CodexAccountSummary {
+                kind: CodexAccountKind::Oauth,
+                id: preset.id.clone(),
+                name: preset.name.clone(),
+                active: current_mode == CurrentAuthMode::Auth && summary.active,
+                saved_at: preset.saved_at,
+                switch_count: preset.switch_count,
+                account: summary
+                    .details
+                    .email
+                    .clone()
+                    .or_else(|| Some(summary.account_id)),
+                model: None,
+                endpoint: Some("ChatGPT OAuth".to_string()),
+                favorite: false,
+            }
+        })
+        .chain(api_presets.iter().map(|preset| {
+            let summary = api_preset_summary_with_proxy_state(
+                preset,
+                current_mode,
+                current_api.as_ref(),
+                &upstream_proxy,
+            );
+            CodexAccountSummary {
+                kind: CodexAccountKind::Api,
+                id: preset.id.clone(),
+                name: preset.name.clone(),
+                active: summary.active,
+                saved_at: preset.saved_at,
+                switch_count: preset.switch_count,
+                account: Some(preset.provider_name.clone()),
+                model: api_preset_model(preset).map(str::to_string),
+                endpoint: Some(preset.base_url.clone()),
+                favorite: summary.favorite,
+            }
+        }))
+        .collect::<Vec<_>>();
+
+    Ok(Json(CodexAccountListResponse {
+        current_mode,
+        accounts,
+    }))
+}
+
+pub async fn apply_codex_account(
+    State(state): State<AppState>,
+    AxumPath((kind, preset_id)): AxumPath<(CodexAccountKind, String)>,
+    Query(query): Query<CodexAccountApplyQuery>,
+) -> ApiResult<Json<CodexAccountApplyResponse>> {
+    let _guard = lock_active_config_for_request(&state).await;
+    let (name, local_config_file, codex_daemon_restarted) = match kind {
+        CodexAccountKind::Oauth => {
+            let (response, _) = apply_auth_preset_locked(
+                &state,
+                &preset_id,
+                &query.project_path,
+                query.skip_daemon_restart,
+            )
+            .await?;
+            (response.name, response.local_config_file, response.codex_daemon_restarted)
+        }
+        CodexAccountKind::Api => {
+            let (response, _) = apply_api_preset_locked(
+                &state,
+                &preset_id,
+                &query.project_path,
+                query.skip_daemon_restart,
+            )
+            .await?;
+            (response.name, response.local_config_file, response.codex_daemon_restarted)
+        }
+    };
+
+    Ok(Json(CodexAccountApplyResponse {
+        ok: true,
+        kind,
+        id: preset_id,
+        name,
+        local_config_file,
+        codex_daemon_restarted,
+    }))
+}
+
+pub(crate) async fn current_api_preset_id(state: &AppState) -> ApiResult<Option<String>> {
+    let auth_files = terminal_auth_files(state)?;
+    let presets = state.auth_manager.api_presets_snapshot();
+    let (_, _, _, _, current_mode, current_api) =
+        read_codex_current_state(&auth_files.auth_file, &auth_files.config_file, &presets).await?;
+    Ok(presets
+        .iter()
+        .find(|preset| api_preset_matches_current_api(preset, current_mode, current_api.as_ref()))
+        .map(|preset| preset.id.clone()))
+}
+
+pub(crate) async fn apply_api_preset_for_run(
+    state: &AppState,
+    preset_id: &str,
+    project_path: &str,
+) -> ApiResult<StoredApiPreset> {
+    let _config_guard = lock_active_config_for_request(state).await;
+    let (_, preset) = apply_api_preset_locked(state, preset_id, project_path, true).await?;
+    Ok(preset)
+}
+
+pub async fn acknowledge_removed_preset_run_lease(
+    AxumPath(lease_id): AxumPath<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "lease_id": lease_id,
+        "compatibility_only": true,
+    }))
+}
+
 pub async fn reorder_api_presets(
     State(state): State<AppState>,
     Json(payload): Json<ReorderPresetsRequest>,
@@ -861,6 +1054,121 @@ pub async fn reorder_claude_presets(
     }))
 }
 
+pub async fn detect_current_codex_auth(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let _ = state.auth_manager.reload_auth_presets();
+    let auth_files = terminal_auth_files(&state)?;
+    let api_presets = state.auth_manager.api_presets_snapshot();
+    let (current_auth, _, _, _, _, _) =
+        read_codex_current_state(&auth_files.auth_file, &auth_files.config_file, &api_presets)
+            .await?;
+    let presets = state.auth_manager.auth_presets_snapshot();
+    let current_login = current_auth.as_ref().and_then(CurrentAuthState::as_login);
+
+    if let Some(current) = current_login {
+        let matched = presets.iter().find(|preset| {
+            if !current.tokens.account_id.is_empty() && !preset.auth.tokens.account_id.is_empty() {
+                current.tokens.account_id == preset.auth.tokens.account_id
+            } else {
+                current.tokens.access_token == preset.auth.tokens.access_token
+            }
+        });
+        let summary = auth_summary(current);
+        Ok(Json(json!({
+            "ok": true,
+            "matched": matched.is_some(),
+            "preset_id": matched.map(|p| p.id.as_str()),
+            "name": matched.map(|p| p.name.as_str()),
+            "email": summary.email,
+            "account_id": summary.account_id,
+            "short_id": summary.short_id,
+        })))
+    } else {
+        Ok(Json(json!({
+            "ok": true,
+            "matched": false,
+            "logged_in": false,
+        })))
+    }
+}
+
+pub async fn detect_current_codex_api(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let _ = state.auth_manager.reload_api_presets();
+    let auth_files = terminal_auth_files(&state)?;
+    let api_presets = state.auth_manager.api_presets_snapshot();
+    let (_, _, _, _, current_mode, current_api) =
+        read_codex_current_state(&auth_files.auth_file, &auth_files.config_file, &api_presets)
+            .await?;
+    let upstream_proxy = state.auth_manager.upstream_proxy_settings();
+
+    let matched = api_presets.iter().find(|preset| {
+        api_preset_summary_with_proxy_state(
+            preset,
+            current_mode,
+            current_api.as_ref(),
+            &upstream_proxy,
+        )
+        .active
+    });
+
+    let matched_model = matched.and_then(|p| {
+        p.config_overrides
+            .iter()
+            .find(|o| o.key.as_deref() == Some("model"))
+            .and_then(|o| o.value.as_deref())
+            .or(p.legacy_config_value.as_deref())
+    });
+
+    Ok(Json(json!({
+        "ok": true,
+        "matched": matched.is_some(),
+        "preset_id": matched.map(|p| p.id.as_str()),
+        "name": matched.map(|p| p.name.as_str()),
+        "model": matched_model,
+        "provider": current_api.as_ref().and_then(|a| a.provider_name.as_deref()).or_else(|| current_api.as_ref().and_then(|a| a.provider_id.as_deref())),
+        "current_mode": current_mode,
+    })))
+}
+
+pub async fn detect_current_claude(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let _ = state.auth_manager.reload_claude_presets();
+    let auth_files = terminal_auth_files(&state)?;
+    let presets = state.auth_manager.claude_presets_snapshot();
+    let effective_presets = presets
+        .iter()
+        .map(|preset| claude_preset_with_global_defaults(&state.workspace_settings, preset))
+        .collect::<ApiResult<Vec<_>>>()?;
+    let current_claude =
+        read_current_claude_state(&auth_files.claude_settings_file, &effective_presets).await;
+    let (current_claude_value, _) = match current_claude {
+        Ok(value) => (value, None),
+        Err(error) => (None, Some(error)),
+    };
+    let upstream_proxy = state.auth_manager.upstream_proxy_settings();
+
+    let matched = presets
+        .iter()
+        .zip(&effective_presets)
+        .find(|(preset, effective_preset)| {
+            claude_preset_summary_with_effective_proxy_state(
+                preset,
+                effective_preset,
+                current_claude_value.as_ref(),
+                &upstream_proxy,
+            )
+            .active
+        })
+        .map(|(preset, _)| preset);
+
+    Ok(Json(json!({
+        "ok": true,
+        "matched": matched.is_some(),
+        "preset_id": matched.map(|p| p.id.as_str()),
+        "name": matched.map(|p| p.name.as_str()),
+        "model": current_claude_value.as_ref().and_then(|c| c.default_sonnet_model.as_deref()),
+        "base_url": current_claude_value.as_ref().and_then(|c| c.base_url.as_deref()),
+    })))
+}
+
 pub async fn update_upstream_proxy_settings(
     State(state): State<AppState>,
     Json(payload): Json<UpdateUpstreamProxySettingsRequest>,
@@ -882,12 +1190,27 @@ pub async fn update_upstream_proxy_settings(
     }))
 }
 
+async fn ensure_auth_id_token_if_possible(
+    proxy_manager: &impl CodexAuthHttpClientProvider,
+    auth: &mut AuthFile,
+) {
+    if auth.tokens.id_token.trim().is_empty() && !auth.tokens.refresh_token.trim().is_empty() {
+        if let Err(error) = refresh_codex_tokens(proxy_manager, auth).await {
+            tracing::warn!(%error, "尝试通过 refresh_token 补全 id_token 失败，将使用原始凭据保存");
+        } else {
+            tracing::info!(account_id = %auth.tokens.account_id, "导入/保存 Auth 预设时已自动通过 refresh_token 换取官方 id_token");
+        }
+    }
+}
+
 pub async fn save_auth_preset(
     State(state): State<AppState>,
     Json(payload): Json<SaveAuthPresetRequest>,
 ) -> ApiResult<Json<SaveAuthPresetResponse>> {
     let auth_files = terminal_auth_files(&state)?;
-    validate_auth_file(&payload.auth)?;
+    let mut auth = payload.auth;
+    ensure_auth_id_token_if_possible(&state.proxy_manager, &mut auth).await;
+    validate_auth_file(&auth)?;
     let config_overrides = resolve_config_overrides(
         payload.config_overrides,
         payload.config_key,
@@ -899,17 +1222,27 @@ pub async fn save_auth_preset(
     )?;
 
     let mut presets = state.auth_manager.auth_presets_snapshot();
+    let name = resolve_auth_preset_name(&payload.name, &auth, &presets, None);
+    let mut details = sanitize_auth_preset_details(payload.details);
+    if details.email.is_none() {
+        let summary = auth_summary(&auth);
+        details.email = summary.email;
+        if details.plan_type.is_none() {
+            details.plan_type = summary.plan_type;
+        }
+    }
     let preset = StoredAuthPreset {
+        interchange_source: None,
         id: generate_preset_id("auth"),
-        name: resolve_auth_preset_name(&payload.name, &payload.auth, &presets, None),
+        name,
         saved_at: current_timestamp_secs(),
-        details: sanitize_auth_preset_details(payload.details),
+        details,
         config_overrides,
         legacy_config_key: None,
         legacy_config_value: None,
         legacy_secondary_config_key: None,
         legacy_secondary_config_value: None,
-        auth: payload.auth,
+        auth,
         switch_count: 0,
     };
     presets.insert(0, preset.clone());
@@ -927,13 +1260,280 @@ pub async fn save_auth_preset(
     }))
 }
 
+/// Save the current official Codex OAuth login as a local CLI preset.
+pub async fn save_current_auth_preset(
+    State(state): State<AppState>,
+    Json(payload): Json<SaveCurrentAuthPresetRequest>,
+) -> ApiResult<Json<CurrentAuthActionResponse>> {
+    let auth_files = terminal_auth_files(&state)?;
+    let current = read_current_auth_state(&auth_files.auth_file)
+        .await
+        .map_err(AppError::bad_request)?;
+    let Some(CurrentAuthState::Login(auth)) = current else {
+        return Err(AppError::bad_request("当前没有可保存的 Codex OAuth 登录。"));
+    };
+    Ok(Json(
+        save_current_auth_preset_for_login(
+            &state,
+            &payload.name,
+            auth_files.auth_file.display().to_string(),
+            auth,
+        )
+        .await?,
+    ))
+}
+
+/// Re-login/save-current for an existing account updates only the auth tokens
+/// in place — never the preset name, account details, config overrides, or
+/// switch count. The match reuses the shared account_id + id_token email rule
+/// (Team workspaces share an account_id); no match or an ambiguous match falls
+/// back to creating a new preset.
+async fn save_current_auth_preset_for_login(
+    state: &AppState,
+    name: &str,
+    auth_file_display: String,
+    auth: AuthFile,
+) -> ApiResult<CurrentAuthActionResponse> {
+    let mut presets = state.auth_manager.auth_presets_snapshot();
+    let details = auth_summary(&auth);
+    let preset = match apply::login_auth_preset_match_index(&presets, &auth) {
+        Some(index) => {
+            let preset = &mut presets[index];
+            preset.auth = auth;
+            preset.saved_at = current_timestamp_secs();
+            if details.email.is_some() {
+                preset.details.email = details.email.clone();
+            }
+            if details.plan_type.is_some() {
+                preset.details.plan_type = details.plan_type.clone();
+            }
+            preset.clone()
+        }
+        None => {
+            let preset = StoredAuthPreset {
+                interchange_source: None,
+                id: generate_preset_id("auth"),
+                name: resolve_auth_preset_name(name, &auth, &presets, None),
+                saved_at: current_timestamp_secs(),
+                details: sanitize_auth_preset_details(AuthPresetDetails {
+                    email: details.email.clone(),
+                    plan_type: details.plan_type.clone(),
+                    ..Default::default()
+                }),
+                config_overrides: Vec::new(),
+                legacy_config_key: None,
+                legacy_config_value: None,
+                legacy_secondary_config_key: None,
+                legacy_secondary_config_value: None,
+                auth,
+                switch_count: 0,
+            };
+            presets.insert(0, preset.clone());
+            preset
+        }
+    };
+    persist_auth_presets_async(&state.auth_manager, &presets).await?;
+    Ok(CurrentAuthActionResponse {
+        ok: true,
+        account: Some(details),
+        preset: Some(preset_summary(&preset, Some(&preset.auth))),
+        auth_file: auth_file_display,
+        codex_daemon_restarted: false,
+    })
+}
+
+/// Import the CLI account snapshots produced by zcode-account-manager.  This
+/// deliberately targets CLI stores only: no imported OAuth token is used by
+/// webClx's LLM proxy.
+pub async fn migrate_zcode_accounts(
+    State(state): State<AppState>,
+    Json(payload): Json<ZcodeMigrationRequest>,
+) -> ApiResult<Json<ZcodeMigrationResponse>> {
+    let auth_files = terminal_auth_files(&state)?;
+    let source_root = auth_files
+        .auth_file
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|path| path.to_path_buf())
+        .ok_or_else(|| AppError::internal("无法解析终端用户目录。"))?;
+    let requested: HashSet<String> = payload
+        .tools
+        .into_iter()
+        .map(|tool| tool.trim().to_ascii_lowercase())
+        .filter(|tool| !tool.is_empty())
+        .collect();
+    let selected = |tool: &str| requested.is_empty() || requested.contains(tool);
+    let mut items = Vec::new();
+
+    if selected("codex") {
+        let root = source_root.join(".codex").join("account_backups");
+        let mut presets = state.auth_manager.auth_presets_snapshot();
+        let mut imported = 0;
+        let mut skipped = 0;
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.is_dir() || entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let manifest = fs::read_to_string(dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+                let name = manifest
+                    .as_ref()
+                    .and_then(|value| value.get("alias").or_else(|| value.get("name")))
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("zcode Codex 账号")
+                    .to_string();
+                let bytes = match fs::read(dir.join("data").join("auth")) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let auth = match serde_json::from_slice::<AuthFile>(&bytes) {
+                    Ok(auth) => auth,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                if let Some(existing) = presets
+                    .iter_mut()
+                    .find(|preset| preset.auth.tokens.account_id == auth.tokens.account_id)
+                {
+                    existing.auth = auth;
+                    existing.name = name;
+                    existing.saved_at = current_timestamp_secs();
+                } else {
+                    let details = auth_summary(&auth);
+                    presets.push(StoredAuthPreset {
+                        interchange_source: None,
+                        id: generate_preset_id("auth"),
+                        name,
+                        saved_at: current_timestamp_secs(),
+                        details: AuthPresetDetails {
+                            email: details.email,
+                            plan_type: details.plan_type,
+                            ..Default::default()
+                        },
+                        config_overrides: Vec::new(),
+                        legacy_config_key: None,
+                        legacy_config_value: None,
+                        legacy_secondary_config_key: None,
+                        legacy_secondary_config_value: None,
+                        auth,
+                        switch_count: 0,
+                    });
+                }
+                imported += 1;
+            }
+        }
+        if imported > 0 {
+            persist_auth_presets_async(&state.auth_manager, &presets).await?;
+        }
+        items.push(ZcodeMigrationItem {
+            tool: "codex".into(),
+            imported,
+            skipped,
+            message: "已导入 Codex CLI 登录快照；仅供官方 Codex CLI 切换使用。".into(),
+        });
+    }
+
+    if selected("codebuddy") {
+        let root = source_root.join(".codebuddy").join("account_backups");
+        let mut imported = 0;
+        let mut skipped = 0;
+        if let Ok(entries) = fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                let settings = fs::read(dir.join("data").join("settings.json"))
+                    .or_else(|_| fs::read(dir.join("data").join("settings")))
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                let token = settings
+                    .as_ref()
+                    .and_then(|value| {
+                        value
+                            .pointer("/env/CODEBUDDY_AUTH_TOKEN")
+                            .and_then(Value::as_str)
+                            .or_else(|| value.get("CODEBUDDY_AUTH_TOKEN").and_then(Value::as_str))
+                    })
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let Some(token) = token else {
+                    skipped += 1;
+                    continue;
+                };
+                let name = fs::read_to_string(dir.join("manifest.json"))
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                    .and_then(|value| {
+                        value
+                            .get("alias")
+                            .or_else(|| value.get("name"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .unwrap_or_else(|| "zcode CodeBuddy 账号".into());
+                if state
+                    .codebuddy_manager
+                    .add_manual_account(token.to_string(), String::new(), name, None)
+                    .await
+                    .is_ok()
+                {
+                    imported += 1;
+                } else {
+                    skipped += 1;
+                }
+            }
+        }
+        items.push(ZcodeMigrationItem {
+            tool: "codebuddy".into(),
+            imported,
+            skipped,
+            message: "已导入 CodeBuddy CLI 账号；不会写入 Codex_API 预设。".into(),
+        });
+    }
+
+    if selected("gemini") || selected("agy") {
+        let tool = if selected("agy") { "agy" } else { "gemini" };
+        let root = source_root.join(".gemini").join("account_backups");
+        let count = fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| entry.path().is_dir())
+                    .count()
+            })
+            .unwrap_or(0);
+        let (imported, skipped) = state.agy_manager.import_snapshots();
+        items.push(ZcodeMigrationItem {
+            tool: tool.into(),
+            imported,
+            skipped: skipped.max(count.saturating_sub(imported)),
+            message: "已导入独立 AGY CLI 账号库；不会写入 LLM_API。".into(),
+        });
+    }
+
+    Ok(Json(ZcodeMigrationResponse {
+        ok: true,
+        source_root: source_root.display().to_string(),
+        items,
+    }))
+}
+
 pub async fn update_auth_preset(
     State(state): State<AppState>,
     AxumPath(preset_id): AxumPath<String>,
     Json(payload): Json<SaveAuthPresetRequest>,
 ) -> ApiResult<Json<SaveAuthPresetResponse>> {
     let auth_files = terminal_auth_files(&state)?;
-    validate_auth_file(&payload.auth)?;
+    let mut auth = payload.auth;
+    ensure_auth_id_token_if_possible(&state.proxy_manager, &mut auth).await;
+    validate_auth_file(&auth)?;
     let config_overrides = resolve_config_overrides(
         payload.config_overrides,
         payload.config_key,
@@ -949,19 +1549,28 @@ pub async fn update_auth_preset(
         return Err(AppError::not_found("找不到指定的 auth 预设。"));
     };
 
-    let name = resolve_auth_preset_name(&payload.name, &payload.auth, &presets, Some(&preset_id));
+    let name = resolve_auth_preset_name(&payload.name, &auth, &presets, Some(&preset_id));
+    let mut details = sanitize_auth_preset_details(payload.details);
+    if details.email.is_none() {
+        let summary = auth_summary(&auth);
+        details.email = summary.email;
+        if details.plan_type.is_none() {
+            details.plan_type = summary.plan_type;
+        }
+    }
     let preset = StoredAuthPreset {
+        interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
         saved_at: current_timestamp_secs(),
-        details: sanitize_auth_preset_details(payload.details),
+        details,
         config_overrides,
         legacy_config_key: None,
         legacy_config_value: None,
         legacy_secondary_config_key: None,
         legacy_secondary_config_value: None,
-        auth: payload.auth,
-        switch_count: 0,
+        auth,
+        switch_count: presets[index].switch_count,
     };
     presets[index] = preset.clone();
 
@@ -982,7 +1591,6 @@ pub async fn save_api_preset(
     State(state): State<AppState>,
     Json(payload): Json<SaveApiPresetRequest>,
 ) -> ApiResult<Json<SaveApiPresetResponse>> {
-    let auth_files = terminal_auth_files(&state)?;
     let base_url = sanitize_base_url(payload.base_url)
         .map_err(|error| AppError::bad_request(format!("API 预设无效: {error}")))?;
     let provider_name = sanitize_api_provider_name(payload.provider_name, &base_url);
@@ -1012,6 +1620,7 @@ pub async fn save_api_preset(
 
     let mut presets = state.auth_manager.api_presets_snapshot();
     let preset = StoredApiPreset {
+        interchange_source: None,
         id: generate_preset_id("api"),
         name: resolve_api_preset_name(&payload.name, &base_url, &presets, None),
         saved_at: current_timestamp_secs(),
@@ -1032,12 +1641,14 @@ pub async fn save_api_preset(
         access_token: String::new(),
         account_id: String::new(),
         access_mode: None,
+        favorite: false,
         switch_count: 0,
     };
     presets.insert(0, preset.clone());
 
     persist_api_presets_async(&state.auth_manager, &presets).await?;
 
+    let auth_files = terminal_auth_files(&state)?;
     let current_auth = read_current_auth_state(&auth_files.auth_file)
         .await
         .ok()
@@ -1065,7 +1676,7 @@ pub async fn import_api_accounts(
     let parsed = parse_imported_accounts(&payload.raw_text)
         .map_err(|error| AppError::bad_request(error.to_string()))?;
 
-    Ok(Json(save_imported_api_accounts(&state, parsed, Vec::new()).await?))
+    Ok(Json(save_imported_accounts(&state, parsed, Vec::new()).await?))
 }
 
 pub async fn import_api_accounts_file(
@@ -1097,9 +1708,120 @@ pub async fn import_api_accounts_file(
     )
     .map_err(|error| AppError::bad_request(error.to_string()))?;
 
-    Ok(Json(
-        save_imported_api_accounts(&state, imported.accounts, imported.errors).await?,
-    ))
+    Ok(Json(save_imported_accounts(&state, imported.accounts, imported.errors).await?))
+}
+
+async fn save_imported_accounts(
+    state: &AppState,
+    parsed: Vec<ImportedAccount>,
+    errors: Vec<String>,
+) -> ApiResult<ImportApiAccountsResponse> {
+    let (oauth_accounts, api_accounts): (Vec<_>, Vec<_>) = parsed
+        .into_iter()
+        .partition(|account| account.is_sub2api_data);
+
+    let mut api_response = save_imported_api_accounts(state, api_accounts, Vec::new()).await?;
+    let mut auth_response = save_imported_auth_accounts(state, oauth_accounts).await?;
+
+    let mut saved_names = auth_response.saved_names;
+    saved_names.append(&mut api_response.saved_names);
+    let mut response_errors = errors;
+    response_errors.append(&mut auth_response.errors);
+    response_errors.append(&mut api_response.errors);
+
+    Ok(ImportApiAccountsResponse {
+        ok: !saved_names.is_empty(),
+        saved_count: saved_names.len(),
+        saved_names,
+        errors: response_errors,
+    })
+}
+
+async fn save_imported_auth_accounts(
+    state: &AppState,
+    parsed: Vec<ImportedAccount>,
+) -> ApiResult<ImportApiAccountsResponse> {
+    if parsed.is_empty() {
+        return Ok(ImportApiAccountsResponse {
+            ok: false,
+            saved_count: 0,
+            saved_names: Vec::new(),
+            errors: Vec::new(),
+        });
+    }
+
+    let manager = &state.auth_manager;
+    let mut presets = manager.auth_presets_snapshot();
+    let mut saved_names = Vec::new();
+    let mut errors = Vec::new();
+
+    for account in &parsed {
+        if account.account_id.is_empty() {
+            errors.push(format!("账号 {} 缺少 account_id。", account.name));
+            continue;
+        }
+
+        let mut auth = AuthFile {
+            openai_api_key: None,
+            last_refresh: if account.last_refresh.is_empty() {
+                current_rfc3339_timestamp()
+            } else {
+                account.last_refresh.clone()
+            },
+            tokens: AuthTokens {
+                access_token: account.access_token.clone(),
+                account_id: account.account_id.clone(),
+                id_token: account.id_token.clone(),
+                refresh_token: account.refresh_token.clone(),
+            },
+        };
+        ensure_auth_id_token_if_possible(&state.proxy_manager, &mut auth).await;
+        let derived_details = auth_summary(&auth);
+        let details = sanitize_auth_preset_details(AuthPresetDetails {
+            email: (!account.email.is_empty())
+                .then(|| account.email.clone())
+                .or(derived_details.email),
+            plan_type: (!account.plan_type.is_empty())
+                .then(|| account.plan_type.to_uppercase())
+                .or(derived_details.plan_type),
+            account_name: (!account.name.is_empty()).then(|| account.name.clone()),
+            login_method: Some("OAuth".to_string()),
+            ..AuthPresetDetails::default()
+        });
+
+        let preset_id = unique_import_preset_id(
+            &generate_preset_id("auth"),
+            presets.iter().map(|preset| preset.id.as_str()),
+        );
+        let resolved_name = resolve_auth_preset_name(&account.name, &auth, &presets, None);
+        let preset = StoredAuthPreset {
+            interchange_source: None,
+            id: preset_id,
+            name: resolved_name.clone(),
+            saved_at: current_timestamp_secs(),
+            details,
+            config_overrides: Vec::new(),
+            legacy_config_key: None,
+            legacy_config_value: None,
+            legacy_secondary_config_key: None,
+            legacy_secondary_config_value: None,
+            auth,
+            switch_count: 0,
+        };
+        presets.insert(0, preset);
+        saved_names.push(resolved_name);
+    }
+
+    if !saved_names.is_empty() {
+        persist_auth_presets_async(manager, &presets).await?;
+    }
+
+    Ok(ImportApiAccountsResponse {
+        ok: !saved_names.is_empty(),
+        saved_count: saved_names.len(),
+        saved_names,
+        errors,
+    })
 }
 
 async fn save_imported_api_accounts(
@@ -1130,6 +1852,7 @@ async fn save_imported_api_accounts(
 
         let resolved_name = resolve_api_preset_name(&preset_name, &base_url, &presets, None);
         let preset = StoredApiPreset {
+            interchange_source: None,
             id: preset_id,
             name: resolved_name.clone(),
             saved_at: current_timestamp_secs(),
@@ -1150,6 +1873,7 @@ async fn save_imported_api_accounts(
             access_token: account.access_token.clone(),
             account_id: account.account_id.clone(),
             access_mode: Some(ApiAccessMode::ChatgptOauth),
+            favorite: false,
             switch_count: 0,
         };
         presets.insert(0, preset);
@@ -1183,6 +1907,562 @@ fn unique_import_preset_id<'a>(
         }
     }
     unreachable!("u64 suffix space is not exhaustible")
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiSyncRequest {
+    pub base_url: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub password: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub totp_code: String,
+    #[serde(default)]
+    pub temp_token: String,
+    #[serde(default)]
+    pub recycled: bool,
+    #[serde(default)]
+    pub list_only: bool,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
+    pub import_selected: Vec<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiSyncResponse {
+    pub ok: bool,
+    pub codex_saved: usize,
+    pub claude_saved: usize,
+    pub skipped: usize,
+    pub errors: Vec<String>,
+}
+
+pub async fn sync_sub2api_accounts(
+    State(state): State<AppState>,
+    Json(payload): Json<Sub2ApiSyncRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let token = if !payload.token.trim().is_empty() {
+        payload.token.trim().to_string()
+    } else if !payload.temp_token.trim().is_empty() && !payload.totp_code.trim().is_empty() {
+        sub2api::login_totp(&payload.base_url, &payload.temp_token, &payload.totp_code)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?
+    } else {
+        sub2api::login(&payload.base_url, &payload.email, &payload.password)
+            .await
+            .map_err(|error| AppError::bad_request(error.to_string()))?
+    };
+
+    if payload.list_only || payload.dry_run {
+        let accounts =
+            sub2api::fetch_accounts_by_recycled(&payload.base_url, &token, payload.recycled)
+                .await
+                .map_err(|error| AppError::bad_request(error.to_string()))?;
+
+        let list: Vec<serde_json::Value> = accounts
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "id": a.id.unwrap_or(0),
+                    "name": a.name.clone().unwrap_or_default(),
+                    "platform": a.platform.clone().unwrap_or_default(),
+                    "kind": a.kind.clone().unwrap_or_default(),
+                    "base_url": a.base_url().unwrap_or(""),
+                })
+            })
+            .collect();
+
+        let response_payload = serde_json::json!({
+            "ok": true,
+            "token": token,
+            "accounts": list,
+            "codex_saved": 0,
+            "claude_saved": 0,
+            "skipped": 0,
+            "errors": [],
+        });
+        return Ok(Json(response_payload));
+    }
+
+    let ids_filter = if payload.import_selected.is_empty() {
+        None
+    } else {
+        Some(payload.import_selected.as_slice())
+    };
+
+    let accounts = match sub2api::fetch_accounts_data(&payload.base_url, &token, ids_filter).await {
+        Ok(data_accounts) if !data_accounts.is_empty() => data_accounts,
+        _ => {
+            let fallback_accounts =
+                sub2api::fetch_accounts_by_recycled(&payload.base_url, &token, payload.recycled)
+                    .await
+                    .map_err(|error| AppError::bad_request(error.to_string()))?;
+            if let Some(ids) = ids_filter {
+                let id_set: HashSet<i64> = ids.iter().copied().collect();
+                fallback_accounts
+                    .into_iter()
+                    .filter(|a| a.id.map(|id| id_set.contains(&id)).unwrap_or(false))
+                    .collect()
+            } else {
+                fallback_accounts
+            }
+        }
+    };
+
+    let normalized = sub2api::normalize_accounts(&accounts);
+
+    let mut saved_oauth_names = Vec::new();
+    {
+        let mut presets = state.auth_manager.auth_presets_snapshot();
+        for norm in normalized.oauth.iter() {
+            let preset_id = unique_import_preset_id(
+                &generate_preset_id("auth"),
+                presets.iter().map(|preset| preset.id.as_str()),
+            );
+            let auth = AuthFile {
+                openai_api_key: None,
+                last_refresh: norm
+                    .last_refresh
+                    .clone()
+                    .unwrap_or_else(current_rfc3339_timestamp),
+                tokens: AuthTokens {
+                    access_token: norm.access_token.clone(),
+                    account_id: norm.account_id.clone(),
+                    id_token: norm.id_token.clone(),
+                    refresh_token: norm.refresh_token.clone(),
+                },
+            };
+            let summary = auth_summary(&auth);
+            let details = sanitize_auth_preset_details(AuthPresetDetails {
+                email: norm.email.clone().or(summary.email),
+                plan_type: norm.plan_type.clone().or(summary.plan_type),
+                ..Default::default()
+            });
+            let resolved_name = resolve_auth_preset_name(&norm.name, &auth, &presets, None);
+            let preset = StoredAuthPreset {
+                interchange_source: None,
+                id: preset_id,
+                name: resolved_name.clone(),
+                saved_at: current_timestamp_secs(),
+                details,
+                config_overrides: norm.config_overrides.clone(),
+                legacy_config_key: None,
+                legacy_config_value: None,
+                legacy_secondary_config_key: None,
+                legacy_secondary_config_value: None,
+                auth,
+                switch_count: 0,
+            };
+            presets.insert(0, preset);
+            saved_oauth_names.push(resolved_name);
+        }
+        if !saved_oauth_names.is_empty() {
+            persist_auth_presets_async(&state.auth_manager, &presets).await?;
+        }
+    }
+
+    let mut saved_api_names = Vec::new();
+    {
+        let mut presets = state.auth_manager.api_presets_snapshot();
+        for norm in normalized.api.iter() {
+            let preset_id = unique_import_preset_id(
+                &generate_preset_id("api"),
+                presets.iter().map(|preset| preset.id.as_str()),
+            );
+            let resolved_name = resolve_api_preset_name(&norm.name, &norm.base_url, &presets, None);
+            let preset = StoredApiPreset {
+                interchange_source: None,
+                id: preset_id,
+                name: resolved_name.clone(),
+                saved_at: current_timestamp_secs(),
+                provider_name: norm.provider_name.clone(),
+                base_url: norm.base_url.clone(),
+                management_url: None,
+                wire_api: norm.wire_api.clone(),
+                responses_proxy: None,
+                apply_upstream_proxy_on_switch: false,
+                terminal_env: Vec::new(),
+                terminal_startup_script: None,
+                config_overrides: norm.config_overrides.clone(),
+                legacy_config_key: None,
+                legacy_config_value: None,
+                legacy_secondary_config_key: None,
+                legacy_secondary_config_value: None,
+                api_key: norm.api_key.clone(),
+                access_token: String::new(),
+                account_id: String::new(),
+                access_mode: Some(auth_core::ApiAccessMode::Direct),
+                favorite: false,
+                switch_count: 0,
+            };
+            presets.insert(0, preset);
+            saved_api_names.push(resolved_name);
+        }
+        if !saved_api_names.is_empty() {
+            persist_api_presets_async(&state.auth_manager, &presets).await?;
+        }
+    }
+
+    let mut saved_claude_names = Vec::new();
+    {
+        let mut presets = state.auth_manager.claude_presets_snapshot();
+        for norm in normalized.claude.iter() {
+            let preset_id = generate_preset_id("claude");
+            let resolved_name = {
+                let existing_names: HashSet<&str> =
+                    presets.iter().map(|preset| preset.name.as_str()).collect();
+                let mut candidate = norm.name.clone();
+                let mut suffix = 2_u32;
+                while existing_names.contains(candidate.as_str()) {
+                    candidate = format!("{} ({})", norm.name, suffix);
+                    suffix += 1;
+                }
+                candidate
+            };
+            let preset = StoredClaudePreset {
+                interchange_source: None,
+                id: preset_id,
+                name: resolved_name.clone(),
+                saved_at: current_timestamp_secs(),
+                provider_name: norm.provider_name.clone(),
+                base_url: norm.base_url.clone(),
+                management_url: None,
+                config_overrides: Vec::new(),
+                legacy_config_key: None,
+                legacy_config_value: None,
+                legacy_secondary_config_key: None,
+                legacy_secondary_config_value: None,
+                auth_token: norm.auth_token.clone(),
+                default_haiku_model: None,
+                default_sonnet_model: None,
+                default_opus_model: None,
+                third_party_model: None,
+                use_local_proxy: false,
+                access_mode: None,
+                switch_count: 0,
+            };
+            presets.insert(0, preset);
+            saved_claude_names.push(resolved_name);
+        }
+        if !saved_claude_names.is_empty() {
+            persist_claude_presets_async(&state.auth_manager, &presets).await?;
+        }
+    }
+
+    let response = serde_json::json!({
+        "ok": !saved_oauth_names.is_empty() || !saved_api_names.is_empty() || !saved_claude_names.is_empty(),
+        "token": token,
+        "oauth_saved": saved_oauth_names.len(),
+        "api_saved": saved_api_names.len(),
+        "codex_saved": saved_oauth_names.len() + saved_api_names.len(),
+        "claude_saved": saved_claude_names.len(),
+        "skipped": 0,
+        "errors": [],
+    });
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiUsageQueryRequest {
+    pub base_url: String,
+    pub token: String,
+    pub account_id: i64,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiUsageQueryResponse {
+    pub ok: bool,
+    pub usage: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+pub async fn query_sub2api_account_usage(
+    State(_state): State<AppState>,
+    Json(payload): Json<Sub2ApiUsageQueryRequest>,
+) -> ApiResult<Json<Sub2ApiUsageQueryResponse>> {
+    let source = payload.source.as_deref().filter(|s| !s.is_empty());
+    match sub2api::get_account_usage(
+        &payload.base_url,
+        &payload.token,
+        payload.account_id,
+        source,
+        payload.force,
+    )
+    .await
+    {
+        Ok(usage) => {
+            let usage_value = serde_json::to_value(&usage)
+                .map_err(|error| AppError::internal(format!("序列化额度数据失败: {error}")))?;
+            Ok(Json(Sub2ApiUsageQueryResponse {
+                ok: true,
+                usage: Some(usage_value),
+                error: None,
+            }))
+        }
+        Err(error) => Ok(Json(Sub2ApiUsageQueryResponse {
+            ok: false,
+            usage: None,
+            error: Some(error.to_string()),
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiBatchUsageQueryRequest {
+    pub base_url: String,
+    pub token: String,
+    #[serde(default)]
+    pub account_ids: Vec<i64>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiBatchUsageQueryResponse {
+    pub ok: bool,
+    pub usage: Option<serde_json::Value>,
+    pub errors: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+pub async fn query_sub2api_accounts_usage_batch(
+    State(_state): State<AppState>,
+    Json(payload): Json<Sub2ApiBatchUsageQueryRequest>,
+) -> ApiResult<Json<Sub2ApiBatchUsageQueryResponse>> {
+    match sub2api::get_accounts_usage_batch(
+        &payload.base_url,
+        &payload.token,
+        &payload.account_ids,
+        payload.force,
+    )
+    .await
+    {
+        Ok(batch) => {
+            let usage = serde_json::to_value(&batch.usage)
+                .map_err(|error| AppError::internal(format!("序列化批量额度数据失败: {error}")))?;
+            let errors = serde_json::to_value(&batch.errors)
+                .map_err(|error| AppError::internal(format!("序列化批量额度错误失败: {error}")))?;
+            Ok(Json(Sub2ApiBatchUsageQueryResponse {
+                ok: true,
+                usage: Some(usage),
+                errors: Some(errors),
+                error: None,
+            }))
+        }
+        Err(error) => Ok(Json(Sub2ApiBatchUsageQueryResponse {
+            ok: false,
+            usage: None,
+            errors: None,
+            error: Some(error.to_string()),
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiPelicanQueryRequest {
+    pub base_url: String,
+    pub token: String,
+    pub account_id: i64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub prompt: String,
+    #[serde(default)]
+    pub reasoning_effort: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiPelicanQueryResponse {
+    pub ok: bool,
+    pub result: Option<crate::auth::sub2api::Sub2ApiPelicanResult>,
+    pub error: Option<String>,
+}
+
+pub async fn run_sub2api_pelican_test(
+    State(_state): State<AppState>,
+    Json(payload): Json<Sub2ApiPelicanQueryRequest>,
+) -> ApiResult<Json<Sub2ApiPelicanQueryResponse>> {
+    match sub2api::run_pelican_test(
+        &payload.base_url,
+        &payload.token,
+        payload.account_id,
+        &payload.model,
+        &payload.prompt,
+        &payload.reasoning_effort,
+    )
+    .await
+    {
+        Ok(result) => Ok(Json(Sub2ApiPelicanQueryResponse {
+            ok: true,
+            result: Some(result),
+            error: None,
+        })),
+        Err(error) => Ok(Json(Sub2ApiPelicanQueryResponse {
+            ok: false,
+            result: None,
+            error: Some(error.to_string()),
+        })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiAutoActivateRequest {
+    pub base_url: String,
+    pub token: String,
+    pub account_ids: Vec<i64>,
+    #[serde(default)]
+    pub execute_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiAutoActivateResponse {
+    pub ok: bool,
+    pub scheduled_count: usize,
+    pub errors: Vec<String>,
+}
+
+pub async fn schedule_sub2api_auto_activate(
+    State(state): State<AppState>,
+    Json(payload): Json<Sub2ApiAutoActivateRequest>,
+) -> ApiResult<Json<Sub2ApiAutoActivateResponse>> {
+    let base = payload.base_url.trim_end_matches('/');
+    let execute_at = if payload.execute_at.trim().is_empty() {
+        "04:00"
+    } else {
+        payload.execute_at.trim()
+    };
+    let mut parts = execute_at.split(':');
+    let hour: u32 = parts
+        .next()
+        .unwrap_or("4")
+        .parse()
+        .map_err(|_| AppError::bad_request("execute_at 小时格式无效"))?;
+    let minute: u32 = parts
+        .next()
+        .unwrap_or("0")
+        .parse()
+        .map_err(|_| AppError::bad_request("execute_at 分钟格式无效"))?;
+    if hour > 23 || minute > 59 {
+        return Err(AppError::bad_request("execute_at 时间超出范围"));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| AppError::internal(error.to_string()))?;
+
+    let mut scheduled_count = 0usize;
+    let mut errors = Vec::new();
+
+    for account_id in &payload.account_ids {
+        let url = format!("{base}/api/v1/admin/accounts/{account_id}/scheduled-action");
+        let body = serde_json::json!({
+            "action": "enable_and_recover",
+            "execute_at": chrono_format_next_run(hour, minute),
+        });
+        let response = client
+            .put(&url)
+            .bearer_auth(&payload.token)
+            .json(&body)
+            .send()
+            .await;
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                scheduled_count += 1;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                errors.push(format!(
+                    "账号 {account_id}: HTTP {} {}",
+                    status.as_u16(),
+                    &body_text[..body_text.len().min(120)]
+                ));
+            }
+            Err(error) => {
+                errors.push(format!("账号 {account_id}: {error}"));
+            }
+        }
+    }
+
+    let _ = &state;
+
+    Ok(Json(Sub2ApiAutoActivateResponse {
+        ok: !errors.is_empty() || scheduled_count > 0,
+        scheduled_count,
+        errors,
+    }))
+}
+
+fn chrono_format_next_run(hour: u32, minute: u32) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let now_secs = now.as_secs();
+    let today_start = now_secs - (now_secs % 86400);
+    let run_today = today_start + (hour as u64) * 3600 + (minute as u64) * 60;
+    let run_at = if run_today > now_secs {
+        run_today
+    } else {
+        run_today + 86400
+    };
+    let days = run_at / 86400;
+    let _ = days;
+    format!("{}", run_at)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Sub2ApiArchiveActionRequest {
+    pub base_url: String,
+    pub token: String,
+    pub account_id: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Sub2ApiArchiveActionResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+pub async fn sub2api_recycle_account(
+    State(_state): State<AppState>,
+    Json(payload): Json<Sub2ApiArchiveActionRequest>,
+) -> ApiResult<Json<Sub2ApiArchiveActionResponse>> {
+    match sub2api::recycle_account(&payload.base_url, &payload.token, payload.account_id).await {
+        Ok(()) => Ok(Json(Sub2ApiArchiveActionResponse {
+            ok: true,
+            error: None,
+        })),
+        Err(error) => Ok(Json(Sub2ApiArchiveActionResponse {
+            ok: false,
+            error: Some(error.to_string()),
+        })),
+    }
+}
+
+pub async fn sub2api_restore_account(
+    State(_state): State<AppState>,
+    Json(payload): Json<Sub2ApiArchiveActionRequest>,
+) -> ApiResult<Json<Sub2ApiArchiveActionResponse>> {
+    match sub2api::restore_account(&payload.base_url, &payload.token, payload.account_id).await {
+        Ok(()) => Ok(Json(Sub2ApiArchiveActionResponse {
+            ok: true,
+            error: None,
+        })),
+        Err(error) => Ok(Json(Sub2ApiArchiveActionResponse {
+            ok: false,
+            error: Some(error.to_string()),
+        })),
+    }
 }
 
 pub async fn save_claude_preset(
@@ -1234,6 +2514,7 @@ pub async fn save_claude_preset(
 
     let mut presets = state.auth_manager.claude_presets_snapshot();
     let preset = StoredClaudePreset {
+        interchange_source: None,
         id: generate_preset_id("claude"),
         name: resolve_claude_preset_name(&payload.name, &base_url, &presets, None),
         saved_at: current_timestamp_secs(),
@@ -1342,6 +2623,7 @@ pub async fn update_api_preset(
     let name =
         resolve_api_preset_name(&payload.name, &effective_base_url, &presets, Some(&preset_id));
     let preset = StoredApiPreset {
+        interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
         saved_at: current_timestamp_secs(),
@@ -1390,7 +2672,8 @@ pub async fn update_api_preset(
             String::new()
         },
         access_mode: Some(previous_access_mode),
-        switch_count: 0,
+        favorite: previous.favorite,
+        switch_count: previous.switch_count,
     };
     presets[index] = preset.clone();
 
@@ -1399,11 +2682,8 @@ pub async fn update_api_preset(
     let refreshed_current_auth = if was_active {
         let auth_targets = terminal_auth_write_targets(&state)?;
         let use_local_proxy = api_preset_enables_local_upstream_proxy_on_apply(&preset);
-        let openai_api_key = if use_local_proxy {
-            local_proxy_api_key_for_preset_id(&preset.id)
-        } else {
-            preset.api_key.clone()
-        };
+        let provider_base_url = api_provider_base_url_for_mode(&preset, use_local_proxy);
+        let openai_api_key = auth_core::api_provider_api_key_for_mode(&preset, use_local_proxy);
 
         write_api_auth_files(
             &auth_targets,
@@ -1430,13 +2710,13 @@ pub async fn update_api_preset(
         sync_api_preset_configs(
             &auth_targets,
             &preset.provider_name,
-            &api_provider_base_url_for_mode(&preset, use_local_proxy),
+            &provider_base_url,
             &api_provider_options(&preset),
             &config_targets,
             &managed_config_keys,
         )
         .await?;
-        sync_api_model_catalogs(&auth_targets, &config_targets).await?;
+        sync_api_model_catalogs(&state, &auth_targets, &config_targets).await?;
 
         Some(CurrentAuthState::Api(ApiAuthFile { openai_api_key }))
     } else {
@@ -1550,6 +2830,7 @@ pub async fn update_claude_preset(
 
     let name = resolve_claude_preset_name(&payload.name, &base_url, &presets, Some(&preset_id));
     let preset = StoredClaudePreset {
+        interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
         saved_at: current_timestamp_secs(),
@@ -1604,6 +2885,7 @@ pub async fn refresh_auth_preset_quota(
     let _active_config_guard = apply::lock_active_config_for_request(&state).await;
     let auth_files = terminal_auth_files(&state)?;
     let auth_targets = terminal_auth_write_targets(&state)?;
+    apply::capture_live_login_auth_into_presets_for_targets(&state, &auth_targets).await?;
     let mut presets = state.auth_manager.auth_presets_snapshot();
     let Some(index) = presets.iter().position(|preset| preset.id == preset_id) else {
         return Err(AppError::not_found("找不到指定的 auth 预设。"));
@@ -1662,6 +2944,7 @@ pub async fn refresh_all_auth_preset_quotas(
     let _active_config_guard = apply::lock_active_config_for_request(&state).await;
     let auth_files = terminal_auth_files(&state)?;
     let auth_targets = terminal_auth_write_targets(&state)?;
+    apply::capture_live_login_auth_into_presets_for_targets(&state, &auth_targets).await?;
     let mut presets = state.auth_manager.auth_presets_snapshot();
     if presets.is_empty() {
         return Ok(Json(RefreshAllAuthPresetsResponse {
@@ -1727,6 +3010,171 @@ pub async fn refresh_all_auth_preset_quotas(
         failure_count: failures.len(),
         failures,
     }))
+}
+
+// 与 refresh_auth_preset_quota 相同：上游调用可能刷新 token 或更新用量详情，
+// 成功后落盘预设；若该预设正是当前登录，同步重写 auth.json 目标文件。
+async fn persist_auth_preset_after_token_op(
+    state: &AppState,
+    auth_targets: &[TerminalAuthFiles],
+    presets: &[StoredAuthPreset],
+    index: usize,
+    was_active: bool,
+) -> ApiResult<()> {
+    persist_auth_presets_async(&state.auth_manager, presets).await?;
+    if was_active {
+        write_login_auth_files(auth_targets, &presets[index].auth).await?;
+    }
+    Ok(())
+}
+
+/// 兑换一个 Codex 额度重置点数（对齐 sub2api 账号表格的「重置」）。
+pub async fn consume_auth_preset_reset_credit(
+    State(state): State<AppState>,
+    AxumPath(preset_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let _active_config_guard = apply::lock_active_config_for_request(&state).await;
+    let auth_files = terminal_auth_files(&state)?;
+    let auth_targets = terminal_auth_write_targets(&state)?;
+    apply::capture_live_login_auth_into_presets_for_targets(&state, &auth_targets).await?;
+    let mut presets = state.auth_manager.auth_presets_snapshot();
+    let Some(index) = presets.iter().position(|preset| preset.id == preset_id) else {
+        return Err(AppError::not_found("找不到指定的 auth 预设。"));
+    };
+
+    let current_auth = read_current_auth_state(&auth_files.auth_file)
+        .await
+        .ok()
+        .flatten();
+    let was_active =
+        current_auth.as_ref().and_then(CurrentAuthState::as_login) == Some(&presets[index].auth);
+    let original_auth = presets[index].auth.clone();
+
+    let result =
+        match auth_core::consume_codex_reset_credit(&state.proxy_manager, &mut presets[index].auth)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if presets[index].auth != original_auth {
+                    persist_auth_presets_async(&state.auth_manager, &presets).await?;
+                    if was_active {
+                        write_login_auth_files(&auth_targets, &presets[index].auth).await?;
+                    }
+                }
+                return Err(map_bad_request("兑换额度重置点数失败", error));
+            }
+        };
+    // 重置成功后立即重拉用量窗口，把刷新后的窗口/点数写回预设详情。
+    let _ = refresh_stored_auth_preset_quota(&state.proxy_manager, &mut presets[index]).await;
+    persist_auth_preset_after_token_op(&state, &auth_targets, &presets, index, was_active).await?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "code": result.code,
+        "windows_reset": result.windows_reset,
+        "preset": preset_summary(
+            &presets[index],
+            read_current_auth_state(&auth_files.auth_file)
+                .await
+                .ok()
+                .flatten()
+                .as_ref()
+                .and_then(CurrentAuthState::as_login),
+        ),
+    })))
+}
+
+/// 查询 Codex 邀请资格（对齐 sub2api 的「可邀请」入口）。
+pub async fn get_auth_preset_codex_referral(
+    State(state): State<AppState>,
+    AxumPath(preset_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let _active_config_guard = apply::lock_active_config_for_request(&state).await;
+    let auth_files = terminal_auth_files(&state)?;
+    let auth_targets = terminal_auth_write_targets(&state)?;
+    let mut presets = state.auth_manager.auth_presets_snapshot();
+    let Some(index) = presets.iter().position(|preset| preset.id == preset_id) else {
+        return Err(AppError::not_found("找不到指定的 auth 预设。"));
+    };
+    let was_active = read_current_auth_state(&auth_files.auth_file)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(CurrentAuthState::as_login)
+        == Some(&presets[index].auth);
+    let original_auth = presets[index].auth.clone();
+    let plan_type = presets[index].details.plan_type.clone();
+
+    let info = match auth_core::fetch_codex_referral_eligibility(
+        &state.proxy_manager,
+        &mut presets[index].auth,
+        plan_type.as_deref(),
+    )
+    .await
+    {
+        Ok(info) => info,
+        Err(error) => {
+            if presets[index].auth != original_auth {
+                persist_auth_presets_async(&state.auth_manager, &presets).await?;
+                if was_active {
+                    write_login_auth_files(&auth_targets, &presets[index].auth).await?;
+                }
+            }
+            return Err(map_bad_request("查询邀请资格失败", error));
+        }
+    };
+    persist_auth_preset_after_token_op(&state, &auth_targets, &presets, index, was_active).await?;
+    Ok(Json(json!({ "ok": true, "referral": info })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CodexReferralSendPayload {
+    pub email: String,
+}
+
+/// 发送 Codex 邀请（对齐 sub2api 的「邀请用户」）。
+pub async fn send_auth_preset_codex_referral(
+    State(state): State<AppState>,
+    AxumPath(preset_id): AxumPath<String>,
+    Json(payload): Json<CodexReferralSendPayload>,
+) -> ApiResult<Json<Value>> {
+    let _active_config_guard = apply::lock_active_config_for_request(&state).await;
+    let auth_files = terminal_auth_files(&state)?;
+    let auth_targets = terminal_auth_write_targets(&state)?;
+    let mut presets = state.auth_manager.auth_presets_snapshot();
+    let Some(index) = presets.iter().position(|preset| preset.id == preset_id) else {
+        return Err(AppError::not_found("找不到指定的 auth 预设。"));
+    };
+    let was_active = read_current_auth_state(&auth_files.auth_file)
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .and_then(CurrentAuthState::as_login)
+        == Some(&presets[index].auth);
+    let original_auth = presets[index].auth.clone();
+    let plan_type = presets[index].details.plan_type.clone();
+
+    if let Err(error) = auth_core::send_codex_referral_invite(
+        &state.proxy_manager,
+        &mut presets[index].auth,
+        plan_type.as_deref(),
+        &payload.email,
+    )
+    .await
+    {
+        if presets[index].auth != original_auth {
+            persist_auth_presets_async(&state.auth_manager, &presets).await?;
+            if was_active {
+                write_login_auth_files(&auth_targets, &presets[index].auth).await?;
+            }
+        }
+        return Err(map_bad_request("发送邀请失败", error));
+    }
+    persist_auth_preset_after_token_op(&state, &auth_targets, &presets, index, was_active).await?;
+    Ok(Json(json!({ "ok": true })))
 }
 
 mod preset_test_scheduler;
@@ -1989,6 +3437,117 @@ pub async fn start_codex_oauth_session(
     Ok(Json(codex_oauth_session_response(&session)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CodexBrowserOAuthExchangeRequest {
+    pub session_id: String,
+    pub callback: String,
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+pub async fn start_codex_browser_oauth_session(
+    State(state): State<AppState>,
+) -> ApiResult<Json<CodexOAuthSessionResponse>> {
+    let pending = create_codex_browser_login().map_err(|error| {
+        AppError::bad_request(format!("生成 Codex 浏览器登录链接失败: {error:#}"))
+    })?;
+    let session = state.codex_oauth_manager.insert_browser_pending(
+        &pending.authorize_url,
+        &pending.code_verifier,
+        &pending.state,
+    );
+    Ok(Json(codex_oauth_session_response(&session)))
+}
+
+pub async fn exchange_codex_browser_oauth_session(
+    State(state): State<AppState>,
+    Json(payload): Json<CodexBrowserOAuthExchangeRequest>,
+) -> ApiResult<Json<CodexOAuthSessionResponse>> {
+    let session = state
+        .codex_oauth_manager
+        .get(&payload.session_id)
+        .ok_or_else(|| AppError::not_found("找不到指定的 Codex 浏览器登录会话。"))?;
+
+    if session.flow != CodexOAuthFlow::Browser {
+        return Err(AppError::bad_request(
+            "该登录会话不是浏览器授权码会话，请使用设备码登录等待自动完成。",
+        ));
+    }
+    if session.status != CodexOAuthSessionStatus::Pending {
+        return Err(AppError::bad_request("该浏览器登录会话已结束，请重新发起登录。"));
+    }
+
+    let (callback_code, callback_state) = if payload.code.trim().is_empty() {
+        parse_codex_browser_callback(&payload.callback).map_err(|error| {
+            AppError::bad_request(format!("解析 Codex 浏览器回调失败: {error:#}"))
+        })?
+    } else {
+        (payload.code.trim().to_string(), payload.state.trim().to_string())
+    };
+
+    let expected_state = session.state.as_deref().unwrap_or_default();
+    let supplied_state = if callback_state.is_empty() {
+        payload.state.trim().to_string()
+    } else {
+        callback_state
+    };
+    if expected_state.is_empty()
+        || !constant_time_eq(supplied_state.as_bytes(), expected_state.as_bytes())
+    {
+        state
+            .codex_oauth_manager
+            .fail(&payload.session_id, "浏览器登录 state 校验失败。");
+        return Err(AppError::bad_request("浏览器登录 state 校验失败，请重新发起登录。"));
+    }
+
+    let code_verifier = session
+        .code_verifier
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if code_verifier.is_empty() {
+        state
+            .codex_oauth_manager
+            .fail(&payload.session_id, "浏览器登录会话缺少 PKCE verifier。");
+        return Err(AppError::bad_request("浏览器登录会话缺少 PKCE verifier，请重新发起登录。"));
+    }
+
+    match complete_codex_browser_login(&state.proxy_manager, &callback_code, code_verifier).await {
+        Ok(auth) => {
+            let mut details = derive_auth_preset_details(&auth);
+            if details.login_method.is_none() {
+                details.login_method = Some("OAuth".to_string());
+            }
+            state
+                .codex_oauth_manager
+                .complete(&payload.session_id, auth, details);
+        }
+        Err(error) => {
+            state
+                .codex_oauth_manager
+                .fail(&payload.session_id, format!("兑换 Codex 浏览器登录 token 失败: {error:#}"));
+        }
+    }
+
+    let updated = state
+        .codex_oauth_manager
+        .get(&payload.session_id)
+        .ok_or_else(|| AppError::not_found("Codex 浏览器登录会话已失效。"))?;
+    Ok(Json(codex_oauth_session_response(&updated)))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |accumulator, (left, right)| accumulator | (left ^ right))
+        == 0
+}
+
 pub async fn get_codex_oauth_session(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2017,6 +3576,37 @@ pub async fn delete_auth_preset(
     Ok(Json(DeleteAuthPresetResponse {
         ok: true,
         deleted_id: preset_id,
+    }))
+}
+
+pub async fn toggle_api_preset_favorite(
+    State(state): State<AppState>,
+    AxumPath(preset_id): AxumPath<String>,
+) -> ApiResult<Json<ToggleApiPresetFavoriteResponse>> {
+    let mut presets = state.auth_manager.api_presets_snapshot();
+    let Some(preset) = presets.iter_mut().find(|preset| preset.id == preset_id) else {
+        return Err(AppError::not_found("找不到指定的 API 预设。"));
+    };
+    preset.favorite = !preset.favorite;
+    let changed = preset.clone();
+    persist_api_presets_async(&state.auth_manager, &presets).await?;
+
+    let auth_files = terminal_auth_files(&state)?;
+    let current_auth = read_current_auth_state(&auth_files.auth_file)
+        .await
+        .ok()
+        .flatten();
+    let current_config = read_current_config_provider(&auth_files.config_file)
+        .await
+        .ok()
+        .flatten();
+    let current_mode = derive_current_mode(current_auth.as_ref(), current_config.as_ref());
+    let current_api =
+        derive_current_api_state(current_config.as_ref(), current_auth.as_ref(), &presets);
+
+    Ok(Json(ToggleApiPresetFavoriteResponse {
+        ok: true,
+        preset: api_preset_summary(&changed, current_mode, current_api.as_ref()),
     }))
 }
 

@@ -1,9 +1,13 @@
 mod agent;
 mod artifacts;
 mod auth;
+mod codebuddy;
 mod codex_task;
+mod collaboration;
+mod cymusic_diagnostics;
 mod frp;
 mod gateway;
+mod opencode;
 mod operations;
 mod pages;
 mod system;
@@ -25,7 +29,13 @@ pub(super) fn app(state: AppState) -> Router {
         .merge(frp::routes())
         .merge(system::routes())
         .merge(auth::routes())
+        .merge(codebuddy::routes())
+        .merge(opencode::routes())
+        .merge(crate::agy::routes())
+        .merge(crate::devin::routes())
         .merge(codex_task::routes())
+        .merge(collaboration::routes())
+        .merge(cymusic_diagnostics::protected_routes())
         .merge(terminal::routes())
         .merge(agent::routes())
         // SPA path routing: any non-API/asset GET that matches no explicit route
@@ -35,7 +45,9 @@ pub(super) fn app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth_guard::require_auth));
 
     pages::public(state.clone())
-        .merge(artifacts::public_routes().with_state(state))
+        .merge(gateway::proxy_routes().with_state(state.clone()))
+        .merge(artifacts::public_routes().with_state(state.clone()))
+        .merge(cymusic_diagnostics::public_routes().with_state(state.clone()))
         .merge(protected)
         // Compress text/JSON APIs as usual, but skip file downloads: a compressed
         // response drops its Content-Length header, so browsers cannot show download

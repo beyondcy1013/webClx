@@ -43,6 +43,30 @@
     } catch {}
   }
 
+  async function loginWithCrossInstanceTicket() {
+    const params = new URLSearchParams(window.location.search);
+    const ticket = params.get("cross_instance_ticket");
+    if (!ticket) return;
+
+    setBusy(true);
+    try {
+      const response = await fetch("/api/auth/cross-instance-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ticket }),
+      });
+      if (!response.ok) {
+        showError(t(await response.text() || "跨实例免登录失败"));
+        setBusy(false);
+        return;
+      }
+      window.location.assign(redirectTarget());
+    } catch {
+      showError(t("跨实例免登录网络错误"));
+      setBusy(false);
+    }
+  }
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     errorEl.hidden = true;
@@ -82,4 +106,5 @@
   // 自动聚焦用户名输入框。
   userInput.focus();
   void redirectAuthenticatedSession();
+  void loginWithCrossInstanceTicket();
 })();

@@ -364,6 +364,7 @@ function createTerminalInstance() {
     altClickMovesCursor: false,
     minimumContrastRatio: 4.5,
     scrollback: normalizeTerminalScrollbackLines(state.terminalScrollbackLines),
+    cancelEvents: true,
     theme: terminalThemeForCursorState(false),
   });
 }
@@ -409,18 +410,32 @@ function createTerminalSessionContext(sessionId) {
     socket: null,
     connectionToken: 0,
     reconnectTimer: null,
+    reconnectAttempts: 0,
+    reconnectDeferred: false,
     outputQueue: [],
     outputWriteInFlight: false,
     outputDrainTimer: null,
     outputWriteId: 0,
+    pendingInputQueue: [],
+    pendingInputChars: 0,
+    inputFlushTimer: null,
     synchronizedOutputTransformer: null,
     renderRefreshFrame: null,
     initialReplayPending: false,
     backlogReplayActive: false,
     backlogReplayEndQueued: false,
     backlogReplayInterrupted: false,
-    followOutput: true,
+    followOutput: terminalScrollPositions.get(sessionId)?.atBottom ?? true,
+    scrollIntentRevision: 0,
     hasLoadedOutput: false,
+    // seq 帧协议与断线续传状态：lastOutputSeq/outputInstanceId 由服务端
+    // 回放与输出帧维护，outputStreamGap 标记缓冲区曾被回放打断而不可信。
+    lastOutputSeq: 0,
+    outputInstanceId: "",
+    seqFramingActive: false,
+    pendingDeltaReplay: false,
+    deltaReplayActive: false,
+    outputStreamGap: false,
     disconnected: false,
     disposed: false,
     path: "",
@@ -428,6 +443,8 @@ function createTerminalSessionContext(sessionId) {
     terminalInputTail: "",
     pendingDeviceAttributeResponses: 0,
     lastTerminalSize: null,
+    localTerminalFitSize: null,
+    canonicalTerminalSize: null,
   };
   mountTerminalContextInstance(context);
   return context;
@@ -516,7 +533,6 @@ function completeTerminalContextReconnect(context) {
   setTerminalContextRenderVisibility(context, context === activeTerminalContext);
   if (context === activeTerminalContext) {
     syncActiveTerminalContextAliases(context);
-    terminalViewportScrollEl = null;
     bindTerminalViewportScroll();
     context.term.refresh?.(0, Math.max(context.term.rows - 1, 0));
   }
@@ -532,6 +548,24 @@ function activateTerminalContext(context, previousContext) {
 
   activeTerminalContext = context;
   pendingTerminalSize = null;
+  if (context !== previousContext && context.sessionId !== TERMINAL_EMPTY_CONTEXT_ID) {
+    // Prepare the logical viewport while still hidden, including sessions
+    // without new background output since their last manual history reading.
+    noteTerminalUserScrollIntent();
+    context.followOutput = true;
+    terminalScrollPositions.set(context.sessionId, {
+      scrollTop: 0,
+      maxScroll: 0,
+      atBottom: true,
+      scrollIntentRevision: context.scrollIntentRevision,
+    });
+    for (const instance of [context.term, context.retainedTerm]) {
+      const buffer = instance?.buffer?.active;
+      if (buffer && buffer.viewportY !== buffer.baseY) {
+        instance.scrollToBottom?.();
+      }
+    }
+  }
   setTerminalContextRenderVisibility(context, true);
   context.term.options.theme = terminalThemeForCursorState(false);
   syncActiveTerminalContextAliases(context);
@@ -540,7 +574,6 @@ function activateTerminalContext(context, previousContext) {
     "terminal-host-replaying",
     Boolean(context.backlogReplayActive && !context.retainedTerm),
   );
-  terminalViewportScrollEl = null;
   bindTerminalViewportScroll();
 }
 
@@ -558,6 +591,18 @@ function disposeTerminalContext(context) {
     window.clearTimeout(context.outputDrainTimer);
     context.outputDrainTimer = null;
   }
+  if (context.inputFlushTimer !== null) {
+    window.clearTimeout(context.inputFlushTimer);
+    context.inputFlushTimer = null;
+  }
+  if (context.pendingInputChars > 0) {
+    updateSessionStatus(
+      `终端 ${context.sessionId} 已关闭，${context.pendingInputChars} 个待发送字符未发送。`,
+      "warn",
+    );
+  }
+  context.pendingInputQueue = [];
+  context.pendingInputChars = 0;
   if (context.renderRefreshFrame !== null) {
     window.cancelAnimationFrame(context.renderRefreshFrame);
     context.renderRefreshFrame = null;
@@ -589,8 +634,40 @@ function ensureTerminalSessionCache() {
     createContext: createTerminalSessionContext,
     activateContext: activateTerminalContext,
     disposeContext: disposeTerminalContext,
+    // Android (dom renderer) WebViews have far less memory than desktop
+    // browsers: keep at most five visited terminal contexts there.  Desktop
+    // keeps the historical unbounded cache.
+    maxContexts: terminalRendererType() === "dom" ? 5 : Infinity,
+    canEvictContext: terminalContextSafeToEvict,
   });
   return terminalSessionCache;
+}
+
+// A cached context is only evictable when dropping its xterm cannot lose user
+// input or corrupt an in-flight replay/write; an evicted context is recreated
+// and fully replayed the next time its session is visited.
+function terminalContextSafeToEvict(context) {
+  if (!context || context.disposed) {
+    return true;
+  }
+  return !(
+    context.pendingInputChars > 0 ||
+    (context.pendingInputQueue && context.pendingInputQueue.length > 0) ||
+    context.inputFlushTimer !== null ||
+    context.outputWriteInFlight ||
+    context.outputDrainTimer !== null ||
+    (context.outputQueue && context.outputQueue.length > 0) ||
+    context.initialReplayPending ||
+    context.backlogReplayActive ||
+    context.retainedTerm
+  );
+}
+
+// Opportunistic shrink after an input flush, replay end, or output write
+// settles: previously pinned contexts may have become evictable. Eviction
+// must never break the path that triggered it.
+function trimTerminalSessionCache() {
+  terminalSessionCache?.trim?.();
 }
 
 function activateTerminalSessionContext(sessionId = state.activeSessionId) {
@@ -606,6 +683,21 @@ function activateTerminalSessionContext(sessionId = state.activeSessionId) {
     }
   }
   restoreCachedTerminalViewport(context);
+  return context;
+}
+
+function getOrCreateBackgroundTerminalContext(sessionId) {
+  const normalizedSessionId = String(sessionId || "").trim();
+  if (!normalizedSessionId || normalizedSessionId === TERMINAL_EMPTY_CONTEXT_ID) {
+    return null;
+  }
+
+  const cache = ensureTerminalSessionCache();
+  const context = cache.getOrCreate(normalizedSessionId);
+  const session = state.sessions.find((item) => item.id === normalizedSessionId);
+  if (context && session) {
+    context.path = sessionPath(session);
+  }
   return context;
 }
 
@@ -677,6 +769,14 @@ function resetTerminalContextInstance(context) {
   context.backlogReplayEndQueued = false;
   context.backlogReplayInterrupted = false;
   context.hasLoadedOutput = false;
+  // 缓冲区即将由全量快照回放重建，旧的输出水位与续传状态全部失效。
+  // 注意不能清 seqFramingActive：它属于当前 socket 连接而非缓冲区，本函数
+  // 可能在回放 start 之后才执行，此刻该连接的二进制帧已经带 seq 前缀。
+  context.lastOutputSeq = 0;
+  context.outputInstanceId = "";
+  context.pendingDeltaReplay = false;
+  context.deltaReplayActive = false;
+  context.outputStreamGap = false;
   mountTerminalContextInstance(context);
   setTerminalContextRenderVisibility(context, context === activeTerminalContext);
   if (context === activeTerminalContext) {

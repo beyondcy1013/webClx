@@ -19,7 +19,7 @@ test("Android opens terminal management after choosing a healthy source", () => 
   assert.match(preferences, /getString\(KEY_START_PATH, "terminal"\)/);
   assert.match(
     activity,
-    /webView\.loadUrl\(SourceRegistry\.URLS\[source\] \+ AppPreferences\.startPath\(this\)\)/,
+    /String targetUrl = SourceRegistry\.URLS\[source\] \+ AppPreferences\.startPath\(this\);[\s\S]*webView\.loadUrl\(targetUrl\)/,
   );
 });
 

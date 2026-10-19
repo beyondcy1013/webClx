@@ -22,12 +22,18 @@ function deferred() {
 }
 
 function fakeElement(textContent = "") {
+  const listeners = new Map();
   return {
     textContent,
     innerHTML: "",
     dataset: {},
     disabled: false,
-    addEventListener() {},
+    addEventListener(type, listener) {
+      listeners.set(type, listener);
+    },
+    dispatch(type) {
+      return listeners.get(type)?.({ target: this });
+    },
     insertAdjacentHTML(_position, html) {
       this.innerHTML += html;
     },
@@ -50,16 +56,17 @@ const elements = {
   compileRunListEl: fakeElement(),
   compileStatusMessageEl: fakeElement(),
   compileStatusRefreshButtonEl: fakeElement("刷新状态"),
+  compileHistoryClearButtonEl: fakeElement("清空历史"),
 };
 const state = {
   compileStatus: null,
   compileStatusRequestToken: 0,
-  workspaceDir: "/home/codes/webClx",
+  workspaceDir: "/home/codes/tools/webClx",
   defaultWorkspaceDir: "/home/codes",
 };
 const liveResponse = {
   ok: true,
-  queue_dir: "/home/codes/webClx/.webclx-compile-queue",
+  queue_dir: "/home/codes/tools/webClx/.webclx-compile-queue",
   pending_count: 1,
   run_count: 423,
   latest_log: "/tmp/latest.log",
@@ -89,16 +96,31 @@ const liveResponse = {
 };
 const fullResponse = {
   ...liveResponse,
-  runs: [{
-    run_id: "run-1",
-    status: "success",
-    request_count: 1,
-    projects: ["webClx"],
-    source_terminal_names: ["webClx_1"],
-    started_at: "2026-07-15 06:00:00",
-    finished_at: "2026-07-15 06:01:00",
-    log_path: "/tmp/latest.log",
-  }],
+  runs: [
+    {
+      run_id: "run-1",
+      status: "success",
+      request_count: 1,
+      projects: ["webClx"],
+      source_terminal_names: ["webClx_1"],
+      started_at: "2026-07-15 06:00:00",
+      finished_at: "2026-07-15 06:01:00",
+      log_path: "/tmp/latest.log",
+    },
+    {
+      run_id: "run-still-live",
+      status: "running",
+      request_count: 1,
+      projects: ["runningProject"],
+      source_terminal_names: ["running_1"],
+      started_at: "2026-07-15 06:02:00",
+      current_project: "runningProject",
+      current_phase: "compile",
+      current_spec_index: 1,
+      spec_count: 1,
+      log_path: "/tmp/running.log",
+    },
+  ],
 };
 
 const manager = context.WebClxCompileStatusManager.create({
@@ -149,7 +171,7 @@ assert.deepEqual(
 );
 assert.equal(
   elements.compileStatusMessageEl.textContent,
-  "队列：/home/codes/webClx/.webclx-compile-queue · 等待 1 · 进行中 1 · 历史 423 · 历史加载中 · 每 2 秒更新",
+  "队列：/home/codes/tools/webClx/.webclx-compile-queue · 等待 1 · 进行中 1 · 历史 423 · 历史加载中 · 每 2 秒更新",
 );
 assert.doesNotMatch(elements.compileStatusMessageEl.textContent, /集中日志|latest\.log/);
 assert.match(elements.compilePendingListEl.innerHTML, /pending-1/);
@@ -166,9 +188,11 @@ historyResponse.resolve(fullResponse);
 await new Promise((resolve) => setTimeout(resolve, 10));
 
 assert.match(elements.compileRunListEl.innerHTML, /run-1/);
+assert.doesNotMatch(elements.compileRunListEl.innerHTML, /run-still-live/);
+assert.doesNotMatch(elements.compileRunListEl.innerHTML, /runningProject/);
 assert.equal(
   elements.compileStatusMessageEl.textContent,
-  "队列：/home/codes/webClx/.webclx-compile-queue · 等待 1 · 进行中 0 · 历史 1 · 每 2 秒更新",
+  "队列：/home/codes/tools/webClx/.webclx-compile-queue · 等待 1 · 进行中 1 · 历史 1 · 每 2 秒更新",
 );
 assert.equal(elements.compileStatusRefreshButtonEl.disabled, false);
 assert.match(managerJs, /COMPILE_LIVE_REFRESH_MS\s*=\s*2_000/);
@@ -189,10 +213,18 @@ assert.match(
   /class="panel-head wide compile-overview-head"[\s\S]*class="compile-overview-title card-title-help"[\s\S]*id="compile-status-message"[\s\S]*id="compile-status-refresh"/,
   "compile status and refresh controls should live in the Build API title row",
 );
+assert.match(indexHtml, /运行历史/);
+assert.doesNotMatch(indexHtml, /<p class="section-label">运行记录<\/p>/);
 assert.doesNotMatch(
   indexHtml,
   /compile-summary-grid|compile-latest-log|最新集中日志/,
   "the removed compile summary cards and centralized log field should not return",
 );
+assert.match(
+  indexHtml,
+  /<p class="section-label">运行历史<\/p>[\s\S]*id="compile-history-clear"[^>]*>清空历史<\/button>/,
+  "the one-click clear action should be attached to the run history section",
+);
+assert.match(managerJs, /\/api\/build\/compile\/history["'], \{ method: ["']DELETE["'] \}/);
 
 console.log("compile status progressive loading tests passed");

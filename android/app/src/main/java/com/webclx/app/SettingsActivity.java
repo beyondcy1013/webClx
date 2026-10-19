@@ -23,6 +23,7 @@ import android.widget.Toast;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 public final class SettingsActivity extends Activity {
     private static final int MENU_FONT_SP = 12;
@@ -43,6 +44,7 @@ public final class SettingsActivity extends Activity {
     private LinearLayout tabRow;
     private FrameLayout content;
     private String activeTab = TAB_KEYS[0];
+    private Future<?> updateCheckFuture;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -288,6 +290,9 @@ public final class SettingsActivity extends Activity {
             probeExecutor.execute(() -> {
                 SourceRegistry.ProbeResult result = SourceRegistry.probe(source);
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) {
+                        return;
+                    }
                     statuses[source].setText(result.healthy
                         ? getString(R.string.source_healthy, SourceRegistry.LABELS[source], result.latencyMs)
                         : getString(R.string.source_unavailable, SourceRegistry.LABELS[source]));
@@ -304,10 +309,16 @@ public final class SettingsActivity extends Activity {
     private void checkUpdate(Button check, TextView status, LinearLayout panel) {
         check.setEnabled(false);
         status.setText(R.string.update_checking);
-        UpdateManager.check(this, AppPreferences.preferredSource(this), new UpdateManager.Callback() {
+        updateCheckFuture = UpdateManager.check(
+            this,
+            AppPreferences.preferredSource(this),
+            new UpdateManager.Callback() {
             @Override
             public void onSuccess(UpdateManager.UpdateManifest manifest) {
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) {
+                        return;
+                    }
                     check.setEnabled(true);
                     if (!UpdateManager.isNewer(SettingsActivity.this, manifest)) {
                         status.setText(R.string.update_already_latest);
@@ -316,10 +327,14 @@ public final class SettingsActivity extends Activity {
                     status.setText(getString(R.string.update_available, manifest.version));
                     Button download = command(R.string.update_download_install);
                     download.setOnClickListener(view -> {
-                        UpdateManager.enqueue(SettingsActivity.this, manifest);
-                        download.setEnabled(false);
-                        download.setText(R.string.update_downloading);
-                        Toast.makeText(SettingsActivity.this, R.string.update_download_started, Toast.LENGTH_LONG).show();
+                        try {
+                            UpdateManager.enqueue(SettingsActivity.this, manifest);
+                            download.setEnabled(false);
+                            download.setText(R.string.update_downloading);
+                            Toast.makeText(SettingsActivity.this, R.string.update_download_started, Toast.LENGTH_LONG).show();
+                        } catch (RuntimeException error) {
+                            Toast.makeText(SettingsActivity.this, R.string.apk_download_failed, Toast.LENGTH_LONG).show();
+                        }
                     });
                     panel.addView(download, rowParams());
                 });
@@ -328,6 +343,9 @@ public final class SettingsActivity extends Activity {
             @Override
             public void onError(String message) {
                 runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) {
+                        return;
+                    }
                     check.setEnabled(true);
                     status.setText(getString(R.string.update_check_error, message));
                 });
@@ -438,6 +456,10 @@ public final class SettingsActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (updateCheckFuture != null) {
+            updateCheckFuture.cancel(true);
+            updateCheckFuture = null;
+        }
         probeExecutor.shutdownNow();
         super.onDestroy();
     }

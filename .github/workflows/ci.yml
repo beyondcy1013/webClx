@@ -28,10 +28,25 @@ jobs:
           components: rustfmt
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Prepare root test home
+        run: >-
+          sudo mkdir -p /home/root &&
+          sudo sed -i 's|^root:x:0:0:root:/root:|root:x:0:0:root:/home/root:|' /etc/passwd
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Test workspace
-        run: cargo test --workspace --locked
+        run: >-
+          sudo -E env "PATH=$PATH" cargo test --workspace --locked --
+          --skip tmux_backed_sessions_survive_manager_restart
+          --skip background_command_accepts_stdin_and_keeps_final_output
+      - name: Test tmux-sensitive cases serially
+        run: >-
+          sudo -E env "PATH=$PATH" cargo test --locked --
+          tmux_backed_sessions_survive_manager_restart
+          background_command_accepts_stdin_and_keeps_final_output
+          --test-threads=1
 
   browser-contracts:
     name: Browser and release contracts

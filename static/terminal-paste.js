@@ -373,13 +373,12 @@ function sendPastedText(text, emptyMessage = "剪贴板为空。", options = {})
   cancelNewSessionQuickStart();
   const multiline = hasTerminalPasteLineBreak(text);
   const bracketMultilinePaste = multiline && options.forceBracketedPaste !== false;
-  if (bracketMultilinePaste) {
-    const prepared = prepareTerminalPasteText(text);
-    sendTerminalInput(wrapBracketedTerminalPaste(prepared));
-  } else if (typeof term.paste === "function") {
-    term.paste(text);
-  } else {
-    sendTerminalInput(prepareTerminalPasteText(text));
+  const prepared = prepareTerminalPasteText(text);
+  const bracketed = bracketMultilinePaste || Boolean(term?.modes?.bracketedPasteMode);
+  const data = bracketed ? wrapBracketedTerminalPaste(prepared) : prepared;
+  if (!sendTerminalInput(data, { flush: true, requireConnected: true })) {
+    updateStatus("粘贴发送失败，内容尚未发送，请等待连接恢复后重试。", "warn");
+    return false;
   }
   refreshTerminalInputVisibilityAfterPaste();
   updateStatus(bracketMultilinePaste ? "已安全粘贴多行内容到终端输入区。" : "已粘贴到终端输入区。", "ok");
@@ -415,7 +414,10 @@ function submitTerminalPasteDialogAndSend() {
     return false;
   }
 
-  sendTerminalInput(MOBILE_KEY_SEQUENCES.enter);
+  if (!sendTerminalInput(MOBILE_KEY_SEQUENCES.enter, { flush: true, requireConnected: true })) {
+    updateStatus("内容已粘贴，但回车发送失败；请在终端确认内容后手动按回车，勿重复粘贴。", "warn");
+    return false;
+  }
   updateStatus(multiline ? "已安全粘贴多行内容并发送回车。" : "已粘贴到终端输入区并发送回车。", "ok");
   closeTerminalPasteDialog();
   focusTerminalAfterSoftKeyboardInput();
@@ -423,7 +425,8 @@ function submitTerminalPasteDialogAndSend() {
 }
 
 function normalizeTerminalPasteScheduledTask(task) {
-  if (!task) {
+  // The list API includes delivery history; only queued entries are cancellable timers.
+  if (!task || (task.status && task.status !== "queued")) {
     return null;
   }
   const taskId = String(task.taskId || task.id || "").trim();

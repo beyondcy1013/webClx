@@ -68,7 +68,7 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /<select[\s\S]*?id=\"terminal-project-command-select\"[\s\S]*?>[\s\S]*?<option value=\"\">\u9879\u76ee\u6307\u4ee4<\/option>[\s\S]*?<option value=\"open_project_url\">\u9879\u76ee URL<\/option>[\s\S]*?<option value=\"open_artifact_downloads\">\u4e0b\u8f7d\u4e2d\u5fc3<\/option>[\s\S]*?<option value=\"codes_backup\">!codes_backup<\/option>[\s\S]*?<option value=\"deploy_project\" data-shortcut=\"Ctrl\+B\">\u672c\u9879\u76ee\u90e8\u7f72\u811a\u672c<\/option>[\s\S]*?<\/select>/,
+  /<select[\s\S]*?id=\"terminal-project-command-select\"[\s\S]*?>[\s\S]*?<option value=\"\">\u9879\u76ee\u6307\u4ee4<\/option>[\s\S]*?<option value=\"open_project_url\">\u9879\u76ee URL<\/option>[\s\S]*?<option value=\"open_artifact_downloads\">\u4e0b\u8f7d\u4e2d\u5fc3<\/option>[\s\S]*?<option value=\"codes_backup\">!codes_backup<\/option>[\s\S]*?<option value=\"deploy_project\" data-shortcut=\"\^B\">\u672c\u9879\u76ee\u90e8\u7f72\u811a\u672c<\/option>[\s\S]*?<\/select>/,
   "soft keyboard should expose project URL, 下载中心, codes_backup and deploy as project commands",
 );
 
@@ -158,42 +158,42 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /styles-terminal\.css\?v=20260804b/,
+  /styles-terminal\.css\?v=20260912c/,
   "terminal html should reference the split terminal stylesheet version",
 );
 
 assert.match(
   terminalHtml,
-  /styles-responsive\.css\?v=20260727b/,
+  /styles-responsive\.css\?v=20260913a/,
   "terminal html should refresh the responsive stylesheet after FAB sizing changes",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-command-quickstart\.js\?v=20260803b/,
+  /terminal-command-quickstart\.js\?v=20260901a/,
   "terminal html should reference the bumped terminal-command-quickstart version",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-tools\.js\?v=20260725a/,
+  /terminal-tools\.js\?v=20260816a/,
   "terminal html should reference the bumped terminal-tools version",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-settings-loader\.js\?v=20260803f/,
+  /terminal-settings-loader\.js\?v=20260913a/,
   "terminal html should reference the bumped terminal-settings-loader version",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-mobile-keys\.js\?v=20260812a/,
+  /terminal-mobile-keys\.js\?v=20260905a/,
   "terminal html should reference the bumped terminal-mobile-keys version",
 );
 
 assert.match(
   terminalHtml,
-  /terminal\.js\?v=20260810a/,
+  /terminal\.js\?v=20260912d/,
   "terminal html should reference the bumped terminal.js version",
 );

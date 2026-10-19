@@ -81,6 +81,24 @@ assert.equal(
   "ordinary shell prompts at the last row should keep the real cursor",
 );
 
+assert.deepEqual(
+  detectBottomStatusCursorCorrection({
+    cursorRow: 23,
+    cursorColumn: 4,
+    rows: 24,
+    columns: 80,
+    applicationCursorRows: [21],
+    lines: Array.from({ length: 24 }, (_, index) => {
+      if (index === 21) return "Plan something";
+      if (index === 22) return "";
+      if (index === 23) return "● Plan ○ Act (Tab)";
+      return "";
+    }),
+  }),
+  null,
+  "Cline's own inverse-video input caret should remain the sole visible input caret",
+);
+
 assert.equal(
   detectBottomStatusCursorCorrection({
     cursorRow: 23,
@@ -187,7 +205,7 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /styles-terminal\.css\?v=20260804b/,
+  /styles-terminal\.css\?v=20260926-workflow-history/,
   "terminal page should load the split terminal stylesheet with its current cache key",
 );
 
@@ -235,4 +253,22 @@ assert.match(
   terminalJs,
   /function syncTerminalCursorCorrection\(\) \{[\s\S]*terminalSelectionBlockingCursorCorrection\(\)[\s\S]*return;[\s\S]*\}/,
   "syncTerminalCursorCorrection must bail out during an active selection instead of toggling theme every frame",
+);
+
+assert.match(
+  terminalJs,
+  /terminalCursorGuard\?\.isLikelyCodexInputLine\?\.\(lines\[inputRow\]\)/,
+  "application-cursor-only suppression must require a genuine Codex input line so CodeBuddy inverse-video cells do not hide the native caret",
+);
+
+assert.match(
+  terminalJs,
+  /function terminalContextRunsCodebuddyAgent\(\)[\s\S]*activity_agent[\s\S]*includes\("codebuddy"\)/,
+  "cursor correction must read activity_agent and skip entirely for CodeBuddy sessions",
+);
+
+assert.match(
+  terminalJs,
+  /function terminalCursorCorrectionTarget\(\)[\s\S]*terminalContextRunsCodebuddyAgent\(\)[\s\S]*return null;[\s\S]*terminalCursorGuard/,
+  "terminalCursorCorrectionTarget must bail out before the Codex heuristic when the session runs CodeBuddy",
 );

@@ -241,39 +241,83 @@ async function renameSession() {
   }
 }
 
+async function saveExperienceAndCloseSession(session) {
+  return deleteSession(session, { withExperienceSave: true });
+}
+
 async function deleteSession(session) {
-  if (
-    !window.confirm(`结束终端"${session.name}"后，里面正在运行的命令也会被终止。确定继续吗？`)
-  ) {
+  if (!session) {
     return;
   }
 
-  updateSessionsStatus(`正在结束 ${session.name}…`, "info", { sticky: true });
+  const options = arguments[1] || {};
+  let withExperienceSave = Boolean(options.withExperienceSave);
+  const confirm = Boolean(options.confirm);
+
+  let confirmation = null;
+  if (confirm) {
+    confirmation = await confirmTerminalExperienceSaveAndHide(session);
+    if (confirmation.action === "cancel" || (!confirmation.shouldHide && !confirmation.shouldClose)) {
+      return;
+    }
+    withExperienceSave = confirmation.shouldHide;
+  }
+
   refreshSessionsButton.disabled = true;
   createSessionButton.disabled = true;
 
   const affectsCurrentPath = (session.path || "") === state.currentPath;
 
-  try {
-    const deleted = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}`, {
-      method: "DELETE",
-      headers: {
-        "X-WebClx-Confirm-Session": session.id,
-        "X-WebClx-Delete-Source": "home-sessions",
-      },
-    });
+  if (withExperienceSave) {
+    updateSessionsStatus(`正在转入隐藏并提交落盘：${session.name}…`, "info", { sticky: true });
 
-    announceSessionMutation("deleted", deleted);
-    forgetPreferredSession(session.path || "", session.id);
-    await Promise.all([
-      loadSessions(),
-      affectsCurrentPath ? loadDirectorySessions() : Promise.resolve(),
-    ]);
-    updateSessionsStatus(`已结束 ${deleted.name}。`, "ok");
-  } catch (error) {
-    updateSessionsStatus(error.message, "warn");
-  } finally {
-    refreshSessionsButton.disabled = false;
-    createSessionButton.disabled = false;
+    try {
+      if (typeof scheduleTerminalExperienceSave === "function") {
+        scheduleTerminalExperienceSave(session).catch((err) => {
+          console.warn("经验落盘指令排程未确认:", err);
+        });
+      }
+
+      const hidden = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}/hide`, {
+        method: "PUT",
+      });
+
+      announceSessionMutation("idle", hidden);
+      forgetPreferredSession(session.path || "", session.id);
+      await Promise.all([
+        loadSessions(),
+        affectsCurrentPath ? loadDirectorySessions() : Promise.resolve(),
+      ]);
+      updateSessionsStatus(`已提交经验落盘任务，${hidden.name || session.name} 已转入隐藏专区，完成后将自行关闭。`, "ok");
+      if (confirmation) {
+        reportTerminalExperienceSaveOutcome(confirmation, updateSessionsStatus);
+      }
+    } catch (error) {
+      updateSessionsStatus(error.message, "warn");
+    } finally {
+      refreshSessionsButton.disabled = false;
+      createSessionButton.disabled = false;
+    }
+  } else {
+    updateSessionsStatus(`正在关闭 ${session.name}…`, "info", { sticky: true });
+
+    try {
+      const closed = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}/close`, {
+        method: "POST",
+      });
+
+      announceSessionMutation("deleted", closed);
+      forgetPreferredSession(session.path || "", session.id);
+      await Promise.all([
+        loadSessions(),
+        affectsCurrentPath ? loadDirectorySessions() : Promise.resolve(),
+      ]);
+      updateSessionsStatus(`已关闭终端 ${session.name}。`, "ok");
+    } catch (error) {
+      updateSessionsStatus(error.message || "关闭终端失败。", "warn");
+    } finally {
+      refreshSessionsButton.disabled = false;
+      createSessionButton.disabled = false;
+    }
   }
 }
