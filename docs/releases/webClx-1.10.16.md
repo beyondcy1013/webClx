@@ -36,6 +36,32 @@ Every artifact ships with a `.sha256` checksum. The Linux archive contains the
 `webclx` binary plus the runtime `static/` directory; the Windows archive
 contains `webclx.exe` and `static/`.
 
+## Running the binaries
+
+```bash
+# Linux
+tar -xzf webClx-1.10.16-linux-x86_64.tar.gz
+cd webClx-1.10.16-linux-x86_64 && ./webclx serve
+```
+
+```powershell
+# Windows
+Expand-Archive webClx-1.10.16-windows-x86_64.zip -DestinationPath .
+cd webClx-1.10.16-windows-x86_64; .\webclx.exe serve
+```
+
+Keep the bundled `static/` directory next to the executable; the runtime serves
+it from disk and falls back to the embedded copy.
+
+## Android
+
+The public APK is built from this sanitized source, so the compiled-in source
+list carries `HOST:PORT` and `PUBLIC_DOMAIN:PORT` placeholders instead of any
+real deployment. Open a server address in the app (link or intent handled by
+`openInWebView`) to point it at your own instance, or edit
+`android/app/src/main/java/com/webclx/app/SourceRegistry.java` and rebuild with
+`scripts/build-android-apk.sh`.
+
 ## Source archive
 
 - Source commit: `dc23bbe599ec`
