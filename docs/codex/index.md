@@ -23,6 +23,7 @@
 - [FRP 角色管理边界](tasks/frp-role-management.md)：外部配置保存、进程所有权、重复启动和状态锁死锁边界。
 - [API 预设路由边界](tasks/api-preset-routing-boundaries.md)：`direct`、本地中继、协议转换、测试探针和客户端凭据的边界。
 - [模型预设切换与协议转换](tasks/model-preset-switching.md)：Codex_OAuth / Codex_API / Claude_API 切换流程、responses_proxy 推断、本机中继与协议转换路由。
+- [Devin Desktop 登录备份与恢复](tasks/devin-desktop-auth.md)：CLI/Desktop 类型边界、加密快照、原环境恢复和验收限制。
 - [CodeBuddy 账号类型](tasks/codebuddy-accounts.md)：账号库、扫码添加、CLI 切换（env token）、自动签到/旅行、积分查询。
 - [预设手动排序](tasks/preset-manual-ordering.md)：顺序持久化和重排 API 约束。
 - [MiniMax TokenPlan 字段](tasks/minimax-tokenplan.md)：限额字段、状态码和自动重查。
@@ -41,6 +42,7 @@
 ### 终端会话
 
 - [会话切换与输出](tasks/terminal-session-switch-output.md)：WebSocket、backlog、滚动恢复、输出合并和新会话隔离。
+- [终端按键投递与退格失效](tasks/terminal-input-keystroke-delivery.md)：按读取批次解析按键、退格字节分段投递与间隔。
 - [会话活动状态](tasks/terminal-session-activity.md)：工作、错误、重试、完成、输出和空闲状态。
 - [继续发送统一入口](tasks/terminal-continue-send-unification.md)：`继续` API、自动重试和定时任务。
 - [会话输出搜索](tasks/terminal-session-search.md)：跨活动会话搜索。

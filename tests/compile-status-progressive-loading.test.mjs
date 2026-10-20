@@ -90,6 +90,9 @@ const liveResponse = {
     packages_completed: 37,
     packages_total: 120,
     current_package: "tokio",
+    current_command: ["bash", "validate.sh"],
+    latest_output: ["running 1 test", "case_<unsafe> has been running for over 60 seconds"],
+    log_updated_at: Math.floor(Date.now() / 1000) - 70,
     log_path: "/tmp/live.log",
   }],
   logs: [],
@@ -226,5 +229,13 @@ assert.match(
   "the one-click clear action should be attached to the run history section",
 );
 assert.match(managerJs, /\/api\/build\/compile\/history["'], \{ method: ["']DELETE["'] \}/);
+
+
+assert.match(elements.compileRunningListEl.innerHTML, /执行测试/);
+assert.match(elements.compileRunningListEl.innerHTML, /已用/);
+assert.match(elements.compileRunningListEl.innerHTML, /无输出不代表卡死/);
+assert.match(elements.compileRunningListEl.innerHTML, /bash validate.sh/);
+assert.match(elements.compileRunningListEl.innerHTML, /case_&lt;unsafe&gt;/);
+assert.doesNotMatch(elements.compileRunningListEl.innerHTML, /case_<unsafe>/);
 
 console.log("compile status progressive loading tests passed");

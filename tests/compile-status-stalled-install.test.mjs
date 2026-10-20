@@ -49,6 +49,6 @@ assert.match(
   /function isCompileRunEnded[\s\S]*success.*failed.*timed_out/,
   "history must exclude active and stalled runs",
 );
-assert.match(index, /app-compile-status-manager\.js\?v=20260813b/);
+assert.match(index, /app-compile-status-manager\.js\?v=20261019-progress/);
 
 console.log("compile stalled install status contracts passed");

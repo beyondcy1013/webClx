@@ -210,6 +210,36 @@ still disables follow until the next selection, input, or bottom button action.
 positions, subsequent live output, native wheel/touch history followed by a
 switch, and manual history reading during replay without a session switch.
 
+### First Scroll After Page Resume Snapped Back (2026-10-20)
+
+Symptom: a terminal page whose buffer was still following output could ignore
+or immediately undo the first wheel/touch scroll after a page-resume, focus, or
+viewport-resize layout pass. The page appeared unable to scroll back through
+history even though the xterm buffer contained scrollback.
+
+Root cause: `captureTerminalScrollSnapshotForSession()` stores the context's
+`scrollIntentRevision`, which is `undefined` until the first user scroll. The
+restore guard in `restoreTerminalScrollSnapshot()` only rejected a mismatched
+revision when the snapshot had one. A snapshot captured at the bottom before any
+scroll intent was therefore treated as authoritative for the following 1.8 s of
+page-resume restores, so a wheel/touch that incremented the revision from
+`undefined` to `1` was overwritten by `scrollTerminalToBottom()`.
+
+Fix: compare `(snapshot.scrollIntentRevision ?? 0)` with
+`(activeTerminalContext?.scrollIntentRevision ?? 0)`. A first user scroll now
+invalidates the pre-intent snapshot, matching the existing behavior for later
+gestures. `terminal.html` bumps the navigation-layout asset to
+`20261020-scroll-intent-zero`.
+
+Devin CLI was also probed live in `feishuFwd_2` (normal buffer, no mouse
+tracking, ~2000 history lines); a freshly loaded page responds to wheel and
+touch scrolling. A page that still fails after this static update must be
+reloaded so it no longer runs the old cached script.
+
+Verification: `node tests/terminal-scroll-intent.test.mjs` adds the
+pre-intent snapshot case, and `tests/terminal-layout-scroll-preserve.test.mjs`
+plus `tests/terminal-paste-safety.test.mjs` still pass.
+
 ## Bounded Background Preconnect (2026-08-14)
 
 Symptom: the first dropdown switch to an unvisited active session still showed

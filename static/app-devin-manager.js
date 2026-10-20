@@ -74,7 +74,7 @@
         `/api/auth/devin-accounts/${encodeURIComponent(account.id)}/switch`,
         { method: "PUT" },
       );
-      showStatus(`已切换到 Devin 账号 ${account.name}。`, "ok");
+      showStatus(`已应用到 Devin CLI：${account.name}。新启动的 CLI 使用此账号，已运行的 CLI 需重新启动；Desktop 登录需单独管理。`, "ok");
       if (typeof loadCodexAccounts === "function") await loadCodexAccounts("devin");
       return true;
     } catch (error) {
@@ -98,18 +98,82 @@
   }
 
   async function importCurrentAccount() {
-    showStatus("正在从系统读取当前 Devin 配置…", "info");
+    showStatus("正在从系统读取当前 Devin CLI 配置…", "info");
     try {
       const result = await requestJson("/api/auth/devin-accounts/import-current", {
         method: "POST",
       });
-      showStatus(`已成功导入当前 Devin 账号：${result.name || result.email || result.id}`, "ok");
+      showStatus(`已成功导入当前 Devin CLI 账号：${result.name || result.email || result.id}`, "ok");
       closeAddDialog();
       if (typeof loadCodexAccounts === "function") await loadCodexAccounts("devin");
     } catch (error) {
-      showStatus(error.message || "读取当前 Devin 配置失败。", "warn");
-      setAddStatus(error.message || "读取当前 Devin 配置失败。", "warn");
+      showStatus(error.message || "读取当前 Devin CLI 配置失败。", "warn");
+      setAddStatus(error.message || "读取当前 Devin CLI 配置失败。", "warn");
     }
+  }
+
+  async function detectDesktop(event) {
+    event?.preventDefault?.();
+    showStatus("正在读取 webClx 所在主机的 Devin Desktop 登录数据库…", "info");
+    try {
+      const result = await requestJson("/api/auth/devin-accounts/detect-desktop", { method: "POST" });
+      const account = result?.account || {};
+      const identity = account.email || account.id || "本机 Desktop";
+      const state = account.logged_in ? "检测到登录字段" : "未检测到完整登录字段";
+      showStatus(
+        `${state}：${identity}。来源是 webClx 服务器本机，尚未验证服务端登录有效性。`,
+        account.logged_in ? "ok" : "warn",
+      );
+    } catch (error) {
+      showStatus(error.message || "读取本机 Devin Desktop 配置失败。", "warn");
+    }
+  }
+
+  async function importDesktopCurrent(event) {
+    event?.preventDefault?.();
+    showStatus("正在把 webClx 所在主机的 Desktop 账号类型加入列表…", "info");
+    try {
+      const result = await requestJson("/api/auth/devin-accounts/import-desktop-current", {
+        method: "POST",
+      });
+      const account = result?.account || {};
+      showStatus(
+        `已添加 Desktop 账号记录：${account.email || account.name || account.id}。登录凭据未复制到 CLI，也未发送到浏览器。`,
+        "ok",
+      );
+      if (typeof loadCodexAccounts === "function") await loadCodexAccounts("devin");
+    } catch (error) {
+      showStatus(error.message || "添加本机 Devin Desktop 账号失败。", "warn");
+    }
+  }
+
+  async function desktopAction(account, action) {
+    const name = account?.name || account?.email || "Devin Desktop";
+    if (action === "detect") {
+      showStatus(`正在核验 ${name} 的 Desktop 配置字段…`, "info");
+      try {
+        const result = await requestJson(
+          "/api/auth/devin-accounts/detect-desktop",
+          { method: "POST" },
+        );
+        const detected = result?.account || {};
+        showStatus(
+          `${detected.logged_in ? "检测到完整登录字段" : "登录字段不完整"}：${detected.email || detected.id || name}。字段存在不等于服务端请求成功。`,
+          detected.logged_in ? "ok" : "warn",
+        );
+      } catch (error) {
+        showStatus(error.message || "Desktop 登录核验失败。", "warn");
+      }
+      return;
+    }
+    const command = action === "backup"
+      ? "python3 scripts/devin/desktop-auth-backup.py backup /安全目录/login.gpg"
+      : "python3 scripts/devin/desktop-auth-backup.py restore /安全目录/login.gpg";
+    const requirement = action === "restore" ? "恢复前必须正常退出 Devin Desktop。" : "";
+    showStatus(
+      `Desktop ${action === "backup" ? "备份" : "恢复"}需在终端交互输入 GPG 密码：${command}。${requirement} 网页未执行磁盘写入。`,
+      "info",
+    );
   }
 
   async function refreshCliOptions() {
@@ -155,18 +219,18 @@
   }
 
   async function detectCurrent() {
-    showStatus("正在从本地 credentials.toml 重新读取当前 Devin 账号…", "info");
+    showStatus("正在从本地 credentials.toml 重新读取当前 Devin CLI 账号…", "info");
     try {
       const res = await requestJson("/api/auth/devin-accounts/detect-current", { method: "POST" });
       if (typeof loadCodexAccounts === "function") await loadCodexAccounts("devin");
       if (res?.matched && res?.account) {
         const name = res.account.name || res.account.email || res.account.id;
-        showStatus(`已重新读取本地 Devin 当前登录账号：${name}（${res.account.plan || "Devin"}）`, "ok");
+        showStatus(`已重新读取本地 Devin CLI 当前登录账号：${name}（${res.account.plan || "Devin"}）`, "ok");
       } else {
-        showStatus("已重新读取本地 Devin 配置：当前未检测到登录凭据。", "info");
+        showStatus("已重新读取本地 Devin CLI 配置：当前未检测到登录凭据。", "info");
       }
     } catch (error) {
-      showStatus(`重新读取当前 Devin 账号失败：${error.message}`, "warn");
+      showStatus(`重新读取当前 Devin CLI 账号失败：${error.message}`, "warn");
     }
   }
 
@@ -177,6 +241,9 @@
     switchAccount,
     deleteAccount,
     importCurrentAccount,
+    detectDesktop,
+    importDesktopCurrent,
+    desktopAction,
     detectCurrent,
     refreshCliOptions,
     saveCliOptions,
@@ -186,6 +253,8 @@
     el("codex-account-add-devin")?.addEventListener("click", openAddDialog);
     el("devin-import-current-toolbar")?.addEventListener("click", importCurrentAccount);
     el("devin-import-current-btn")?.addEventListener("click", importCurrentAccount);
+    el("devin-detect-desktop")?.addEventListener("click", detectDesktop);
+    el("devin-import-desktop-toolbar")?.addEventListener("click", importDesktopCurrent);
     el("devin-detect-current")?.addEventListener("click", detectCurrent);
     el("devin-option-bypass")?.addEventListener("change", saveCliOptions);
     el("devin-add-close")?.addEventListener("click", closeAddDialog);

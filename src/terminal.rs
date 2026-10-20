@@ -47,6 +47,7 @@ use conversations::{
     validated_codex_session_id,
 };
 mod docs;
+mod input_pacing;
 mod manager;
 mod session;
 mod tmux;
@@ -676,6 +677,22 @@ impl TerminalActivitySnapshot {
             busy: true,
             state: "building".to_string(),
             label: "编译中".to_string(),
+            agent: None,
+            model_family: String::new(),
+            error_keyword: None,
+            error_signature: None,
+            error_continue_sent: false,
+            error_input_queued: false,
+            error_auto_continue_at: None,
+            last_output_at,
+        }
+    }
+
+    fn compacting(last_output_at: u64) -> Self {
+        Self {
+            busy: true,
+            state: "compacting".to_string(),
+            label: "压缩中".to_string(),
             agent: None,
             model_family: String::new(),
             error_keyword: None,

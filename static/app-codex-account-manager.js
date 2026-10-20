@@ -397,9 +397,9 @@
       checkbox.checked = visibleAccounts.length > 0 && selectedVisible === visibleAccounts.length;
       checkbox.indeterminate = selectedVisible > 0 && selectedVisible < visibleAccounts.length;
     }
-    if (exportButton) exportButton.disabled = selectedAccountIds.size === 0;
+    if (exportButton) exportButton.disabled = visibleAccounts.length === 0;
     const exportFileButton = document.getElementById("codex-account-export-file");
-    if (exportFileButton) exportFileButton.disabled = selectedAccountIds.size === 0;
+    if (exportFileButton) exportFileButton.disabled = visibleAccounts.length === 0;
     if (usageButton) usageButton.disabled = selectedAccountIds.size === 0 || bulkUsageQueryRunning;
 
     // Enable/disable action buttons that require a checkbox selection
@@ -464,60 +464,36 @@
     return { format: "webclx-account-presets-bundle", version: 1, sections };
   }
 
-  async function exportSelectedAccounts() {
-    const selected = allAccounts.filter((account) => selectedAccountIds.has(accountKey(account)));
-    if (!selected.length) { showStatus("请先勾选要导出的账号。", "warn"); return; }
-    try {
-      showStatus(`正在导出 ${selected.length} 个账号…`, "info");
-      const bundle = await generateAccountsExportBundle(selected);
-      if (!await writeClipboard(`${JSON.stringify(bundle, null, 2)}\n`)) throw new Error("无法写入剪贴板，请检查浏览器权限。");
-      showStatus(`已导出 ${selected.length} 个账号到剪贴板。`, "ok");
-    } catch (error) { showStatus(error.message, "warn"); }
-  }
-
-  async function exportSelectedAccountsToFile() {
-    const selected = allAccounts.filter((account) => selectedAccountIds.has(accountKey(account)));
-    if (!selected.length) { showStatus("请先勾选要导出的账号。", "warn"); return; }
-    try {
-      showStatus(`正在导出 ${selected.length} 个账号…`, "info");
-      const bundle = await generateAccountsExportBundle(selected);
-      const filename = `webclx-accounts-${new Date().toISOString().slice(0, 10)}.json`;
-      downloadJsonFile(filename, bundle);
-      showStatus(`已导出 ${selected.length} 个账号到文件 ${filename}。`, "ok");
-    } catch (error) { showStatus(error.message, "warn"); }
-  }
-
-  async function applyImportAccountsPayload(payload, sourceLabel = "剪贴板") {
-    const sections = payload?.format === "webclx-account-presets-bundle" ? payload.sections : { [payload?.section]: payload };
-    const validSections = new Set(["auth_presets", "api_presets", "claude_presets", "devin_presets", "devin_accounts", "codebuddy_presets", "codebuddy_accounts"]);
-    const entries = Object.entries(sections || {}).filter(([section, value]) => validSections.has(section) && Array.isArray(value?.accounts));
-    if (!entries.length) {
-      if (Array.isArray(payload) && typeof WebClxCodeBuddyManager?.importAccountsData === "function") {
-        await WebClxCodeBuddyManager.importAccountsData(payload);
-        return;
-      }
-      throw new Error(`没有可导入的有效账号数据。`);
-    }
-    const count = entries.reduce((total, [, value]) => total + value.accounts.length, 0);
-    if (!window.confirm(`确定从${sourceLabel}导入 ${count} 个账号吗？`)) return;
-    for (const [section, value] of entries) await requestJson(`/api/settings/preset-config/clipboard/${section}/import`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(value),
+  const interchangeSections = {oauth:"auth_presets",api:"api_presets",claude:"claude_presets",devin:"devin_presets",codebuddy:"codebuddy_presets"};
+  let interchangeDialog;
+  function getInterchangeDialog() {
+    return interchangeDialog ||= globalThis.AccountInterchangeDialog.create({
+      requestJson, refresh: async () => { await loadCodexAccounts(); }, report: showStatus,
     });
-    await (typeof refreshAuthPanels === "function" ? refreshAuthPanels() : loadCodexAccounts());
-    showStatus(`已从${sourceLabel}导入 ${count} 个账号。`, "ok");
+  }
+  async function loadInterchangeExport(scope) {
+    let selected;
+    if (scope === "all") return globalThis.AccountInterchangeDialog.loadGlobalExport(requestJson);
+    selected = allAccounts.filter(account => scope === "current" ? account.kind === activeKind : selectedAccountIds.has(accountKey(account)));
+    if (!selected.length) throw new Error("此范围没有账号；请刷新或勾选账号。");
+    return generateAccountsExportBundle(selected);
+  }
+  function openAccountExport(transport="clipboard", global=false) {
+    return getInterchangeDialog().openExport({
+      scope: global ? "all" : selectedAccountIds.size ? "selected" : "current", transport,
+      scopes: global ? [["all","全部 Codex / Claude / Devin / CodeBuddy 预设（AGY 使用专用入口）"]] : [["selected","已选账号"],["current","当前 Agent 全部账号"]],
+      load: loadInterchangeExport,
+    });
+  }
+  async function exportSelectedAccounts() { return openAccountExport(); }
+  async function exportSelectedAccountsToFile() { return openAccountExport("file"); }
+
+  async function applyImportAccountsPayload(payload, sourceLabel = "文件") {
+    return getInterchangeDialog().openImport({target: interchangeSections[activeKind] || "", text: JSON.stringify(payload), source: sourceLabel});
   }
 
   async function importAccountsFromClipboard() {
-    try {
-      let rawText = "";
-      if (navigator.clipboard?.readText) {
-        try { rawText = await navigator.clipboard.readText(); } catch { /* use prompt fallback */ }
-      }
-      if (!rawText && window.prompt) rawText = window.prompt("粘贴账号列表 JSON") || "";
-      if (!rawText) throw new Error("无法读取剪贴板，请手动粘贴账号列表 JSON。");
-      const payload = JSON.parse(rawText);
-      await applyImportAccountsPayload(payload, "剪贴板");
-    } catch (error) { showStatus(error.message || "导入账号列表失败。", "warn"); }
+    return getInterchangeDialog().openImport({target: interchangeSections[activeKind] || ""});
   }
 
   function triggerImportAccountsFile() {
@@ -1118,16 +1094,30 @@
 
       // 操作列固定且手机屏宽有限：行内只保留一个 ⋮ 菜单按钮，
       // 所有命令收进弹出菜单（与预设表格 createPresetActionMenu 同款交互）。
-      const actionItems = [
-        {
-          label: "切换到此账号",
-          disabled: Boolean(account.active),
-          title: account.active ? "已是当前账号" : "",
-          handler: () => applyAccount(account),
-        },
-      ];
+      const actionItems = account.kind === "devin" && account.clientType === "desktop"
+        ? [
+          { label: "核验 Desktop 登录字段", handler: () => WebClxDevinManager.desktopAction(account, "detect") },
+          { label: "备份登录快照（终端）", handler: () => WebClxDevinManager.desktopAction(account, "backup") },
+          { label: "恢复登录快照（终端）", handler: () => WebClxDevinManager.desktopAction(account, "restore") },
+        ]
+        : [
+          {
+            label: account.kind === "devin" ? "应用到 Devin CLI（新进程生效）" : "切换到此账号",
+            disabled: Boolean(account.active),
+            title: account.kind === "devin"
+              ? (account.active ? "已是当前 CLI 账号；Desktop 登录状态单独管理" : "写入 CLI 登录凭据和组织配置；已运行的 CLI 需重新启动，Desktop 登录不受此操作管理")
+              : (account.active ? "已是当前账号" : ""),
+            handler: () => applyAccount(account),
+          },
+        ];
 
-      const status = textCell(account.active ? "当前" : "");
+      const status = textCell(
+        account.active
+          ? account.kind === "devin"
+            ? account.clientType === "desktop" ? "Desktop 登录字段" : "CLI 当前"
+            : "当前"
+          : "",
+      );
       status.className = account.active ? "current-indicator active" : "current-indicator";
       const testResultCell = createCurrentIndicatorCell(false, {
         testResult: accountTestResult(account),
@@ -1140,7 +1130,7 @@
         ? "Codex_OAuth"
         : account.kind === "claude" ? "Claude_API"
         : account.kind === "codebuddy" ? "CodeBuddy"
-        : account.kind === "devin" ? "Devin"
+        : account.kind === "devin" ? (account.clientType === "desktop" ? "Devin Desktop" : "Devin CLI")
         : "Codex_API";
       const kind = textCell(kindLabel, "mono-text");
       if (account.kind !== "codebuddy" && account.kind !== "devin") {
@@ -1297,14 +1287,15 @@
       if (typeof WebClxDevinManager === "object") {
         devinAccounts = (await WebClxDevinManager.loadAccounts()).map((meta) => ({
           kind: "devin",
+          clientType: meta.client_type || "cli",
           id: meta.id,
           name: meta.name || meta.email || meta.id,
           active: Boolean(meta.active),
           saved_at: meta.saved_at || 0,
           switch_count: 0,
           account: meta.email || meta.user_id || (meta.token ? meta.token.slice(0, 10) + "..." : "-"),
-          model: meta.plan || "Devin CLI",
-          endpoint: meta.org_id || "api.devin.ai",
+          model: (meta.client_type || "cli") === "desktop" ? "Desktop 本机配置" : (meta.plan || "Devin CLI"),
+          endpoint: (meta.client_type || "cli") === "desktop" ? "仅登录状态摘要" : (meta.org_id || "api.devin.ai"),
         }));
       }
       // 用量窗口数据源：oauth 行取 auth 预设 details 里已采样的
@@ -1462,14 +1453,15 @@
     if (typeof WebClxDevinManager === "object") {
       accounts = (await WebClxDevinManager.loadAccounts()).map((meta) => ({
         kind: "devin",
+        clientType: meta.client_type || "cli",
         id: meta.id,
         name: meta.name || meta.email || meta.id,
         active: Boolean(meta.active),
         saved_at: meta.saved_at || 0,
         switch_count: 0,
         account: meta.email || meta.user_id || (meta.token ? meta.token.slice(0, 10) + "..." : "-"),
-        model: meta.plan || "Devin CLI",
-        endpoint: meta.org_id || "api.devin.ai",
+        model: (meta.client_type || "cli") === "desktop" ? "Desktop 本机配置" : (meta.plan || "Devin CLI"),
+        endpoint: (meta.client_type || "cli") === "desktop" ? "仅登录状态摘要" : (meta.org_id || "api.devin.ai"),
       }));
     }
     return { accounts };
@@ -2044,6 +2036,8 @@
       }
       renderAccounts(allAccounts);
     });
+    document.getElementById("account-global-import")?.addEventListener("click", () => getInterchangeDialog().openImport());
+    document.getElementById("account-global-export")?.addEventListener("click", () => openAccountExport("file", true));
     document.getElementById("codex-account-export")?.addEventListener("click", exportSelectedAccounts);
     document.getElementById("codex-account-export-file")?.addEventListener("click", exportSelectedAccountsToFile);
     document.getElementById("codex-account-query-usage")?.addEventListener("click", queryUsageForSelected);

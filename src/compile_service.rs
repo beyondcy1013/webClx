@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -263,6 +264,9 @@ pub struct CompileRunSummary {
     packages_total: Option<usize>,
     current_package: Option<String>,
     progress_updated_at: Option<String>,
+    /// Bounded output preview for active runs only.
+    latest_output: Vec<String>,
+    log_updated_at: Option<u64>,
     log_path: Option<String>,
     dir_path: String,
 }
@@ -779,18 +783,23 @@ fn resolve_query_log_path(run_dir: &Path, progress: &CompileRunProgress) -> Opti
 /// 窗口，并从窗口内第一个完整行开始，避免输出以截断的半行开头。
 fn read_log_tail(path: &Path, max_lines: usize) -> Option<Vec<String>> {
     const MAX_TAIL_BYTES: usize = 512 * 1024;
-    let content = fs::read(path).ok()?;
-    let window = if content.len() > MAX_TAIL_BYTES {
-        let offset = content.len() - MAX_TAIL_BYTES;
-        let skip = content[offset..]
+    let mut file = fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    let offset = length.saturating_sub(MAX_TAIL_BYTES as u64);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut content = Vec::new();
+    file.take(MAX_TAIL_BYTES as u64)
+        .read_to_end(&mut content)
+        .ok()?;
+    let skip = if offset > 0 {
+        content
             .iter()
             .position(|&byte| byte == b'\n')
-            .map(|position| offset + position + 1)
-            .unwrap_or(offset);
-        &content[skip..]
+            .map_or(0, |index| index + 1)
     } else {
-        &content[..]
+        0
     };
+    let window = &content[skip..];
     let mut lines: Vec<String> = String::from_utf8_lossy(window)
         .lines()
         .map(ToString::to_string)
@@ -1517,7 +1526,22 @@ fn compile_run_summary_from_dir(run_dir: &Path) -> Option<CompileRunSummary> {
         CompileRunProgress::default()
     };
     let current_log_path = progress.log_path.clone();
+    let active_log = current_log_path
+        .as_deref()
+        .map(Path::new)
+        .filter(|path| path.is_file())
+        .or_else(|| matches!(status.as_str(), "running" | "stalled").then_some(log_path.as_path()));
+    let latest_output = active_log
+        .and_then(|path| read_log_tail(path, 12))
+        .unwrap_or_default();
+    let log_updated_at = active_log
+        .and_then(|path| fs::metadata(path).ok())
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs());
     Some(CompileRunSummary {
+        latest_output,
+        log_updated_at,
         run_id,
         status,
         request_count: requests.len(),
@@ -1821,9 +1845,27 @@ mod tests {
     }
 
     #[test]
+    fn compile_log_tail_bounds_large_files_and_handles_carriage_returns() {
+        let root = compile_run_fixture("bounded-tail");
+        let path = root.join("large.log");
+        let mut content = "old output\n".repeat(60_000);
+        content.push_str("running 1 test\rprogress\nlast output\n");
+        fs::write(&path, content).unwrap();
+        let tail = read_log_tail(&path, 2).unwrap();
+        assert_eq!(tail, vec!["running 1 test\rprogress", "last output"]);
+        assert_eq!(read_log_tail(&path, 0).unwrap().len(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn partially_finished_compile_run_stays_running_with_live_progress() {
         let root = compile_run_fixture("partial");
         let run_dir = root.join("runs/20260715T092500-test");
+        fs::write(
+            run_dir.join("run.log"),
+            "running 1 test\nslow_case has been running for over 60 seconds\n",
+        )
+        .unwrap();
         fs::write(run_dir.join("started-first"), "2026-07-15 09:25:00\n")
             .expect("write first start");
         fs::write(run_dir.join("finished-first"), "2026-07-15 09:27:34\n")
@@ -1859,6 +1901,9 @@ mod tests {
         assert_eq!(summary.packages_completed, Some(37));
         assert_eq!(summary.packages_total, Some(120));
         assert_eq!(summary.current_package.as_deref(), Some("tokio"));
+        assert_eq!(summary.latest_output.len(), 2);
+        assert!(summary.latest_output[1].contains("slow_case"));
+        assert!(summary.log_updated_at.is_some());
 
         fs::remove_dir_all(root).expect("remove run fixture");
     }

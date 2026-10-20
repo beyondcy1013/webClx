@@ -41,7 +41,9 @@
     }
 
     function formatCompileCommand(command) {
-      return formatCompileTextList(command, "-");
+      return Array.isArray(command) && command.length
+        ? command.map((arg) => /\s/.test(String(arg)) || String(arg) === "" ? JSON.stringify(String(arg)) : String(arg)).join(" ")
+        : "-";
     }
 
     function formatCompileTerminalIdentity(item) {
@@ -108,6 +110,7 @@
 
     function formatCompileRunProgress(run) {
       const phaseLabels = {
+        waiting: "等待构建资源",
         preparing: "准备",
         compile: "编译",
         install: "安装",
@@ -134,6 +137,33 @@
       return parts.join(" · ") || "正在启动";
     }
 
+
+    function compileElapsed(start, end = Date.now()) {
+      const timestamp = typeof start === "number" ? start * 1000 : Date.parse(String(start || "").replace(" ", "T"));
+      if (!Number.isFinite(timestamp)) return "未知";
+      const seconds = Math.max(0, Math.floor((end - timestamp) / 1000));
+      return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+    }
+
+    function compileOutputDetails(run) {
+      const lines = (Array.isArray(run.latest_output) ? run.latest_output : [])
+        .flatMap((line) => String(line).replace(/\x1b\[[0-9;]*[A-Za-z]/g, "").split("\r"))
+        .filter((line) => line.trim());
+      // Infer only from recognizable output. A quiet command is not necessarily stuck.
+      let activity = "";
+      if (run.current_phase === "compile") {
+        for (const line of lines) {
+          if (/^\s*(Compiling|Checking)\s/.test(line)) activity = line.trim();
+          if (/^\s*Running\s|^running \d+ tests?|has been running for over/.test(line)) activity = "执行测试";
+          if (/^test result:/.test(line)) activity = "测试结束，等待后续输出";
+          if (/^\s*Finished\s/.test(line)) activity = "构建步骤结束，等待后续输出";
+          if (/Blocking waiting for file lock/.test(line)) activity = "等待 Cargo 锁";
+        }
+      }
+      const quiet = Number(run.log_updated_at) > 0
+        ? `最近输出：${compileElapsed(Number(run.log_updated_at))}前（无输出不代表卡死）` : "";
+      return { lines: lines.slice(-4).map((line) => line.slice(0, 600)), activity, quiet };
+    }
 
     function copyTextWithHiddenTextarea(text) {
       const textarea = document.createElement("textarea");
@@ -258,6 +288,8 @@
         compileRunningListEl.innerHTML = `<tr><td colspan="8" class="meta-text">当前没有正在执行的构建工作。</td></tr>`;
         return;
       }
+      const expanded = new Set(Array.from(compileRunningListEl.querySelectorAll?.("tr[data-run-id] details[open]") || [])
+        .map((element) => element.closest("tr").dataset.runId));
       compileRunningListEl.innerHTML = items.map((run) => {
         const logPath = String(run.log_path || "");
         const logButton = logPath
@@ -265,7 +297,15 @@
           : `<span class="meta-text">无</span>`;
         const projectsText = formatCompileTextList(run.projects);
         const terminalsText = formatCompileTerminalList(run);
-        const progressText = formatCompileRunProgress(run);
+        const detail = compileOutputDetails(run);
+        const progressText = [formatCompileRunProgress(run), detail.activity].filter(Boolean).join(" · ");
+        const elapsed = `已用 ${compileElapsed(run.started_at)}`;
+        const command = formatCompileCommand(run.current_command);
+        const detailHtml = `<div>${escapeHtml(progressText)}</div>
+          <div class="meta-text">${escapeHtml(elapsed)}${detail.quiet ? ` · ${escapeHtml(detail.quiet)}` : ""}</div>
+          <details ${expanded.has(run.run_id) ? "open" : ""}><summary>命令与最近输出</summary>
+          <div class="mono-text" style="white-space:pre-wrap;overflow-wrap:anywhere">${escapeHtml(command)}</div>
+          <pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:10em;overflow:auto">${escapeHtml(detail.lines.join("\n") || "暂无输出")}</pre></details>`;
         const progressTitle = [
           run.current_project,
           progressText,
@@ -279,17 +319,20 @@
           ["项目", projectsText],
           ["来源终端", terminalsText],
           ["进度", progressText],
+          ["已用", elapsed],
+          ["命令", command],
+          ["最近输出", detail.lines.join("\n")],
           ["开始时间", startedText],
           ["日志", logPath || "-"],
         ];
         const copyData = escapeHtml(JSON.stringify(copyFields));
         return `
-          <tr>
+          <tr data-run-id="${escapeHtml(run.run_id || "")}">
             <td class="mono-text compile-id-cell" title="${escapeHtml(run.run_id || "")}">${escapeHtml(run.run_id || "-")}</td>
             <td class="mono-text" title="${escapeHtml(requestCount)}">${requestCount}</td>
             <td class="compile-list-cell" title="${escapeHtml(projectsText)}">${escapeHtml(projectsText)}</td>
             <td class="compile-list-cell" title="${escapeHtml(terminalsText)}">${escapeHtml(terminalsText)}</td>
-            <td class="compile-progress-cell" title="${escapeHtml(progressTitle)}">${escapeHtml(progressText)}</td>
+            <td class="compile-progress-cell" title="${escapeHtml(progressTitle)}">${detailHtml}</td>
             <td class="mono-text compile-time-cell" title="${escapeHtml(startedText)}">${escapeHtml(startedText)}</td>
             <td>${logButton}</td>
             <td class="compile-copy-cell"><button class="mini-button compile-copy-btn" type="button" data-compile-copy="${copyData}">复制</button></td>

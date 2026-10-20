@@ -521,8 +521,16 @@ pub(super) fn send_tmux_startup_script(session_id: &str, script: &str) -> Result
 
 pub(super) fn send_tmux_input(session_id: &str, data: &str) -> Result<()> {
     let (text, submit_count) = split_tmux_input_submit_keys(data);
-    if !text.is_empty() {
-        send_tmux_literal_keys(session_id, text)?;
+    // 退格键单独发送：Agent TUI 把一次读取当成一次按键，退格字节混在更长的
+    // 读取里会被丢弃，连续退格就删不动了。
+    for (index, segment) in super::input_pacing::erase_key_segments(text)
+        .into_iter()
+        .enumerate()
+    {
+        if index > 0 {
+            std::thread::sleep(super::input_pacing::ERASE_KEY_WRITE_GAP);
+        }
+        send_tmux_literal_keys(session_id, segment)?;
     }
     for _ in 0..submit_count {
         send_tmux_keys(session_id, &["C-m"])?;

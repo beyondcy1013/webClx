@@ -483,9 +483,13 @@ function restoreTerminalScrollSnapshot(snapshot) {
   if (!snapshot || snapshot.sessionId !== state.activeSessionId || terminalBacklogReplayActive) {
     return;
   }
+  // A snapshot taken before the first user scroll has no revision. Treat it as
+  // revision 0 so a wheel/touch that arrives during page-resume or resize
+  // layout settling still invalidates the stale snapshot instead of being
+  // snapped back to the captured bottom position.
   if (
-    snapshot.scrollIntentRevision !== undefined &&
-    snapshot.scrollIntentRevision !== activeTerminalContext?.scrollIntentRevision
+    (snapshot.scrollIntentRevision ?? 0) !==
+    (activeTerminalContext?.scrollIntentRevision ?? 0)
   ) {
     return;
   }

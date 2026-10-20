@@ -285,3 +285,9 @@ node tests/compile-deploy-target-path.test.mjs
 - `src/compile_service.rs`
 - `docs/codex/skills/webclx-rebuild/scripts/compile-worker.sh`
 - `.codex/skills/webclx-compile-and-deploy/SKILL.md`
+
+## 2026-10-19 构建状态细节
+
+- 活动 run 状态增加 `latest_output`（末尾 12 行）和 `log_updated_at`（日志修改时间，Unix 秒）；历史不重复读取日志。日志从文件末尾最多读取 512 KiB，避免每两秒全量读大文件。
+- 构建页面显示已用时间、距最近输出的时间，展开可见当前命令与末尾四行输出；识别测试执行、Cargo 锁等待及编译/检查输出。阶段来自可见日志，安静不等于卡死，不估算未知百分比。
+- 验证：`tests/compile-status-progressive-loading.test.mjs`、`tests/compile-status-stalled-install.test.mjs`，Rust `compile_service::tests`；后端字段需队列部署后生效。

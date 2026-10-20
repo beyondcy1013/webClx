@@ -24,7 +24,7 @@ function harness(agent = "", name = "fixture") {
       autoCompactSessionIds: new Set([session.id]),
       autoCompactHandledSessions: new Set(),
       autoCompactScheduledTimers: new Map(),
-      autoCompactCompactingSessionIds: new Set(),
+      autoCompactPreviousActivityStates: new Map(),
       autoCompactStatusSessionIds: new Set(),
       autoCompactLastSent: new Map(),
       terminalUserInputAt: new Map(),
@@ -94,9 +94,9 @@ for (const agent of ["CodeBuddy", "codebuddy", "AGY", "agy", "Antigravity", "Cli
     s.state.autoCompactSessionIds.clear();
     s.setAutoCompactForActiveSession(true);
     assert.equal(s.state.autoCompactSessionIds.size, 0);
-    s.state.autoCompactCompactingSessionIds.add("target");
+    // A sent /compact no longer fabricates a compacting state on its own.
     s.syncAutoCompactCompletionStatuses();
-    assert.equal(s.state.autoCompactCompactingSessionIds.size, 0);
+    assert.equal(s.state.autoCompactStatusSessionIds.size, 0);
     // The guard is not a terminal-input filter or a general command ban.
     assert.equal(await s.sendTerminalAutoTypedInput("/status", { sessionId: "target" }), true);
     assert.equal(h.requests.length, 1);
@@ -121,7 +121,7 @@ for (const agent of ["CodeBuddy", "AGY"]) {
       await h.fireNextTimer();
       assert.equal(h.timers.size, 0);
       assert.deepEqual(h.requests, []);
-      assert.equal(h.sandbox.state.autoCompactCompactingSessionIds.size, 0);
+      assert.equal(h.sandbox.state.autoCompactLastSent.size, 0);
     });
   }
   test(`${agent} discovered after slash-command queuing blocks bytes`, async () => {
@@ -142,9 +142,28 @@ for (const agent of ["Codex", "Claude"]) {
     assert.equal(h.requests.length, 1);
     assert.equal(h.requests[0].body.command_line, "/compact");
     assert.equal(h.requests[0].body.session_id, "target");
-    assert.equal(h.sandbox.state.autoCompactCompactingSessionIds.has("target"), true);
+    // Delivery is recorded; the compacting label itself comes from the
+    // backend activity state, never from the send.
+    assert.equal(h.sandbox.state.autoCompactLastSent.has("target"), true);
+    assert.equal(h.sandbox.state.autoCompactStatusSessionIds.size, 0);
   });
 }
+
+test("the compacted marker follows the backend compacting state ending", async () => {
+  const h = harness("Codex");
+  assert.equal(h.sandbox.maybeAutoCompactCompletedSession(h.session), true);
+  await h.fireNextTimer();
+  await h.fireNextTimer();
+  assert.equal(h.requests.length, 1);
+  // The backend reports a live compaction progress line for this pane.
+  h.session.activity_state = "compacting";
+  h.sandbox.syncAutoCompactCompletionStatuses();
+  assert.equal(h.sandbox.state.autoCompactStatusSessionIds.size, 0);
+  // The progress line is gone: the compaction really ran and finished.
+  h.session.activity_state = "completed";
+  h.sandbox.syncAutoCompactCompletionStatuses();
+  assert.equal(h.sandbox.state.autoCompactStatusSessionIds.has("target"), true);
+});
 
 test("a queued default compact command keeps its original session when focus changes", async () => {
   const h = harness("Codex");

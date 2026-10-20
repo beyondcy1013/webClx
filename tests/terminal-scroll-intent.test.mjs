@@ -89,6 +89,18 @@ sandbox.saveTerminalScrollPositionForSession("a", { userIntent: true });
 sandbox.restoreTerminalScrollSnapshot(snapshot);
 assert.equal(buffer.viewportY, 20, "an older layout restore cannot undo newer user scrolling");
 
+// A page-resume snapshot can be captured before the first wheel/touch intent,
+// when no revision exists yet. The first user scroll must still invalidate it.
+context.scrollIntentRevision = undefined;
+buffer.viewportY = buffer.baseY;
+context.followOutput = true;
+const firstScrollSnapshot = sandbox.captureTerminalScrollSnapshotForSession("a");
+sandbox.noteTerminalUserScrollIntent();
+buffer.viewportY = 10;
+sandbox.saveTerminalScrollPositionForSession("a", { userIntent: true });
+sandbox.restoreTerminalScrollSnapshot(firstScrollSnapshot);
+assert.equal(buffer.viewportY, 10, "a pre-intent resume snapshot cannot undo the first user scroll");
+
 // Switching rebinds the listener and removes it from the previous viewport.
 sandbox.bindTerminalViewportScroll();
 const nextViewport = new Viewport();

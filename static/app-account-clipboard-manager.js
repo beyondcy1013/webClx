@@ -46,6 +46,11 @@
       openManualImport: customOpenManualImport = null,
     } = deps;
     const sectionMap = new Map(sections.map((entry) => [entry.section, entry]));
+    const unified = globalThis.AccountInterchangeDialog?.create({
+      requestJson, refresh: refreshAuthPanels,
+      report: (message, tone) => updateStatus(documentRef?.getElementById("codex-account-status"), message, tone),
+      documentRef, clipboard,
+    });
     let manualDialogElements = null;
     let manualDialogMode = "";
     let manualDialogSection = "";
@@ -250,6 +255,14 @@
     }
 
     async function exportSection(section) {
+      if (unified) {
+        const entry = getSection(section);
+        return unified.openExport({scope: "selected", scopes: [["selected", "当前 Agent 已选账号"]], load: async () => {
+          const ids = entry.getSelectedIds?.().filter(Boolean) || [];
+          if (!ids.length) throw new Error("请先勾选要导出的账号。");
+          return requestJson(`${ENDPOINT}/${section}/export`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ids})});
+        }});
+      }
       const entry = getSection(section);
       const selectedIds = typeof entry.getSelectedIds === "function"
         ? entry.getSelectedIds().filter(Boolean)
@@ -285,6 +298,7 @@
     }
 
     async function importSection(section) {
+      if (unified) return unified.openImport({target: section});
       const entry = getSection(section);
       if (!clipboard?.readText) {
         (customOpenManualImport || openManualImportDialog)(section, entry);

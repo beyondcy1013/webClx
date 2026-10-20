@@ -29,6 +29,17 @@ use super::{
 
 const TERMINAL_OUTPUT_CHANNEL_CAPACITY: usize = 4096;
 
+// libc is a Unix-only dependency, so errno comparisons stay behind cfg(unix).
+// Non-Unix targets report native error codes that never equal these errno values.
+#[cfg(unix)]
+const ERRNO_ECHILD: Option<i32> = Some(libc::ECHILD);
+#[cfg(not(unix))]
+const ERRNO_ECHILD: Option<i32> = None;
+#[cfg(unix)]
+const ERRNO_ESRCH: Option<i32> = Some(libc::ESRCH);
+#[cfg(not(unix))]
+const ERRNO_ESRCH: Option<i32> = None;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TerminalViewportSize {
     pub(super) cols: u16,
@@ -392,7 +403,7 @@ impl TerminalSession {
                 // ECHILD means another wait path already reaped this child.
                 // Treat it as complete so the maintenance loop does not log
                 // the same condition forever.
-                if error.raw_os_error() == Some(libc::ECHILD) {
+                if error.raw_os_error() == ERRNO_ECHILD {
                     self.child_reaped.store(true, Ordering::SeqCst);
                     self.mark_closed(b"");
                 } else {
@@ -413,8 +424,8 @@ impl TerminalSession {
 
         let mut child = crate::lock_or_recover!(self._child.lock());
         if let Err(error) = child.kill()
-            && error.raw_os_error() != Some(libc::ESRCH)
-            && error.raw_os_error() != Some(libc::ECHILD)
+            && error.raw_os_error() != ERRNO_ESRCH
+            && error.raw_os_error() != ERRNO_ECHILD
         {
             debug!("terminal child kill failed for {}: {error}", self.id);
         }
@@ -527,8 +538,7 @@ impl TerminalSession {
         let writer = self.writer.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
             let mut writer = crate::lock_or_recover!(writer.lock());
-            writer.write_all(data.as_bytes())?;
-            writer.flush()?;
+            super::input_pacing::write_input_paced(writer.as_mut(), &data)?;
             Ok(())
         })
         .await

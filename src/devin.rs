@@ -19,6 +19,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use terminal_core::current_timestamp_millis;
 use tracing::info;
 
@@ -30,8 +31,19 @@ fn now_ms() -> i64 {
 
 pub(crate) const DEVIN_ACCOUNTS_FILE: &str = "webclx-devin-accounts.json";
 
+/// CLI tokens and Desktop encrypted login snapshots are separate credential formats.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DevinClientType {
+    #[default]
+    Cli,
+    Desktop,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct DevinAccount {
+    #[serde(default)]
+    pub client_type: DevinClientType,
     pub id: String,
     pub name: String,
     #[serde(default)]
@@ -52,6 +64,8 @@ pub struct DevinAccount {
 
 #[derive(Debug, Deserialize)]
 pub struct AddDevinAccountRequest {
+    #[serde(default)]
+    pub client_type: DevinClientType,
     #[serde(default)]
     pub name: String,
     #[serde(default)]
@@ -89,11 +103,15 @@ impl DevinManager {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
+        // 历史数据里可能出现同一 id 的多条记录，加载时先收敛，保证后续按 id 切换/删除只命中一条
+        dedupe_accounts(&mut accounts);
 
         let current_token = read_current_token(&home);
         // 如果当前有登录凭据，但账号库为空，自动将当前登录加入账号库
         if let Some(ref token) = current_token {
-            let exists = accounts.iter().any(|a| a.token == *token);
+            let exists = accounts
+                .iter()
+                .any(|a| a.client_type == DevinClientType::Cli && a.token == *token);
             if !exists {
                 let probed = probe_local_account(&home);
                 let email = if !probed.email.is_empty() {
@@ -107,31 +125,38 @@ impl DevinManager {
                     read_devin_org_id(&home).unwrap_or_default()
                 };
                 let id = sanitize_account_id(&email);
-                accounts.push(DevinAccount {
-                    id,
-                    name: if !probed.name.is_empty() {
-                        probed.name
-                    } else {
-                        email.clone()
+                // 同一账号已在账号库中但凭据不同时原位更新，避免同 id 产生重复记录
+                upsert_current_login(
+                    &mut accounts,
+                    DevinAccount {
+                        client_type: DevinClientType::Cli,
+                        id,
+                        name: if !probed.name.is_empty() {
+                            probed.name
+                        } else {
+                            email.clone()
+                        },
+                        email,
+                        token: token.clone(),
+                        org_id,
+                        user_id: probed.user_id,
+                        plan: if !probed.plan.is_empty() {
+                            probed.plan
+                        } else {
+                            "Devin Pro".to_string()
+                        },
+                        active: true,
+                        saved_at: now_ms(),
                     },
-                    email,
-                    token: token.clone(),
-                    org_id,
-                    user_id: probed.user_id,
-                    plan: if !probed.plan.is_empty() {
-                        probed.plan
-                    } else {
-                        "Devin Pro".to_string()
-                    },
-                    active: true,
-                    saved_at: now_ms(),
-                });
+                );
             }
         }
 
         // 同步 active 状态
         for a in accounts.iter_mut() {
-            a.active = current_token.as_ref().map_or(false, |tok| tok == &a.token);
+            a.active = current_token
+                .as_ref()
+                .map_or(false, |tok| a.client_type == DevinClientType::Cli && tok == &a.token);
         }
 
         let mgr = Self {
@@ -156,7 +181,9 @@ impl DevinManager {
         let current_token = read_current_token(&self.home);
         let mut list = self.accounts.read().unwrap().clone();
         for a in list.iter_mut() {
-            a.active = current_token.as_ref().map_or(false, |tok| tok == &a.token);
+            a.active = current_token
+                .as_ref()
+                .map_or(false, |tok| a.client_type == DevinClientType::Cli && tok == &a.token);
         }
         list
     }
@@ -169,6 +196,7 @@ impl DevinManager {
             .ok_or_else(|| format!("找不到 ID 为 {account_id} 的 Devin 账号"))?;
 
         let target = accounts[target_idx].clone();
+        require_cli_type(target.client_type)?;
         if target.token.trim().is_empty() {
             return Err("该账号没有可用的 Session Token".to_string());
         }
@@ -188,7 +216,7 @@ impl DevinManager {
 
         // 4. 更新内存中的 active 状态
         for a in accounts.iter_mut() {
-            a.active = a.id == account_id;
+            a.active = a.client_type == DevinClientType::Cli && a.id == account_id;
         }
 
         let switched = accounts[target_idx].clone();
@@ -200,6 +228,7 @@ impl DevinManager {
     }
 
     pub fn add_account(&self, req: AddDevinAccountRequest) -> Result<DevinAccount, String> {
+        require_cli_type(req.client_type)?;
         let token = req.token.trim().to_string();
         if token.is_empty() {
             return Err("Session Token (windsurf_api_key) 不能为空".to_string());
@@ -224,6 +253,7 @@ impl DevinManager {
         let active = current_token.as_ref().map_or(false, |tok| tok == &token);
 
         let account = DevinAccount {
+            client_type: DevinClientType::Cli,
             id: id.clone(),
             name,
             email,
@@ -239,10 +269,9 @@ impl DevinManager {
             saved_at: now_ms(),
         };
 
-        if let Some(pos) = accounts
-            .iter()
-            .position(|a| a.id == id || a.token == account.token)
-        {
+        if let Some(pos) = accounts.iter().position(|a| {
+            a.client_type == DevinClientType::Cli && (a.id == id || a.token == account.token)
+        }) {
             accounts[pos] = account.clone();
         } else {
             accounts.push(account.clone());
@@ -256,7 +285,7 @@ impl DevinManager {
     pub fn delete_account(&self, account_id: &str) -> Result<(), String> {
         let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
         let before_len = accounts.len();
-        accounts.retain(|a| a.id != account_id);
+        accounts.retain(|a| !(a.client_type == DevinClientType::Cli && a.id == account_id));
         if accounts.len() == before_len {
             return Err(format!("找不到 ID 为 {account_id} 的 Devin 账号"));
         }
@@ -283,6 +312,7 @@ impl DevinManager {
         };
 
         let account = DevinAccount {
+            client_type: DevinClientType::Cli,
             id: sanitize_account_id(&email),
             name: if !probed.name.is_empty() {
                 probed.name
@@ -303,16 +333,16 @@ impl DevinManager {
         };
 
         let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
-        if let Some(pos) = accounts
-            .iter()
-            .position(|a| a.id == account.id || a.token == account.token)
-        {
+        if let Some(pos) = accounts.iter().position(|a| {
+            a.client_type == DevinClientType::Cli
+                && (a.id == account.id || a.token == account.token)
+        }) {
             accounts[pos] = account.clone();
         } else {
             accounts.push(account.clone());
         }
         for a in accounts.iter_mut() {
-            a.active = a.id == account.id;
+            a.active = a.client_type == DevinClientType::Cli && a.id == account.id;
         }
 
         drop(accounts);
@@ -331,7 +361,9 @@ impl DevinManager {
 
         let current_token = read_current_token(&self.home);
         if let Some(ref token) = current_token {
-            let matched_pos = accounts.iter().position(|a| &a.token == token);
+            let matched_pos = accounts
+                .iter()
+                .position(|a| a.client_type == DevinClientType::Cli && &a.token == token);
             if let Some(pos) = matched_pos {
                 for (i, a) in accounts.iter_mut().enumerate() {
                     a.active = i == pos;
@@ -378,6 +410,7 @@ impl DevinManager {
         let current_token = read_current_token(&self.home);
         let mut imported = 0usize;
         let mut updated = 0usize;
+        let mut skipped: Vec<Value> = Vec::new();
 
         for item in raw_items {
             let token = item.token.trim().to_string();
@@ -386,8 +419,15 @@ impl DevinManager {
             }
             let id = sanitize_account_id(&item.email);
             let active = current_token.as_ref().map_or(false, |tok| tok == &token);
+            // 导入数据自带保存时间时以来源时间为准，缺失才用本次导入时间
+            let incoming_saved_at = if item.saved_at > 0 {
+                item.saved_at
+            } else {
+                now_ms()
+            };
 
             let new_acct = DevinAccount {
+                client_type: DevinClientType::Cli,
                 id: id.clone(),
                 name: if !item.name.is_empty() {
                     item.name
@@ -404,13 +444,23 @@ impl DevinManager {
                     "Devin Pro".to_string()
                 },
                 active,
-                saved_at: now_ms(),
+                saved_at: incoming_saved_at,
             };
 
-            if let Some(pos) = accounts
-                .iter()
-                .position(|a| a.id == id || a.token == new_acct.token)
-            {
+            if let Some(pos) = accounts.iter().position(|a| {
+                a.client_type == DevinClientType::Cli && (a.id == id || a.token == new_acct.token)
+            }) {
+                let existing = &accounts[pos];
+                // 新凭据覆盖旧凭据；旧的导入项不覆盖已有较新记录，改为报告跳过
+                if incoming_saved_at < existing.saved_at {
+                    skipped.push(json!({
+                        "id": existing.id,
+                        "email": existing.email,
+                        "incoming_saved_at": incoming_saved_at,
+                        "existing_saved_at": existing.saved_at,
+                    }));
+                    continue;
+                }
                 accounts[pos] = new_acct;
                 updated += 1;
             } else {
@@ -424,7 +474,8 @@ impl DevinManager {
         Ok(json!({
             "ok": true,
             "imported": imported,
-            "updated": updated
+            "updated": updated,
+            "skipped": skipped
         }))
     }
 
@@ -458,6 +509,74 @@ impl DevinManager {
             "ok": true,
             "bypass": bypass
         }))
+    }
+
+    /// Reads only Desktop account metadata. Authentication secrets stay in the
+    /// Electron database and are never returned to the browser or stored here.
+    pub fn import_desktop_current(&self) -> Result<DevinAccount, String> {
+        let profile = self.home.join(".config/Devin");
+        let database = profile.join("User/globalStorage/state.vscdb");
+        let metadata = probe_desktop_profile(&profile, &database)?;
+        let account = DevinAccount {
+            client_type: DevinClientType::Desktop,
+            id: metadata.id.clone(),
+            name: metadata
+                .email
+                .clone()
+                .unwrap_or_else(|| "本机 Devin Desktop".to_string()),
+            email: metadata.email.unwrap_or_default(),
+            token: String::new(),
+            org_id: String::new(),
+            user_id: String::new(),
+            plan: "Desktop".to_string(),
+            active: metadata.logged_in,
+            saved_at: now_ms(),
+        };
+
+        let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
+        let position = accounts
+            .iter()
+            .position(|a| a.client_type == DevinClientType::Desktop && a.id == account.id);
+        if let Some(pos) = position {
+            accounts[pos] = account.clone();
+        } else {
+            accounts.push(account.clone());
+        }
+        drop(accounts);
+        self.persist_internal()?;
+        Ok(account)
+    }
+
+    pub fn detect_desktop(&self) -> Value {
+        let profile = self.home.join(".config/Devin");
+        let database = profile.join("User/globalStorage/state.vscdb");
+        match probe_desktop_profile(&profile, &database) {
+            Ok(metadata) => json!({
+                "ok": true,
+                "supported": true,
+                "source": "webclx_server",
+                "profile": profile.display().to_string(),
+                "account": {
+                    "client_type": "desktop",
+                    "id": metadata.id,
+                    "email": metadata.email,
+                    "api_server_url": metadata.api_server_url,
+                    "logged_in": metadata.logged_in,
+                    "auth_status_present": metadata.auth_status_present,
+                    "sessions_present": metadata.sessions_present,
+                    "backup_supported": true,
+                    "restore_supported": true,
+                },
+                "message": "已读取 webClx 所在主机的 Desktop 配置；未验证服务端登录有效性，浏览器不能直接读取其他设备磁盘"
+            }),
+            Err(error) => json!({
+                "ok": false,
+                "supported": true,
+                "source": "webclx_server",
+                "profile": profile.display().to_string(),
+                "error": error,
+            }),
+        }
     }
 }
 
@@ -776,6 +895,45 @@ fn write_bypass_status(home: &Path, bypass: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// 收敛同一客户端类型下 id 重复的记录，只保留一条。
+/// 优先保留当前生效的记录，其次保留最近保存的记录；不改变账号类型边界。
+fn dedupe_accounts(accounts: &mut Vec<DevinAccount>) {
+    let mut kept: Vec<DevinAccount> = Vec::with_capacity(accounts.len());
+    for account in accounts.drain(..) {
+        match kept
+            .iter()
+            .position(|a| a.client_type == account.client_type && a.id == account.id)
+        {
+            Some(pos) => {
+                let existing = &kept[pos];
+                let prefer_new = (account.active && !existing.active)
+                    || (account.active == existing.active && account.saved_at > existing.saved_at);
+                if prefer_new {
+                    kept[pos] = account;
+                }
+            }
+            None => kept.push(account),
+        }
+    }
+    *accounts = kept;
+}
+
+/// 当前登录凭据尚未入库时的登记入口：同一账号已存在则原位更新，不新增同 id 记录。
+fn upsert_current_login(accounts: &mut Vec<DevinAccount>, account: DevinAccount) {
+    match accounts.iter().position(|a| {
+        a.client_type == DevinClientType::Cli && (a.id == account.id || a.token == account.token)
+    }) {
+        Some(pos) => {
+            let id = accounts[pos].id.clone();
+            let mut updated = account;
+            updated.id = id;
+            updated.saved_at = now_ms();
+            accounts[pos] = updated;
+        }
+        None => accounts.push(account),
+    }
+}
+
 fn sanitize_account_id(email: &str) -> String {
     let clean = email
         .chars()
@@ -790,13 +948,91 @@ fn sanitize_account_id(email: &str) -> String {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+struct DesktopProfileMetadata {
+    id: String,
+    email: Option<String>,
+    api_server_url: Option<String>,
+    logged_in: bool,
+    auth_status_present: bool,
+    sessions_present: bool,
+}
+
+fn probe_desktop_profile(
+    profile: &Path,
+    database_path: &Path,
+) -> Result<DesktopProfileMetadata, String> {
+    if !profile.is_absolute() || !database_path.starts_with(profile) {
+        return Err("Desktop 配置目录无效".to_string());
+    }
+    let database = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|_| "无法只读打开 Devin Desktop 登录数据库".to_string())?;
+    let row = database
+        .query_row("SELECT value FROM ItemTable WHERE key=?1", ["codeium.windsurf"], |row| {
+            row.get::<_, String>(0)
+        })
+        .ok();
+    let settings = row
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let email = settings
+        .get("lastLoginEmail")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let api_server_url = settings
+        .get("apiServerUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let exists = |key: &str| -> bool {
+        database
+            .query_row("SELECT 1 FROM ItemTable WHERE key=?1 AND value IS NOT NULL", [key], |_| {
+                Ok(())
+            })
+            .is_ok()
+    };
+    let auth_status_present = exists("windsurfAuthStatus");
+    let sessions_present = exists(
+        "secret://{\"extensionId\":\"codeium.windsurf\",\"key\":\"windsurf_auth.sessions\"}",
+    );
+    let api_server_url_present = database
+        .query_row(
+            "SELECT 1 FROM ItemTable WHERE key=?1 AND value IS NOT NULL",
+            ["secret://{\"extensionId\":\"codeium.windsurf\",\"key\":\"windsurf_auth.apiServerUrl\"}"],
+            |_| Ok(()),
+        )
+        .is_ok();
+    let logged_in = auth_status_present && sessions_present && api_server_url_present;
+    let mut digest = Sha256::new();
+    digest.update(profile.as_os_str().as_encoded_bytes());
+    let profile_hash = hex::encode(digest.finalize());
+    Ok(DesktopProfileMetadata {
+        id: format!("devin-desktop-{}", &profile_hash[..16]),
+        email,
+        api_server_url,
+        logged_in,
+        auth_status_present,
+        sessions_present,
+    })
+}
+
 fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String> {
     let mut list = Vec::new();
 
     // 格式 1: 直接数组
     if let Some(arr) = body.as_array() {
         for v in arr {
-            if let Some(a) = parse_devin_account_value(v) {
+            if let Some(a) = parse_devin_account_value(v)? {
                 list.push(a);
             }
         }
@@ -811,7 +1047,7 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
         {
             if let Some(arr) = devin_sec.get("accounts").and_then(Value::as_array) {
                 for v in arr {
-                    if let Some(a) = parse_devin_account_value(v) {
+                    if let Some(a) = parse_devin_account_value(v)? {
                         list.push(a);
                     }
                 }
@@ -823,7 +1059,7 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
     // 格式 3: { "accounts": [...] }
     if let Some(arr) = body.get("accounts").and_then(Value::as_array) {
         for v in arr {
-            if let Some(a) = parse_devin_account_value(v) {
+            if let Some(a) = parse_devin_account_value(v)? {
                 list.push(a);
             }
         }
@@ -853,6 +1089,7 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                 let token = parts.last().unwrap().trim();
                 if !token.is_empty() {
                     list.push(DevinAccount {
+                        client_type: DevinClientType::Cli,
                         id: sanitize_account_id(email),
                         name: email.to_string(),
                         email: email.to_string(),
@@ -873,6 +1110,7 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                     trimmed
                 };
                 list.push(DevinAccount {
+                    client_type: DevinClientType::Cli,
                     id: format!("devin-{}", now_ms()),
                     name: "Imported Token".to_string(),
                     email: String::new(),
@@ -890,19 +1128,38 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
     Ok(list)
 }
 
-fn parse_devin_account_value(v: &Value) -> Option<DevinAccount> {
-    if !v.is_object() {
-        return None;
+fn require_cli_type(client_type: DevinClientType) -> Result<(), String> {
+    if client_type != DevinClientType::Cli {
+        return Err(
+            "Desktop 登录快照不能通过 CLI Token 接口导入或应用，请使用 Desktop 加密备份恢复工具"
+                .to_string(),
+        );
     }
-    let token = v
+    Ok(())
+}
+
+fn parse_devin_account_value(v: &Value) -> Result<Option<DevinAccount>, String> {
+    if !v.is_object() {
+        return Ok(None);
+    }
+    let client_type = match v.get("client_type") {
+        None => DevinClientType::Cli,
+        Some(value) => serde_json::from_value(value.clone())
+            .map_err(|_| "Devin client_type 必须为 cli 或 desktop".to_string())?,
+    };
+    require_cli_type(client_type)?;
+    let Some(token) = v
         .get("token")
         .or_else(|| v.get("windsurf_api_key"))
         .or_else(|| v.get("api_key"))
         .or_else(|| v.get("session_token"))
-        .and_then(Value::as_str)?
-        .trim();
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let token = token.trim();
     if token.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let email = v
@@ -938,7 +1195,15 @@ fn parse_devin_account_value(v: &Value) -> Option<DevinAccount> {
         .map(str::to_string)
         .unwrap_or_else(|| sanitize_account_id(if !email.is_empty() { email } else { name }));
 
-    Some(DevinAccount {
+    // 保留来源保存时间，导入时才能判断新旧；缺失才用本次导入时间
+    let saved_at = ["saved_at", "savedAt", "updated_at"]
+        .iter()
+        .find_map(|key| v.get(*key).and_then(Value::as_i64))
+        .filter(|value| *value > 0)
+        .unwrap_or_else(now_ms);
+
+    Ok(Some(DevinAccount {
+        client_type: DevinClientType::Cli,
         id,
         name: if !name.is_empty() {
             name.to_string()
@@ -951,8 +1216,8 @@ fn parse_devin_account_value(v: &Value) -> Option<DevinAccount> {
         user_id: user_id.to_string(),
         plan: plan.to_string(),
         active: false,
-        saved_at: now_ms(),
-    })
+        saved_at,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -970,6 +1235,11 @@ pub fn routes() -> axum::Router<AppState> {
         .route("/api/auth/devin-accounts/import", post(import_devin_accounts))
         .route("/api/auth/devin-accounts/export", post(export_devin_accounts))
         .route("/api/auth/devin-accounts/import-current", post(import_current_devin_account))
+        .route(
+            "/api/auth/devin-accounts/import-desktop-current",
+            post(import_desktop_current_devin_account),
+        )
+        .route("/api/auth/devin-accounts/detect-desktop", post(detect_desktop_devin_account))
         .route("/api/auth/devin-accounts/detect-current", post(detect_current_devin_account))
         .route("/api/auth/devin-options", get(get_devin_options).put(set_devin_options))
 }
@@ -1054,6 +1324,29 @@ async fn import_current_devin_account(State(state): State<AppState>) -> ApiResul
         .map_err(AppError::bad_request)
 }
 
+async fn detect_desktop_devin_account(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let result = state.devin_manager.detect_desktop();
+    if result["ok"] == false {
+        return Err(AppError::bad_request(
+            result["error"]
+                .as_str()
+                .unwrap_or("无法读取本机 Devin Desktop 配置")
+                .to_string(),
+        ));
+    }
+    Ok(Json(result))
+}
+
+async fn import_desktop_current_devin_account(
+    State(state): State<AppState>,
+) -> ApiResult<Json<Value>> {
+    state
+        .devin_manager
+        .import_desktop_current()
+        .map(|account| Json(json!({"ok": true, "account": account})))
+        .map_err(AppError::bad_request)
+}
+
 async fn get_devin_options(State(state): State<AppState>) -> Json<Value> {
     Json(state.devin_manager.get_options())
 }
@@ -1072,6 +1365,246 @@ async fn set_devin_options(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_client_type_legacy_and_import_boundary() {
+        let legacy = json!({"id":"old", "name":"old", "token":"cli-token"});
+        let account: DevinAccount = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(account.client_type, DevinClientType::Cli);
+        assert_eq!(serde_json::to_value(account).unwrap()["client_type"], "cli");
+        assert!(collect_devin_import_items(&json!([legacy])).unwrap().len() == 1);
+        for kind in ["desktop", "unknown"] {
+            let input = json!({"accounts":[
+                {"token":"valid-cli", "client_type":"cli"},
+                {"token":"must-not-import", "client_type":kind}
+            ]});
+            assert!(collect_devin_import_items(&input).is_err());
+        }
+        assert!(require_cli_type(DevinClientType::Desktop).is_err());
+    }
+
+    #[test]
+    fn test_desktop_cannot_write_cli_credentials() {
+        let dir = test_temp_dir("desktop-boundary");
+        let manager = DevinManager {
+            file: dir.join("accounts.json"),
+            home: dir.join("home"),
+            accounts: Arc::new(RwLock::new(vec![DevinAccount {
+                client_type: DevinClientType::Desktop,
+                id: "desktop-test".into(),
+                token: "desktop-not-cli".into(),
+                ..Default::default()
+            }])),
+        };
+        assert!(manager.switch_account("desktop-test").is_err());
+        let request = serde_json::from_value(json!({
+            "client_type":"desktop", "token":"desktop-not-cli"
+        }))
+        .unwrap();
+        assert!(manager.add_account(request).is_err());
+        assert!(!manager.home.exists());
+        assert!(!manager.list_accounts()[0].active);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_probe_returns_metadata_without_secrets() {
+        let dir = test_temp_dir("desktop-probe");
+        let profile = dir.join(".config/Devin");
+        let database_path = profile.join("User/globalStorage/state.vscdb");
+        std::fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+        let database = rusqlite::Connection::open(&database_path).unwrap();
+        database
+            .execute("CREATE TABLE ItemTable(key TEXT PRIMARY KEY, value BLOB)", [])
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO ItemTable(key,value) VALUES (?1,?2)",
+                rusqlite::params![
+                    "codeium.windsurf",
+                    json!({
+                        "lastLoginEmail": "desktop@example.test",
+                        "apiServerUrl": "https://example.test",
+                    })
+                    .to_string()
+                ],
+            )
+            .unwrap();
+        for key in [
+            "windsurfAuthStatus",
+            "secret://{\"extensionId\":\"codeium.windsurf\",\"key\":\"windsurf_auth.sessions\"}",
+            "secret://{\"extensionId\":\"codeium.windsurf\",\"key\":\"windsurf_auth.apiServerUrl\"}",
+        ] {
+            database
+                .execute(
+                    "INSERT INTO ItemTable(key,value) VALUES (?1,?2)",
+                    rusqlite::params![key, "do-not-return"],
+                )
+                .unwrap();
+        }
+        let metadata = probe_desktop_profile(&profile, &database_path).unwrap();
+        assert!(metadata.id.starts_with("devin-desktop-"));
+        assert_eq!(metadata.email.as_deref(), Some("desktop@example.test"));
+        assert_eq!(metadata.api_server_url.as_deref(), Some("https://example.test"));
+        assert!(metadata.logged_in);
+        let serialized = json!(metadata);
+        assert!(!serialized.to_string().contains("do-not-return"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn cli_account(id: &str, token: &str, active: bool, saved_at: i64) -> DevinAccount {
+        DevinAccount {
+            client_type: DevinClientType::Cli,
+            id: id.into(),
+            name: id.into(),
+            email: "user@example.com".into(),
+            token: token.into(),
+            plan: "Devin Pro".into(),
+            active,
+            saved_at,
+            ..Default::default()
+        }
+    }
+
+    fn import_test_manager(label: &str) -> (PathBuf, DevinManager) {
+        let dir = test_temp_dir(label);
+        let manager = DevinManager {
+            file: dir.join("accounts.json"),
+            home: dir.join("home"),
+            accounts: Arc::new(RwLock::new(Vec::new())),
+        };
+        (dir, manager)
+    }
+
+    #[test]
+    fn import_newer_credential_overwrites_silently() {
+        let (dir, manager) = import_test_manager("import-newer");
+        manager
+            .import_accounts(
+                &json!([{"email":"user@example.com","token":"token-old","saved_at":100}]),
+            )
+            .unwrap();
+        let result = manager
+            .import_accounts(
+                &json!([{"email":"user@example.com","token":"token-new","saved_at":200}]),
+            )
+            .unwrap();
+        assert_eq!(result["updated"], 1);
+        assert_eq!(result["skipped"].as_array().unwrap().len(), 0);
+        let accounts = manager.list_accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].token, "token-new");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn import_older_credential_is_skipped_and_reported() {
+        let (dir, manager) = import_test_manager("import-older");
+        manager
+            .import_accounts(
+                &json!([{"email":"user@example.com","token":"token-new","saved_at":200}]),
+            )
+            .unwrap();
+        let result = manager
+            .import_accounts(
+                &json!([{"email":"user@example.com","token":"token-old","saved_at":100}]),
+            )
+            .unwrap();
+        assert_eq!(result["updated"], 0);
+        let skipped = result["skipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0]["incoming_saved_at"], 100);
+        assert_eq!(skipped[0]["existing_saved_at"], 200);
+        let accounts = manager.list_accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].token, "token-new");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn import_without_timestamp_counts_as_newest() {
+        let (dir, manager) = import_test_manager("import-fresh");
+        manager
+            .import_accounts(
+                &json!([{"email":"user@example.com","token":"token-old","saved_at":200}]),
+            )
+            .unwrap();
+        let result = manager
+            .import_accounts(&json!([{"email":"user@example.com","token":"token-fresh"}]))
+            .unwrap();
+        assert_eq!(result["updated"], 1);
+        assert!(result["skipped"].as_array().unwrap().is_empty());
+        assert_eq!(manager.list_accounts()[0].token, "token-fresh");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dedupe_accounts_keeps_one_record_per_id() {
+        let mut accounts = vec![
+            cli_account("devin-same", "token-live", true, 10),
+            cli_account("devin-same", "token-stale", false, 20),
+            cli_account("devin-other", "token-other", false, 5),
+        ];
+        dedupe_accounts(&mut accounts);
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].id, "devin-same");
+        // 与当前登录一致的记录优先保留
+        assert_eq!(accounts[0].token, "token-live");
+        assert_eq!(accounts[1].id, "devin-other");
+    }
+
+    #[test]
+    fn dedupe_accounts_prefers_newest_when_active_state_equal() {
+        let mut accounts = vec![
+            cli_account("devin-same", "token-old", false, 10),
+            cli_account("devin-same", "token-new", false, 20),
+        ];
+        dedupe_accounts(&mut accounts);
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].token, "token-new");
+    }
+
+    #[test]
+    fn upsert_current_login_updates_existing_id() {
+        let mut accounts = vec![cli_account(
+            "devin-user-example-com",
+            "token-old",
+            false,
+            10,
+        )];
+        upsert_current_login(
+            &mut accounts,
+            cli_account("devin-user-example-com", "token-new", true, 0),
+        );
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "devin-user-example-com");
+        assert_eq!(accounts[0].token, "token-new");
+    }
+
+    #[test]
+    fn load_collapses_duplicate_ids_from_store() {
+        let dir = test_temp_dir("dedupe-load");
+        let app_dir = dir.join("app");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let file = app_dir.join(DEVIN_ACCOUNTS_FILE);
+        let stored = json!([
+            cli_account("devin-same", "token-old", false, 10),
+            cli_account("devin-same", "token-new", true, 20)
+        ]);
+        std::fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+
+        let manager = DevinManager::load(app_dir, home);
+        let accounts = manager.list_accounts();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].token, "token-new");
+
+        let persisted: Vec<DevinAccount> =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(persisted.len(), 1, "重复记录必须同时从持久化文件收敛");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn test_temp_dir(label: &str) -> PathBuf {
         let nonce = current_timestamp_millis();
@@ -1096,6 +1629,7 @@ mod tests {
         // 2. Add an account
         let added = manager
             .add_account(AddDevinAccountRequest {
+                client_type: DevinClientType::Cli,
                 name: "Test Account".to_string(),
                 email: "test@example.com".to_string(),
                 token: "token-12345678".to_string(),

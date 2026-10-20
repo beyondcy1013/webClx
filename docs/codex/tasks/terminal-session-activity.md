@@ -43,8 +43,8 @@ The terminal tools `切换终端排序` action and `Ctrl+Alt+O` cycle through wo
 - A matched error is stale after a later agent completion line such as `Worked for 7m 28s`. Do not keep reporting that old 429/quota line just because it remains inside the tail window; otherwise the frontend can see changing signatures and repeatedly auto-send `继续` even when no 429 is near the current prompt.
 - `terminal_auto_continue_respect_manual_interrupt` defaults to `true`. When enabled, a matched error is stale after a later Codex manual-interruption marker such as `Conversation interrupted - tell the model what to do differently.` or `<turn_aborted>`; when disabled, the earlier error remains eligible for automatic retry after the cooldown. Match these markers across terminal hard wraps because Codex commonly renders the sentence on multiple lines. A genuinely newer error after the interruption remains eligible in either mode.
 - When several keywords match, the backend chooses the last matching error occurrence in original terminal tail order. Cross-line whitespace-collapsed matches keep an index back to the original line order, so a wrapped error does not incorrectly outrank a later single-line error.
-- On Linux/tmux, the backend resolves the tmux pane PID and walks the `/proc` descendant process tree plus the session systemd scope to detect `codex`, `claude`, DeepSeek Harness (`dsh`), AGY/Antigravity, CodeBuddy, Grok, and Devin launchers. Devin matches a process whose own name is `devin`, including `~/.local/bin/devin` and the versioned binary under `~/.local/share/devin/cli/`. A search, an echoed argument, or `/usr/local/bin/devin` when that path is the Windsurf executable (`comm` is `windsurf`) stays unlabeled as Devin. Grok matches the `grok` command, the official `grok-linux-*` / `grok-darwin-*` / `grok-macos-*` binaries, a `node` wrapper whose script basename is `grok`, and the installer's `~/.grok/bin/agent` path. A bare `agent` command, `systemd-inhibit --who=grok`, or a Codex process whose model flag contains `grok` stays unlabeled as Grok. Executable tokens must match the launcher; searching for its package name in arguments or echoing its name must not create a false positive. When no newer error/output/completed signal wins, `activity_state = "agent"` is displayed as `[运行中]`; frontend status prefixes should not render backend agent names such as `Codex`.
-- Settings field `terminal_activity_agent_display` controls whether detected agent/program names such as `Codex`, `Claude`, `DeepSeek`, `AGY`, `CodeBuddy`, `Grok`, or `Devin` are hidden, shown before the status prefix, or shown after the terminal name. The default is `hidden` so agent names do not replace `[运行中]`. This setting must not control whether `activity_agent` is recorded; backend session listings should attach the detected agent name to `working`, `error`, `completed`, and `recent_output` states too, so the soft-keyboard 智能体 checkbox can reveal it without showing `未记录`.
+- On Linux/tmux, the backend resolves the tmux pane PID and walks the `/proc` descendant process tree plus the session systemd scope to detect `codex`, `claude`, DeepSeek Harness (`dsh`), AGY/Antigravity, CodeBuddy, Grok, Devin, and Qoder (`qodercli` / `qoderclicn`) launchers. Devin matches a process whose own name is `devin`, including `~/.local/bin/devin` and the versioned binary under `~/.local/share/devin/cli/`. A search, an echoed argument, or `/usr/local/bin/devin` when that path is the Windsurf executable (`comm` is `windsurf`) stays unlabeled as Devin. Grok matches the `grok` command, the official `grok-linux-*` / `grok-darwin-*` / `grok-macos-*` binaries, a `node` wrapper whose script basename is `grok`, and the installer's `~/.grok/bin/agent` path. A bare `agent` command, `systemd-inhibit --who=grok`, or a Codex process whose model flag contains `grok` stays unlabeled as Grok. Executable tokens must match the launcher; searching for its package name in arguments or echoing its name must not create a false positive. When no newer error/output/completed signal wins, `activity_state = "agent"` is displayed as `[运行中]`; frontend status prefixes should not render backend agent names such as `Codex`.
+- Settings field `terminal_activity_agent_display` controls whether detected agent/program names such as `Codex`, `Claude`, `DeepSeek`, `AGY`, `CodeBuddy`, `Grok`, `Devin`, or `Qoder` are hidden, shown before the status prefix, or shown after the terminal name. The default is `hidden` so agent names do not replace `[运行中]`. This setting must not control whether `activity_agent` is recorded; backend session listings should attach the detected agent name to `working`, `error`, `completed`, and `recent_output` states too, so the soft-keyboard 智能体 checkbox can reveal it without showing `未记录`.
 - Backend session listing compares recent tmux pane output snapshots and updates `last_output_at` when the output bytes change, including background sessions that are not the current websocket target.
 - When a tmux pane snapshot is available, raw PTY timestamps only advance activity if the visible pane fingerprint also changes. Idle TUI cursor/control redraws can emit bytes without changing the pane and must not turn an already-viewed session back into `输出中` or `待查看`; raw PTY timestamps remain the fallback when snapshot capture fails.
 - Frontend websocket output must not decide dropdown activity by itself; the frontend trusts backend `working` to show `[工作中]`, `completed` to show `[待查看]`, and `recent_output` to show `[输出中]`. Do not infer `[输出中]` from `last_output_at` alone because that timestamp can belong to output already viewed in the selected terminal.
@@ -74,6 +74,43 @@ The terminal tools `切换终端排序` action and `Ctrl+Alt+O` cycle through wo
 - `#sessions-status` is lightweight title-adjacent text and should auto-hide for non-sticky updates such as `终端会话列表已更新。`.
 - Avoid forced option-list rebuilds while the dropdown is open, because native selects can jump or close during user selection. If the dropdown closes immediately after click, instrument `focusin`/`focusout` plus `Node.textContent` or child-list mutations on `#session-switcher`; the usual root cause is `renderSessions()` deleting and recreating options during an in-flight session refresh, not xterm stealing focus.
 - Also inspect page-resume focus restoration. `window.focus`, `pageshow`, or `visibilitychange` can run `refreshTerminalInputVisibilityAfterPageResume()`; if its delayed callbacks call `focusTerminalForUserInput()` while `#session-switcher` has focus, xterm's helper textarea steals focus and closes the native select. Keep those callbacks gated by the same session-dropdown interaction guard.
+
+## 2026-10-20 Qoder 识别
+
+本机 Qoder CLI 进程的 `comm` 为 `qodercli`，`cmdline` 为
+`/home/root/.local/bin/qodercli`，实际可执行文件指向
+`~/.qoder/bin/qodercli/qodercli-1.1.74`；国内版启动器为
+`~/.local/bin/qoderclicn`。活动检测新增 `Qoder`，匹配 `qodercli` /
+`qoderclicn` / `qoder-cli` / `qoder` 的进程名与可执行文件，以及
+`node`/`bun` 包装脚本；`rg`、`echo` 等命令参数不误判。回归
+`agent_detection_recognizes_qoder_launchers` 已通过编译队列执行
+（请求 `151020-18e0185df8e93c70`）。后端重新构建并重启后，
+`/api/terminal/sessions` 的 `activity_agent` 才会显示 `Qoder`。
+
+## 2026-10-20 Codex 旁白型工作状态
+
+`webClx_2__把aws上的devin配置，同步到本机的llm` 使用
+`deepseek-v4.1-flash xhigh` 时，实时 pane 显示
+`Let's inspect environment… (38m 21s • esc to interrupt)`，但会话列表返回
+`activity_state=completed`。旧规则只识别固定的 `Working (` 前缀，漏掉了 Codex
+在模型思考/工具规划阶段把即时旁白显示为底部忙碌行的情况。
+
+Codex 忙碌行的稳定判据是同一行的尾部括号同时包含有效耗时和
+`esc to interrupt`，前缀文案不固定。`line_is_codex_working_status` 因此兼容
+任意旁白、`Reconnecting...` 等状态，同时排除 Codex 队列提示。工作、完成和压缩
+状态仍按自下而上的最新 turn 信号裁决，较新的活动行覆盖较早的 `Worked for`，
+较新的完成行覆盖较早的忙碌行。
+
+回归覆盖旁白行、`Reconnecting...`、队列提示排除，以及新旧状态顺序；
+`cargo test --bin webclx terminal_working_status_detection` 通过 8 项。后端部署
+后才对实时会话生效，静态刷新不能安装这项修复。
+
+部署请求 `222400-18e042e1659cfed5` 于 22:25:41 完成，status=0；候选提交
+`62f9f8f`，运行二进制与 release 产物 SHA-256 同为
+`64a40e7014e13e2154ff4cae2e96b7698e0d79dcfe8704bd821f2a90f97f7141`，
+`/api/auth/session` 返回 HTTP 200。重启后 s10873 的
+`Working (0s • esc to interrupt)` 判定为 `working`，s10875 的
+`Compacting context (12s • esc to interrupt)` 判定为 `compacting`。
 
 ## 2026-09-22 Devin 下拉识别
 
@@ -408,3 +445,24 @@ release、安装文件及 `/proc/1590956/exe` 的 SHA-256 一致：
 `20261011-compact-agent-guard`。此次未获取登录后的页面路由，未向用户终端
 发送 `/compact` 做破坏性探测；发送禁止行为由上述隔离回归验证。
 补查唤醒 `paste-1791731337494-9935` 已移除，复查无同 ID 待办。
+
+## 压缩中状态按真实压缩输出判定（2026-10-20）
+
+复现：自动压缩只要 `/compact` 字节发送成功，前端就把该终端加入
+`autoCompactCompactingSessionIds` 并显示 `压缩中`。命令实际未执行时（终端停在
+shell 提示符、Agent 忙、输入框只留下文字）该状态不会自行退出；从未打开过的
+后台终端没有本地 xterm 缓冲，`Context compacted` 也读不到，于是 `压缩中` 长期
+残留。发送成功只证明字节已投递，不能证明 Agent 开始压缩。
+
+修复：压缩状态改由后端活动探针按 pane 真实输出判定。最近 15 行出现
+`Compacting context`、`✻ Compacting conversation…`、`正在压缩` 等进度行，且其后
+没有 `Context compacted` / `Conversation compacted` 完成行或更新的 working、
+完成行时，`activity_state` 为 `compacting`（label `压缩中`、`busy=true`），优先级
+高于 `working`，因此 Claude 的压缩 spinner 也归入压缩状态。前端删除
+`autoCompactCompactingSessionIds` 及 label/state/busy 覆盖，发送成功只提示
+`已发送 /compact，等待压缩开始。`；`已压缩` 标记改为观察到该终端离开后端
+`compacting` 状态后写入，仍随打开终端清除。
+
+回归：`cargo test --bin webclx compacting`（尾行正负例 + 探针状态，2 项通过）、
+`tests/terminal-auto-compact.test.mjs`、`tests/terminal-compact-agent-guard.test.mjs`
+（发送只记投递、压缩完成迁移）。静态资源版本 `20261020-compacting-observed`。

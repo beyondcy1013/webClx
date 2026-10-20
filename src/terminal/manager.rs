@@ -110,7 +110,8 @@ use error_detection::{
 };
 
 pub(super) use error_detection::{
-    terminal_worked_status_match_from_snapshot, terminal_working_status_match_from_snapshot,
+    terminal_compacting_status_from_snapshot, terminal_worked_status_match_from_snapshot,
+    terminal_working_status_match_from_snapshot,
 };
 
 pub(super) use error_detection::is_terminal_continue_line;
@@ -119,8 +120,8 @@ pub(super) use error_detection::is_terminal_continue_line;
 pub(super) use error_detection::{
     terminal_error_has_continue_after, terminal_error_has_queued_input_after,
     terminal_error_reset_time_from_tail, terminal_tail_error_keyword,
-    terminal_tail_error_keyword_with_manual_interrupt_policy, terminal_tail_has_worked_status,
-    terminal_tail_has_working_status,
+    terminal_tail_error_keyword_with_manual_interrupt_policy, terminal_tail_has_compacting_status,
+    terminal_tail_has_worked_status, terminal_tail_has_working_status,
 };
 
 const TERMINAL_AUTO_CONTINUE_RESET_GRACE_MS: u64 = 60_000;
@@ -146,6 +147,10 @@ const TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS: u64 = 500;
 /// Delay between the first and second Enter for a slash command, mirroring the
 /// frontend MOBILE_SLASH_COMMAND_CONFIRM_DELAY_MS so Codex confirms the dialog.
 const TERMINAL_SLASH_COMMAND_CONFIRM_DELAY_MS: u64 = 120;
+/// Pane rows scanned for a live compaction progress line. The TUI renders its
+/// input box and footer below that line, so the window is wider than the
+/// working-status window.
+const TERMINAL_COMPACTING_LINE_LIMIT: u32 = 15;
 static TERMINAL_ACTIVITY_PROBE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const CODEX_COMMAND_ENV_WRAPPER_HEADER: &str = "#!/bin/sh\n# WEBCLX_CODEX_COMMAND_ENV_WRAPPER\n";
 // An auto-continue cron entry is a one-shot moment (M H DoM Mo *). If its next
@@ -4006,10 +4011,8 @@ impl TerminalManager {
             let writer = session.writer.clone();
             drop(state);
             {
-                use std::io::Write;
                 let mut writer = crate::lock_or_recover!(writer.lock());
-                writer.write_all(data.as_bytes())?;
-                writer.flush()?;
+                super::input_pacing::write_input_paced(writer.as_mut(), &data)?;
             }
             if record_history {
                 self.record_session_input(session_id, &data);
@@ -6439,6 +6442,7 @@ pub(super) struct TerminalActivityProbe {
     pub(super) snapshot_probe_sequence: u64,
     pub(super) agent_activity: TerminalAgentActivity,
     pub(super) working_status: bool,
+    pub(super) compacting_status: bool,
     pub(super) cline_idle_prompt: bool,
     pub(super) error_match: Option<TerminalErrorKeywordMatch>,
     pub(super) worked_status: bool,
@@ -6502,6 +6506,9 @@ pub(super) fn collect_session_activity_probes(
         let working_status = snapshot
             .as_deref()
             .is_some_and(|snapshot| terminal_working_status_match_from_snapshot(snapshot, 10));
+        let compacting_status = snapshot.as_deref().is_some_and(|snapshot| {
+            terminal_compacting_status_from_snapshot(snapshot, TERMINAL_COMPACTING_LINE_LIMIT)
+        });
         let cline_idle_prompt = (!working_status)
             && snapshot
                 .as_deref()
@@ -6534,6 +6541,7 @@ pub(super) fn collect_session_activity_probes(
             snapshot_probe_sequence: *sequence,
             agent_activity,
             working_status,
+            compacting_status,
             cline_idle_prompt,
             error_match,
             worked_status,
@@ -6688,6 +6696,13 @@ fn terminal_activity_snapshot_from_probe_locked(
         .agent_activity
         .is_active()
         .then(|| probe.agent_activity.agents.join("/"));
+
+    // Compaction outranks the generic working state: Claude renders its
+    // compaction progress with the same spinner family it uses for a turn, and
+    // the selector should report "压缩中" for as long as the pane shows it.
+    if probe.compacting_status {
+        return TerminalActivitySnapshot::compacting(last_output_at).with_agent(activity_agent);
+    }
 
     if probe.working_status {
         return TerminalActivitySnapshot::working(last_output_at).with_agent(activity_agent);

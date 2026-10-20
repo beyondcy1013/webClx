@@ -506,7 +506,9 @@ const state = {
   autoCompactHandledSessions: new Set(),
   autoCompactScheduledTimers: new Map(),
   autoCompactStatusSessionIds: readStoredTerminalAutoCompactStatusSessionIds(),
-  autoCompactCompactingSessionIds: new Set(),
+  // Previous backend activity state per session: the finished-compaction
+  // marker is driven by leaving the backend's observed "compacting" state.
+  autoCompactPreviousActivityStates: new Map(),
   terminalUserInputAt: new Map(),
   // The auto-typed /compact command is intentionally not echoed into the
   // terminal history. Keep its output position so a compact completion cannot
@@ -1046,7 +1048,6 @@ function markSessionOpenedLocally(sessionId) {
   if (state.autoCompactStatusSessionIds?.delete(sessionId)) {
     storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
   }
-  state.autoCompactCompactingSessionIds?.delete(sessionId);
   state.sessions = state.sessions.map((session) => {
     if (session.id !== sessionId) {
       return session;
@@ -1065,9 +1066,6 @@ function markSessionOpenedLocally(sessionId) {
 }
 
 function sessionActivityState(session) {
-  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
-    return "compacting";
-  }
   if (session?.id && state.autoCompactStatusSessionIds.has(session.id)) {
     return "compacted";
   }
@@ -1131,9 +1129,6 @@ function maybePlayTerminalCompletionSound(sessions) {
 }
 
 function sessionActivityLabel(session) {
-  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
-    return "压缩中";
-  }
   if (session?.id && state.autoCompactStatusSessionIds.has(session.id)) {
     return "已压缩";
   }
@@ -1157,9 +1152,6 @@ function sessionActivityAgentSuffix(session) {
 }
 
 function isSessionBusy(session) {
-  if (session?.id && state.autoCompactCompactingSessionIds.has(session.id)) {
-    return true;
-  }
   return sharedIsSessionBusy(session);
 }
 

@@ -61,17 +61,36 @@ function terminalRecentLinesContainQueuedInput(sessionId, lineCount = 20) {
   return false;
 }
 
+// "压缩中" comes from the backend activity state, which observes the agent's
+// real compaction progress line. The selector therefore never has to guess
+// from a sent /compact, and a command that was typed but never executed (a bare
+// shell prompt, a busy agent) stays out of the compacting state. Only the
+// finished transition is tracked here: the compacting state disappearing for a
+// terminal we auto-compacted means the compaction really ran.
 function syncAutoCompactCompletionStatuses() {
-  Array.from(state.autoCompactCompactingSessionIds).forEach((sessionId) => {
-    const latest = state.sessions.find((session) => session?.id === sessionId);
-    if (latest && !isSessionCompactCapableAgent(latest)) {
-      state.autoCompactCompactingSessionIds.delete(sessionId);
-      return;
+  const previousStates = state.autoCompactPreviousActivityStates;
+  const activeIds = new Set();
+  state.sessions.forEach((session) => {
+    const sessionId = String(session?.id || "").trim();
+    if (!sessionId) return;
+    activeIds.add(sessionId);
+    const currentState = sessionActivityState(session);
+    if (
+      previousStates.get(sessionId) === "compacting"
+      && currentState !== "compacting"
+      && state.autoCompactLastSent.has(sessionId)
+      // A terminal the user is already watching needs no "come look" badge.
+      && sessionId !== state.activeSessionId
+    ) {
+      state.autoCompactStatusSessionIds.add(sessionId);
+      storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
     }
-    if (!terminalRecentLinesContainCompacted(sessionId, 20)) return;
-    state.autoCompactCompactingSessionIds.delete(sessionId);
-    state.autoCompactStatusSessionIds.add(sessionId);
-    storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
+    previousStates.set(sessionId, currentState);
+  });
+  Array.from(previousStates.keys()).forEach((sessionId) => {
+    if (!activeIds.has(sessionId)) {
+      previousStates.delete(sessionId);
+    }
   });
 }
 
@@ -241,8 +260,10 @@ function resolveAutoCompactAfterDelay(sessionId, sessionLabel) {
         sentAt: Date.now(),
       });
       storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
-      state.autoCompactCompactingSessionIds.add(sessionId);
-      updateStatus(`${sessionLabel}压缩中。`, "info");
+      // Do not claim "压缩中" here: writing the bytes only means the command was
+      // delivered. The compacting state starts when the agent's own compaction
+      // progress line reaches the backend activity probe.
+      updateStatus(`${sessionLabel}已发送 /compact，等待压缩开始。`, "info");
     })
     .catch((error) => {
       state.autoCompactHandledSessions.delete(sessionId);

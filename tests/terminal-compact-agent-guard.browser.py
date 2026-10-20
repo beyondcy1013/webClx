@@ -31,7 +31,7 @@ def main() -> None:
                     const state = {
                       activeSessionId: "fixture", sessions: [],
                       autoCompactSessionIds: new Set(["fixture"]),
-                      autoCompactCompactingSessionIds: new Set(),
+                      autoCompactPreviousActivityStates: new Map(),
                       autoCompactStatusSessionIds: new Set(),
                       autoCompactHandledSessions: new Set(),
                       autoCompactScheduledTimers: new Map(),

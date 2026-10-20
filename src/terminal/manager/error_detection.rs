@@ -240,6 +240,21 @@ pub(in crate::terminal) fn terminal_working_status_match_from_snapshot(
     terminal_tail_has_working_status(&tail)
 }
 
+/// Both Codex and Claude replace their live status line with a compaction
+/// progress line while the context is rewritten
+/// (`Compacting context (9s • esc to interrupt)`, `✻ Compacting conversation…`).
+/// The session selector may only claim "压缩中" while that line is really on
+/// screen: `/compact` typed at a bare shell prompt or rejected by a busy agent
+/// never starts a compaction.
+pub(in crate::terminal) fn terminal_compacting_status_from_snapshot(
+    snapshot: &[u8],
+    line_limit: u32,
+) -> bool {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    terminal_tail_has_compacting_status(&tail)
+}
+
 pub(in crate::terminal) fn terminal_cline_idle_prompt_from_snapshot(
     snapshot: &[u8],
     line_limit: u32,
@@ -255,8 +270,7 @@ pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool 
         if line_is_completion_status(line) {
             return false;
         }
-        let normalized = line.trim().to_lowercase();
-        if normalized.contains("working (") && normalized.contains("esc to interrupt") {
+        if line_is_codex_working_status(line) {
             return true;
         }
         if line_is_cline_idle_prompt(line) {
@@ -267,6 +281,72 @@ pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool 
         }
     }
     false
+}
+
+fn line_is_codex_working_status(line: &str) -> bool {
+    let normalized = line.trim().to_lowercase();
+    if !normalized.ends_with("esc to interrupt)") {
+        return false;
+    }
+    if is_terminal_queued_input_line(line) {
+        return false;
+    }
+    trailing_parenthetical(&normalized).is_some_and(|detail| {
+        detail
+            .split(['•', '·'])
+            .any(|part| looks_like_elapsed_duration(part.trim()))
+    })
+}
+
+#[cfg_attr(test, allow(dead_code))]
+pub(in crate::terminal) fn terminal_tail_has_compacting_status(tail: &str) -> bool {
+    for line in tail.lines().rev() {
+        if line_is_compact_completion_status(line) {
+            return false;
+        }
+        if line_is_compacting_status(line) {
+            return true;
+        }
+        // A newer turn marker means the pane already moved past a finished
+        // compaction; an older progress line further up is not live state.
+        if line_is_newer_turn_status(line) {
+            return false;
+        }
+    }
+    false
+}
+
+fn line_is_compacting_status(line: &str) -> bool {
+    let normalized = line.trim().to_lowercase();
+    [
+        "compacting context",
+        "compacting conversation",
+        "compacting history",
+        "正在压缩",
+        "压缩上下文",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn line_is_compact_completion_status(line: &str) -> bool {
+    let normalized = line.trim().to_lowercase();
+    [
+        "context compacted",
+        "conversation compacted",
+        "compacted conversation",
+        "上下文已压缩",
+        "上下文压缩完成",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+}
+
+fn line_is_newer_turn_status(line: &str) -> bool {
+    line_is_codex_working_status(line)
+        || line_is_completion_status(line)
+        || line_is_agy_working_status(line)
+        || line_is_claude_working_spinner(line)
 }
 
 /// Cline's Plan/Act placeholders end in nouns that also end in ing.

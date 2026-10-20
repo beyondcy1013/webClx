@@ -23,6 +23,8 @@ assert.match(
 // 3. Toolbar buttons
 assert.match(indexHtml, /id="codex-account-add-devin"[^>]*data-account-kinds="devin"/);
 assert.match(indexHtml, /id="devin-import-current-toolbar"[^>]*data-account-kinds="devin"/);
+assert.match(indexHtml, /id="devin-import-desktop-toolbar"[^>]*data-account-kinds="devin"/);
+assert.match(indexHtml, /id="devin-detect-desktop"[^>]*data-account-kinds="devin"/);
 assert.match(indexHtml, /id="codex-account-export"[^>]*data-account-kinds="[^"]*devin[^"]*"/);
 
 // 4. Global options bar for Devin
@@ -50,6 +52,8 @@ assert.match(devinManagerJs, /saveCliOptions/);
 assert.match(devinManagerJs, /\/api\/auth\/devin-accounts/);
 assert.match(devinManagerJs, /\/api\/auth\/devin-options/);
 assert.match(devinManagerJs, /\/api\/auth\/devin-accounts\/import-current/);
+assert.match(devinManagerJs, /\/api\/auth\/devin-accounts\/detect-desktop/);
+assert.match(devinManagerJs, /\/api\/auth\/devin-accounts\/import-desktop-current/);
 
 // 7. Codex Account Manager JS integration
 assert.match(codexAccountManagerJs, /ACCOUNT_KINDS\s*=\s*\[[^\]]*"devin"[^\]]*\]/);
@@ -59,5 +63,19 @@ assert.match(codexAccountManagerJs, /WebClxDevinManager\.loadAccounts/);
 assert.match(codexAccountManagerJs, /WebClxDevinManager\.switchAccount/);
 assert.match(codexAccountManagerJs, /WebClxDevinManager\.deleteAccount/);
 assert.match(codexAccountManagerJs, /syncDevinOptionsBarVisibility/);
+assert.match(codexAccountManagerJs, /account\.clientType === "desktop"/);
+assert.match(codexAccountManagerJs, /"Devin Desktop"/);
+assert.match(codexAccountManagerJs, /desktopAction\(account, "backup"\)/);
+assert.match(codexAccountManagerJs, /desktopAction\(account, "restore"\)/);
+const desktopActionStart = codexAccountManagerJs.indexOf(
+  'const actionItems = account.kind === "devin" && account.clientType === "desktop"',
+);
+const desktopBranch = codexAccountManagerJs.indexOf('      const status =', desktopActionStart);
+assert.ok(desktopActionStart >= 0);
+assert.ok(desktopBranch > desktopActionStart);
+assert.doesNotMatch(
+  codexAccountManagerJs.slice(desktopActionStart, desktopBranch).split(': [')[0],
+  /applyAccount\(account\)/,
+);
 
 console.log("devin-account-manager assertions passed successfully!");

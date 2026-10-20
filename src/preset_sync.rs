@@ -95,6 +95,8 @@ pub struct AccountPresetClipboardImportResponse {
     pub ok: bool,
     pub section: String,
     pub imported_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,20 +190,9 @@ pub async fn export_account_presets_to_clipboard(
                 .filter(|account| selected_ids.contains(account.id.as_str()))
                 .collect::<Vec<_>>(),
         ),
-        AccountPresetSection::CodeBuddy => serde_json::to_value(
-            state
-                .codebuddy_manager
-                .list_accounts()
-                .into_iter()
-                .filter(|account| {
-                    account
-                        .get("id")
-                        .and_then(|id| id.as_str())
-                        .map(|id| selected_ids.contains(id))
-                        .unwrap_or(false)
-                })
-                .collect::<Vec<_>>(),
-        ),
+        AccountPresetSection::CodeBuddy => {
+            serde_json::to_value(state.codebuddy_manager.export_accounts(&selected_ids))
+        }
     }
     .map_err(|error| AppError::internal(format!("序列化账号列表失败: {error}")))?;
     if accounts.as_array().map_or(0, Vec::len) != selected_ids.len() {
@@ -222,6 +213,7 @@ pub async fn import_account_presets_from_clipboard(
     Json(payload): Json<AccountPresetClipboardPayload>,
 ) -> ApiResult<Json<AccountPresetClipboardImportResponse>> {
     let section = validate_account_preset_clipboard_payload(&raw_section, &payload)?;
+    let mut warnings: Vec<String> = Vec::new();
     let imported_count = match section {
         AccountPresetSection::Auth => {
             let presets = decode_clipboard_accounts::<StoredAuthPreset>(payload.accounts)?;
@@ -284,6 +276,17 @@ pub async fn import_account_presets_from_clipboard(
                 .get("updated")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0) as usize;
+            if let Some(items) = res.get("skipped").and_then(serde_json::Value::as_array) {
+                for item in items {
+                    let label = item
+                        .get("email")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .or_else(|| item.get("id").and_then(serde_json::Value::as_str))
+                        .unwrap_or("未知账号");
+                    warnings.push(format!("{label}：导入凭据早于现有记录，已保留现有账号"));
+                }
+            }
             imported + updated
         }
         AccountPresetSection::CodeBuddy => {
@@ -307,6 +310,7 @@ pub async fn import_account_presets_from_clipboard(
         ok: true,
         section: section.as_str().to_string(),
         imported_count,
+        warnings,
     }))
 }
 

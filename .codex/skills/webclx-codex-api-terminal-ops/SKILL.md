@@ -54,6 +54,8 @@ For the recurring terminal paths, read the owning topic directly:
 
 ## Recurring Terminal Automation
 
+- **自动继续误触发／动态字符／工作中被追加继续（2026-10-18）**：反查 `docs/codex/tasks/terminal-continue-send-unification.md` 的 Working-status guard；共享 `terminal_error_keyword_match_from_snapshot` 应与活动列表一致，先检查末尾原生工作状态，再匹配错误，覆盖 `/auto-continue` 与到期任务。宽泛 URL/请求关键词可能命中正常工具输出；无触发快照时不要断言动画是错误。回归 `terminal_error_snapshot_does_not_retry_while_agent_is_working`；修复 `563c296`，本机部署验收 `222705-18df8229b141d59a`。
+- **部署门禁静态链接方向过时**：`workspace icon gate: source static must link` 曾拦截已构建产物；按当前 AGENTS.md 校验“运行 static 绝对链接 → 源码实体”，不要迁移实体迎合旧脚本。反查 `docs/codex/tasks/static-deployment.md`、`scripts/check-workspace-icon-gate.sh`、修复 `807fca6`；构建成功而安装失败时，经队列复用已验证 SHA 产物，无需重复编译。
 - Error recognition is split between `src/terminal/manager/error_detection.rs`, built-in settings merge in `crates/settings_core`, and browser defaults. Preserve the same keyword and action contract across all active owners and lock it with focused Rust and Node tests.
 - An ordinary retry uses the canonical per-session auto-continue path. Cooldowns and timers must be keyed by stable session ID and cleared when that session leaves `error` or `retrying`; one terminal must never delay another.
 - Context-limit failures can select `compact_then_continue` instead of ordinary continue. Keep action selection separate from keyword matching, submit `/compact` once, and treat an actual `Context compacted` marker as completion.
@@ -61,7 +63,7 @@ For the recurring terminal paths, read the owning topic directly:
 
 ## 终端滚动修复子技能
 
-终端切换未到底、输入/回答后跳顶部、新输出不跟随、回放/共享尺寸/IME 导致位置错乱时，先读 [终端滚动子技能](subskills/webclx-terminal-scroll/SKILL.md)。按页面、逻辑缓冲区、DOM 滚动区域分别取证；主技能只保留入口。
+终端切换未到底、输入/回答后跳顶部、新输出不跟随、回放/共享尺寸/IME 导致位置错乱、页面恢复后首次滚动回弹时，先读 [终端滚动子技能](subskills/webclx-terminal-scroll/SKILL.md)。按页面、逻辑缓冲区、DOM 滚动区域分别取证；主技能只保留入口。
 
 ## 中文输入法问题子技能
 
@@ -161,6 +163,11 @@ When retiring an obsolete model identifier across the ecosystem (e.g. `gpt-6-sol
   - `static/terminal-auto-continue.js` detects both legacy `Messages to be submitted at end of turn` and modern `Queued follow-up inputs`. When queued input is detected, automated `/compact` is withheld to prevent steering deadlocks.
   - Regression tests: `node tests/terminal-auto-compact.test.mjs`.
 
+## 终端输入与退格（Agent TUI 按读取批次解析）
+
+- **连续退格删不动 / 退格无效（2026-10-20）**：ink 类 Agent TUI（CodeBuddy）把一次 stdin 读取当成一次按键，多于一个字节的读取按“粘贴文本”处理并丢弃退格字节（`0x7f`/`0x08`）。webClx 合并按键后，两次退格落进同一次读取就一个都删不掉。反查 `docs/codex/tasks/terminal-input-keystroke-delivery.md`；实现 `src/terminal/input_pacing.rs`（按退格切段 + 5ms 间隔），三条写入路径 `terminal/session.rs::write_input`、`terminal/manager.rs::write_session_input_inner`、`terminal/tmux.rs::send_tmux_input`；修复 `d06407f`。
+- 取证用“读取分块探针”而非看画面：一次投递 `\x7f`×N，探针应输出 N 条 `len=1`。同类症状先怀疑控制字节与文本合并（Ctrl-A..Z 同理），不要先改渲染或前端批处理。
+
 ## Terminal Group Color Collisions
 
 - Keywords: 分组同色、紫色重复、自动配色去重、手动改色。自动颜色由 `src/terminal/manager.rs` 的 `default_terminal_group_color` 及分组更新逻辑生成，选色前检查其他分组已用颜色；显式选色和同组继承不受此去重规则影响。已有重复颜色不会自动重染。
@@ -186,6 +193,7 @@ When retiring an obsolete model identifier across the ecosystem (e.g. `gpt-6-sol
 
 - For static-only work, confirm `readlink -f /home/bin/webclx/static` is `/home/codes/tools/webClx/static`, bump the changed module's HTML cache version, and verify the live HTTP asset hash. No binary rebuild, copy, or restart is required.
 - For backend work, use `webclx-compile-and-deploy` and the project-owned `scripts/rebuild-and-deploy.sh`; wait for the callback instead of polling or submitting duplicates.
+- 工作区有无关未提交改动时，先用 `preserve-dirty-deploy-state.sh save` 记录 stash OID，确认干净且 HEAD 为目标提交后入队；匹配回调后按 OID `restore`，不要把无关改动带入部署。整树含未跟踪文件时先存 `git diff | sha256sum` 与应用备份，恢复后必须比对指纹一致。
 - Before diagnosing apparent deployment drift, compare the source/link target, the asset requested by `terminal.html` or `index.html`, and the asset returned by the running HTTP service.
 
 ## Verification
@@ -215,12 +223,56 @@ For terminal UI changes, use Playwright or browser geometry checks and inspect t
   - 底部后台任务栏：`● [HH:MM:SS] ... running`（含时间戳/耗时括号与活跃动词）；
   - 排除过去式思考 `○ Thought for ...` 与已完成 `● Ran (...)`。
 - **回归测试**: `cargo test terminal_working_status_detection`。
+- **Qoder 识别（2026-10-20）**: `src/terminal/activity.rs::is_qoder_process` 按 comm/cmdline 识别 `qodercli`、`qoderclicn`、`qoder-cli`、`qoder` 及 node/bun 包装，输出 `activity_agent=Qoder`；旧终端需重建并重启后端后才显示。反查 `docs/codex/tasks/terminal-session-activity.md`；回归 `cargo test --bin webclx agent_detection_recognizes_qoder_launchers`。
 
 ## 结束终端卡顿、下拉闪烁与后台关闭
 
 关键词：结束后无法点击、新开被禁用、pointerdown/pointerup 刷新丢点击、后台 toast 抢焦点。反查 `/home/codes/tools/webClx/docs/codex/tasks/terminal-session-switch-output.md` 的“结束终端后的下拉闪烁与点击丢失”及“关闭与后续工作并行”（2026-10-17；提交 `92c5f1d`、`dd0d9f2`）。
 
 隐藏成功即用本地列表切换；按目标 session ID 去重，不能禁用全局动作。关闭结果使用不拦点击的 toast，不导航、不覆盖用户的新选择或对话框；保留隐藏失败不关闭、关闭失败可重试的边界。下拉无变化不重建，展开期间延迟更新以保留点击目标。回归入口：`tests/terminal-experience-save.browser.py`（延迟 close 时切换、新开、焦点保持）与 `tests/workspace_project_icons.browser.py`（按下/松开之间五次刷新）。
+
+## CodeBuddy 账号导入凭据防丢失与格式兼容（2026-10-20）
+
+- **症状表现**：
+  1. CLI 抛出 `401 Authentication required`，排查发现账号的 `refresh_token` 丢失，导致 AccessToken 过期后无法自动刷新；
+  2. 重新导入包含更新 token 的 JSON 时，已有账号的有效 `refresh_token` 反被空值冲掉；
+  3. 导入不同来源的 JSON（如 `workbuddy2api-rs` 账号、`wb-switch` 导出）时，因字段被包裹在 `auth`/`auth_raw`、`account`/`profile_raw` 或使用 `expiresIn` 秒级偏移而解析失败；
+  4. 预设管理中通过剪贴板导出 `codebuddy_presets` 时，导出内容仅含脱敏元数据（`meta()`），无法用于跨机器迁移或备份恢复。
+- **根因分析**：
+  1. `src/codebuddy.rs::upsert_account` 匹配到已有账号时直接全量替换结构体，未对 `refresh_token` 等敏感凭据做空值防覆盖保护；
+  2. `src/codebuddy.rs::parse_codebuddy_import_account` 仅读取顶层扁平字段，不支持嵌套结构，且未从 `expiresIn`/`refreshExpiresIn` 自动推算绝对毫秒时间戳；
+  3. `src/preset_sync.rs::export_account_presets_to_clipboard` 对 CodeBuddy 调用了面向 UI 展示的 `list_accounts()`，导致 `access_token` 与 `refresh_token` 被过滤。
+- **治理与规范**：
+  - **凭据继承保护**：更新已有账号时，新记录中为空的 `refresh_token`、`refresh_expires_at`、`access_token`、`enterprise_id`、`nickname` 必须继承已有记录，积分缓存与 `switch_count` 不得清零；
+  - **嵌套与格式兼容**：导入解析兼容顶层和 `auth`/`auth_raw`、`account`/`profile_raw`，并按 `createdAt + expiresIn * 1000` 自动换算绝对毫秒；
+  - **剪贴板导出全量凭据**：在 `CodeBuddyManager` 实现 `export_accounts(&HashSet<&str>)`，剪贴板导出保留完整凭据；
+  - **核心文件**：[`src/codebuddy.rs`](file:///home/codes/tools/webClx/src/codebuddy.rs)、[`src/preset_sync.rs`](file:///home/codes/tools/webClx/src/preset_sync.rs)；
+  - **回归验证**：
+    ```bash
+    cargo test --bin webclx codebuddy
+    # 覆盖：
+    # - imports_nested_auth_and_account_json_correctly
+    # - imports_auth_raw_with_refresh_expires_in
+    # - upsert_account_preserves_existing_refresh_token_when_incoming_empty
+    bash scripts/rebuild-and-deploy.sh
+    ```
+
+## Devin 账号库重复 id 与导入新旧判定（2026-10-20）
+
+关键词：同 id 两条账号、同邮箱不同 token、删一条删掉两条、导入把新 token 冲掉、旧凭据覆盖新凭据、Devin 账号去重、导入跳过提醒。
+
+账号 id 只由邮箱派生，`DevinManager::load` 在当前 `credentials.toml` token 未入库时直接 push，于是同一 id 出现第二条；导入解析曾把 `saved_at` 硬编码为当前时间，新旧无法比较。现加载按 `(client_type,id)` 收敛（`dedupe_accounts`）、登录凭据登记改为 `upsert_current_login` 原位更新；导入按来源 `saved_at` 判定：新的覆盖，旧的跳过并返回 `skipped`，剪贴板导入转成 `warnings`。直改 `webclx-devin-accounts.json` 后必须重启服务，否则内存态回写覆盖磁盘。反查 `docs/codex/tasks/devin-desktop-auth.md`「重复账号记录收敛」「导入新旧判定」；提交 `d74d4bc`、`b4a7677`；回归 `cargo test --bin webclx devin::tests`。
+
+## 终端“压缩中”状态误判（2026-10-20）
+
+关键词：下拉显示压缩中、只发送了 /compact 并未执行、状态不退出、后台终端永久压缩中。
+前端曾在 `/compact` 字节发送成功即本地置 `压缩中`；命令未真正执行（停在 shell 提示符、Agent 忙）或后台终端没有本地 xterm 缓冲时该状态永不退出。现由后端活动探针按 pane 真实进度行判定（`Compacting context`、`✻ Compacting conversation…`、`正在压缩`，最近 15 行且其后无完成行），`activity_state=compacting` 优先于 `working`；前端不再本地伪造，`已压缩` 改为离开 compacting 后写入。反查 `docs/codex/tasks/terminal-session-activity.md`「压缩中状态按真实压缩输出判定」；回归 `cargo test --bin webclx compacting`、`tests/terminal-compact-agent-guard.test.mjs`；提交 `2ad45b7`。
+
+## Codex 旁白型忙碌行被误判为已结束（2026-10-20）
+
+关键词：Codex 明明还在跑却显示完成、旁白型状态行、计时加 esc to interrupt、只认 Working ( 漏检、deepseek 预设状态不准。
+
+Codex 会把即时旁白（如 `Let's inspect environment, ... (38m 21s • esc to interrupt)`）渲染成底部忙碌行；旧规则只匹配 `Working (` 前缀，旁白换词就漏检，会话列表回落成 `completed`。现判据是同一行尾括号同时含有效耗时与 `esc to interrupt`，排除队列提示，并按自下而上的最新 turn 信号裁决（较新 `Worked for`/完成行覆盖较早忙碌行）。实现 `src/terminal/manager/error_detection.rs::line_is_codex_working_status`；回归 `cargo test --bin webclx terminal_working_status_detection`（8 项）；提交 `e3f6a17`，部署 `222400-18e042e1659cfed5` 后生效，改静态资源无效。反查 `docs/codex/tasks/terminal-session-activity.md`「Codex 旁白型工作状态」。
 
 ## Documentation
 

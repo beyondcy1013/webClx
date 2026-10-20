@@ -18,7 +18,7 @@
 //! 不注入终端环境变量。
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -505,6 +505,17 @@ impl CodeBuddyManager {
             .collect()
     }
 
+    /// 导出指定账号（含 access_token / refresh_token 等凭据，供剪贴板与备份使用）。
+    pub fn export_accounts(&self, selected_ids: &HashSet<&str>) -> Vec<CodeBuddyAccount> {
+        let inner = self.read_inner();
+        inner
+            .accounts
+            .iter()
+            .filter(|account| selected_ids.contains(account.id.as_str()))
+            .cloned()
+            .collect()
+    }
+
     /// 手动添加账号（token 方式）。会尝试拉取账号资料；失败也允许保存。
     pub async fn add_manual_account(
         &self,
@@ -629,6 +640,52 @@ impl CodeBuddyManager {
                     }
                 } else {
                     saved.active = inner.accounts[index].active;
+                }
+                // 保留已有 refresh_token，防止覆盖为空
+                if saved.refresh_token.trim().is_empty()
+                    && !inner.accounts[index].refresh_token.trim().is_empty()
+                {
+                    saved.refresh_token = inner.accounts[index].refresh_token.clone();
+                    if saved.refresh_expires_at.is_none() {
+                        saved.refresh_expires_at = inner.accounts[index].refresh_expires_at;
+                    }
+                } else if saved.refresh_expires_at.is_none()
+                    && saved.refresh_token == inner.accounts[index].refresh_token
+                {
+                    saved.refresh_expires_at = inner.accounts[index].refresh_expires_at;
+                }
+                // 保留已有 access_token，如果新传入的为空
+                if saved.access_token.trim().is_empty()
+                    && !inner.accounts[index].access_token.trim().is_empty()
+                {
+                    saved.access_token = inner.accounts[index].access_token.clone();
+                    if saved.expires_at.is_none() {
+                        saved.expires_at = inner.accounts[index].expires_at;
+                    }
+                }
+                // 保留已有企业信息
+                if saved.enterprise_id.trim().is_empty()
+                    && !inner.accounts[index].enterprise_id.trim().is_empty()
+                {
+                    saved.enterprise_id = inner.accounts[index].enterprise_id.clone();
+                    if saved.enterprise_name.trim().is_empty() {
+                        saved.enterprise_name = inner.accounts[index].enterprise_name.clone();
+                    }
+                }
+                // 保留已有 nickname
+                if saved.nickname.trim().is_empty()
+                    && !inner.accounts[index].nickname.trim().is_empty()
+                {
+                    saved.nickname = inner.accounts[index].nickname.clone();
+                }
+                if saved.refreshed_at.is_none() {
+                    saved.refreshed_at = inner.accounts[index].refreshed_at;
+                }
+                if saved.created_at.is_none() {
+                    saved.created_at = inner.accounts[index].created_at;
+                }
+                if saved.switch_count == 0 && inner.accounts[index].switch_count > 0 {
+                    saved.switch_count = inner.accounts[index].switch_count;
                 }
                 inner.accounts[index] = saved.clone();
                 saved
@@ -2196,16 +2253,33 @@ fn identity_email(account: &CodeBuddyAccount) -> Option<String> {
 
 fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
     let obj = raw.as_object()?;
+    let auth_obj = obj
+        .get("auth")
+        .or_else(|| obj.get("auth_raw"))
+        .and_then(Value::as_object);
+    let account_obj = obj
+        .get("account")
+        .or_else(|| obj.get("profile_raw"))
+        .and_then(Value::as_object);
+
     let access_token = obj
         .get("access_token")
         .or_else(|| obj.get("accessToken"))
         .or_else(|| obj.get("token"))
+        .or_else(|| {
+            auth_obj.and_then(|a| {
+                a.get("accessToken")
+                    .or_else(|| a.get("access_token"))
+                    .or_else(|| a.get("token"))
+            })
+        })
         .and_then(Value::as_str)
         .and_then(clean_bearer_token)?;
 
     let refresh_token = obj
         .get("refresh_token")
         .or_else(|| obj.get("refreshToken"))
+        .or_else(|| auth_obj.and_then(|a| a.get("refreshToken").or_else(|| a.get("refresh_token"))))
         .and_then(Value::as_str)
         .and_then(clean_bearer_token)
         .unwrap_or_default();
@@ -2221,6 +2295,7 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
 
     let uid = obj
         .get("uid")
+        .or_else(|| account_obj.and_then(|a| a.get("uid")))
         .and_then(Value::as_str)
         .or_else(|| {
             jwt_claims
@@ -2233,6 +2308,7 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
 
     let mut email = obj
         .get("email")
+        .or_else(|| account_obj.and_then(|a| a.get("email")))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
@@ -2255,6 +2331,7 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
     let mut nickname = obj
         .get("nickname")
         .or_else(|| obj.get("name"))
+        .or_else(|| account_obj.and_then(|a| a.get("nickname").or_else(|| a.get("name"))))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
@@ -2280,6 +2357,7 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
 
     let domain = obj
         .get("domain")
+        .or_else(|| auth_obj.and_then(|a| a.get("domain")))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
@@ -2287,6 +2365,7 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
 
     let variant_str = obj
         .get("variant")
+        .or_else(|| auth_obj.and_then(|a| a.get("variant").or_else(|| a.get("realm"))))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty());
@@ -2299,45 +2378,100 @@ fn parse_codebuddy_import_account(raw: &Value) -> Option<CodeBuddyAccount> {
         Some(CodeBuddyVariant::Cn.as_str().to_string())
     };
 
-    let expires_at =
-        normalize_ts(obj.get("expiresAt").or_else(|| obj.get("expires_at"))).or_else(|| {
-            jwt_claims
-                .as_ref()
-                .and_then(|c| c.get("exp").and_then(Value::as_i64).map(|secs| secs * 1000))
-        });
+    let created_at = normalize_ts(
+        obj.get("createdAt")
+            .or_else(|| obj.get("created_at"))
+            .or_else(|| auth_obj.and_then(|a| a.get("createdAt").or_else(|| a.get("created_at")))),
+    )
+    .unwrap_or_else(|| now_ms() as i64);
+
+    let expires_at = normalize_ts(
+        obj.get("expiresAt")
+            .or_else(|| obj.get("expires_at"))
+            .or_else(|| auth_obj.and_then(|a| a.get("expiresAt").or_else(|| a.get("expires_at")))),
+    )
+    .or_else(|| {
+        let in_secs = obj
+            .get("expiresIn")
+            .or_else(|| obj.get("expires_in"))
+            .or_else(|| auth_obj.and_then(|a| a.get("expiresIn").or_else(|| a.get("expires_in"))))
+            .and_then(Value::as_i64)?;
+        Some(created_at + in_secs * 1000)
+    })
+    .or_else(|| {
+        jwt_claims
+            .as_ref()
+            .and_then(|c| c.get("exp").and_then(Value::as_i64).map(|secs| secs * 1000))
+    });
 
     let refresh_expires_at = normalize_ts(
         obj.get("refreshExpiresAt")
-            .or_else(|| obj.get("refresh_expires_at")),
-    );
+            .or_else(|| obj.get("refresh_expires_at"))
+            .or_else(|| {
+                auth_obj.and_then(|a| {
+                    a.get("refreshExpiresAt")
+                        .or_else(|| a.get("refresh_expires_at"))
+                })
+            }),
+    )
+    .or_else(|| {
+        let refresh_in_secs = obj
+            .get("refreshExpiresIn")
+            .or_else(|| obj.get("refresh_expires_in"))
+            .or_else(|| {
+                auth_obj.and_then(|a| {
+                    a.get("refreshExpiresIn")
+                        .or_else(|| a.get("refresh_expires_in"))
+                })
+            })
+            .and_then(Value::as_i64)?;
+        Some(created_at + refresh_in_secs * 1000)
+    });
 
-    let created_at = normalize_ts(obj.get("createdAt").or_else(|| obj.get("created_at")))
-        .unwrap_or_else(|| now_ms() as i64);
+    let enterprise_id = obj
+        .get("enterpriseId")
+        .or_else(|| obj.get("enterprise_id"))
+        .or_else(|| {
+            account_obj.and_then(|a| a.get("enterpriseId").or_else(|| a.get("enterprise_id")))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let enterprise_name = obj
+        .get("enterpriseName")
+        .or_else(|| obj.get("enterprise_name"))
+        .or_else(|| {
+            account_obj.and_then(|a| a.get("enterpriseName").or_else(|| a.get("enterprise_name")))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let token_type = obj
+        .get("token_type")
+        .or_else(|| obj.get("tokenType"))
+        .or_else(|| auth_obj.and_then(|a| a.get("tokenType").or_else(|| a.get("token_type"))))
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("Bearer")
+        .trim()
+        .to_string();
 
     Some(CodeBuddyAccount {
         id,
         uid,
         email,
         nickname,
-        enterprise_id: obj
-            .get("enterpriseId")
-            .or_else(|| obj.get("enterprise_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string(),
-        enterprise_name: obj
-            .get("enterpriseName")
-            .or_else(|| obj.get("enterprise_name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string(),
+        enterprise_id,
+        enterprise_name,
         domain,
         variant,
         access_token,
         refresh_token,
-        token_type: "Bearer".to_string(),
+        token_type,
         expires_at,
         refresh_expires_at,
         created_at: Some(created_at),
@@ -3024,6 +3158,110 @@ mod tests {
         );
         assert_eq!(parsed.refresh_token, "refresh-123");
         assert_eq!(parsed.expires_at, Some(1823165039883i64));
+    }
+
+    #[test]
+    fn imports_nested_auth_and_account_json_correctly() {
+        let sample = json!({
+            "account": {
+                "uid": "wb-uid-test",
+                "nickname": "测试用户",
+                "enterpriseId": "ent-1"
+            },
+            "auth": {
+                "accessToken": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ3Yi11aWQtdGVzdCIsImVtYWlsIjoidGVzdEBleGFtcGxlLmNvbSJ9.sig",
+                "refreshToken": "nested-refresh-token-xyz",
+                "domain": "www.codebuddy.cn",
+                "realm": "cn",
+                "expiresIn": 3600
+            }
+        });
+        let parsed =
+            parse_codebuddy_import_account(&sample).expect("should parse nested auth format");
+        assert_eq!(parsed.uid, "wb-uid-test");
+        assert_eq!(parsed.nickname, "测试用户");
+        assert_eq!(parsed.email, "test@example.com");
+        assert_eq!(parsed.enterprise_id, "ent-1");
+        assert_eq!(parsed.domain, "www.codebuddy.cn");
+        assert_eq!(parsed.variant, Some("cn".to_string()));
+        assert_eq!(parsed.refresh_token, "nested-refresh-token-xyz");
+        assert!(parsed.expires_at.is_some());
+    }
+
+    #[test]
+    fn imports_auth_raw_with_refresh_expires_in() {
+        let sample = json!({
+            "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyYXctdWlkIiwiZW1haWwiOiJyYXdAZXhhbXBsZS5jb20ifQ.sig",
+            "nickname": "RawUser",
+            "auth_raw": {
+                "accessToken": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJyYXctdWlkIiwiZW1haWwiOiJyYXdAZXhhbXBsZS5jb20ifQ.sig",
+                "refreshToken": "auth-raw-refresh-tok",
+                "expiresIn": 5184000,
+                "refreshExpiresIn": 7776000
+            }
+        });
+        let parsed = parse_codebuddy_import_account(&sample).expect("should parse auth_raw format");
+        assert_eq!(parsed.uid, "raw-uid");
+        assert_eq!(parsed.refresh_token, "auth-raw-refresh-tok");
+        assert!(parsed.refresh_expires_at.is_some());
+    }
+
+    #[test]
+    fn upsert_account_preserves_existing_refresh_token_when_incoming_empty() {
+        let dir = std::env::temp_dir().join(format!(
+            "webclx-cb-upsert-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let manager = CodeBuddyManager::load(dir.clone(), dir.join("home")).unwrap();
+
+        // 1. 添加带有完整 refresh_token 的账号
+        let initial = CodeBuddyAccount {
+            id: "acc-1".to_string(),
+            uid: "uid-001".to_string(),
+            email: "user@example.com".to_string(),
+            nickname: "初始昵称".to_string(),
+            access_token: "jwt-token-1".to_string(),
+            refresh_token: "precious-refresh-token".to_string(),
+            refresh_expires_at: Some(1999999999000),
+            ..Default::default()
+        };
+        manager.upsert_account(initial).unwrap();
+
+        // 2. 传入相同 uid 但 refresh_token 为空的更新记录
+        let update = CodeBuddyAccount {
+            id: "ignored-id".to_string(),
+            uid: "uid-001".to_string(),
+            email: "user@example.com".to_string(),
+            nickname: "".to_string(),
+            access_token: "jwt-token-2".to_string(),
+            refresh_token: "".to_string(),
+            refresh_expires_at: None,
+            ..Default::default()
+        };
+        manager.upsert_account(update).unwrap();
+
+        // 3. 验证保留了已有 refresh_token 和 nickname
+        let inner = manager.read_inner();
+        let acc = inner.accounts.iter().find(|a| a.uid == "uid-001").unwrap();
+        assert_eq!(acc.access_token, "jwt-token-2");
+        assert_eq!(acc.refresh_token, "precious-refresh-token");
+        assert_eq!(acc.refresh_expires_at, Some(1999999999000));
+        assert_eq!(acc.nickname, "初始昵称");
+
+        // 4. 验证 export_accounts 保留凭据
+        let mut selected = HashSet::new();
+        selected.insert(acc.id.as_str());
+        let exported = manager.export_accounts(&selected);
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].access_token, "jwt-token-2");
+        assert_eq!(exported[0].refresh_token, "precious-refresh-token");
+
+        drop(inner);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

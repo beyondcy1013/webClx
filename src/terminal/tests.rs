@@ -29,12 +29,13 @@ use super::manager::{
     probe_activity_pane_snapshot_with, rebaseline_terminal_output_locked,
     remove_legacy_codex_command_env_launchers, restore_system_probe_output_observation_locked,
     terminal_auto_continue_cron_entry, terminal_auto_continue_cron_script,
-    terminal_auto_continue_due_millis, terminal_error_has_continue_after,
-    terminal_error_has_queued_input_after, terminal_error_keyword_is_quota_like,
-    terminal_error_reset_time_from_tail, terminal_model_family_from_snapshot,
-    terminal_quota_preflight_uses_zhipu_provider, terminal_recent_output_has_quota_error,
-    terminal_recent_output_uses_glm_model, terminal_reset_time_epoch_millis,
-    terminal_tail_error_keyword, terminal_tail_error_keyword_with_manual_interrupt_policy,
+    terminal_auto_continue_due_millis, terminal_compacting_status_from_snapshot,
+    terminal_error_has_continue_after, terminal_error_has_queued_input_after,
+    terminal_error_keyword_is_quota_like, terminal_error_reset_time_from_tail,
+    terminal_model_family_from_snapshot, terminal_quota_preflight_uses_zhipu_provider,
+    terminal_recent_output_has_quota_error, terminal_recent_output_uses_glm_model,
+    terminal_reset_time_epoch_millis, terminal_tail_error_keyword,
+    terminal_tail_error_keyword_with_manual_interrupt_policy, terminal_tail_has_compacting_status,
     terminal_tail_has_worked_status, terminal_tail_has_working_status,
     terminal_worked_status_match_from_snapshot, terminal_working_status_match_from_snapshot,
 };
@@ -2468,8 +2469,51 @@ fn terminal_working_status_detection_matches_codex_status_line() {
         "› Read file\n\n• Working (5m 31s • esc to interrupt)"
     ));
     assert!(terminal_tail_has_working_status("• working (12s • esc to interrupt)"));
+    assert!(terminal_tail_has_working_status(
+        "Let's inspect environment, network docs, rustCommander. Also current terminal id. Use exec safely. \
+(38m 21s • esc to interrupt)"
+    ));
+    assert!(terminal_tail_has_working_status(
+        "⚠ Selected model is at capacity. Please retry later. (12s • esc to interrupt)"
+    ));
+    assert!(terminal_tail_has_working_status("Reconnecting... 3/5 (21s • esc to interrupt)"));
     assert!(!terminal_tail_has_working_status("Working directory: /tmp/project"));
     assert!(!terminal_tail_has_working_status("working... 82% context left"));
+    assert!(!terminal_tail_has_working_status("Tell the user to press esc to interrupt"));
+    assert!(!terminal_tail_has_working_status(
+        "Messages to be submitted after next tool call (press esc to interrupt and send immediately)"
+    ));
+}
+
+#[test]
+fn terminal_compacting_status_requires_live_compaction_output() {
+    // Codex renders a dedicated progress line while the context is rewritten.
+    assert!(terminal_tail_has_compacting_status(
+        "■ Conversation interrupted - use /feedback if something went wrong\n\nCompacting context (9s • esc to interrupt)\n  └ Making room to continue.\n\n› Ask Codex to do anything"
+    ));
+    // Claude Code reports the same operation through its spinner family.
+    assert!(terminal_tail_has_compacting_status(
+        "✻ Compacting conversation… (esc to interrupt)"
+    ));
+    assert!(terminal_tail_has_compacting_status("正在压缩上下文，请稍候"));
+
+    // A finished compaction is no longer in progress.
+    assert!(!terminal_tail_has_compacting_status(
+        "Compacting context (9s • esc to interrupt)\n• Context compacted\n› Ask Codex to do anything"
+    ));
+    assert!(!terminal_tail_has_compacting_status(
+        "✻ Conversation compacted (ctrl+o for history)"
+    ));
+    // A newer turn marker means the pane moved past the finished compaction.
+    assert!(!terminal_tail_has_compacting_status(
+        "Compacting context (9s • esc to interrupt)\n• Working (2s • esc to interrupt)"
+    ));
+    assert!(!terminal_tail_has_compacting_status(
+        "Compacting context (9s • esc to interrupt)\n✻ Worked for 12s"
+    ));
+    // Merely typing /compact must never look like a running compaction.
+    assert!(!terminal_tail_has_compacting_status("/compact"));
+    assert!(!terminal_tail_has_compacting_status("› /compact"));
 }
 
 #[test]
@@ -2608,6 +2652,12 @@ fn terminal_working_status_detection_prefers_the_latest_turn_status() {
     assert!(terminal_tail_has_working_status(
         "✔ Worked for 8m 15s\n> Continue\n✻ 检查结果… (31s)"
     ));
+    assert!(terminal_tail_has_working_status(
+        "✔ Worked for 8m 15s\n> Inspect the remaining files\nLet's inspect environment. (12s • esc to interrupt)"
+    ));
+    assert!(!terminal_tail_has_working_status(
+        "Let's inspect environment. (12s • esc to interrupt)\n✔ Worked for 8m 15s"
+    ));
 }
 
 #[test]
@@ -2666,6 +2716,7 @@ fn terminal_agent_activity_preserves_working_during_output_pauses() {
                 error_match: None,
                 worked_status: terminal_worked_status_match_from_snapshot(snapshot.as_bytes(), 10),
                 pending_build: false,
+                compacting_status: false,
                 model_family: String::new(),
             };
 
@@ -3219,6 +3270,7 @@ fn collect_session_infos_applies_precomputed_activity_probe() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     }];
     let (sessions, updated) = collect_session_infos_from_probes_locked(
@@ -3533,6 +3585,7 @@ fn pending_build_overrides_unviewed_agent_completion() {
         error_match: None,
         worked_status: true,
         pending_build: true,
+        compacting_status: false,
         model_family: "deepseek".to_string(),
     }];
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3546,6 +3599,66 @@ fn pending_build_overrides_unviewed_agent_completion() {
     assert_eq!(sessions[0].activity_label, "编译中");
     assert_eq!(sessions[0].model_family, "");
     assert!(sessions[0].busy);
+}
+
+#[test]
+fn compacting_pane_reports_compacting_state_and_typed_command_does_not() {
+    let stored = stored_test_terminal_session("compacting");
+    let mut state = TerminalState::default();
+    state
+        .sessions_by_id
+        .insert(stored.id.clone(), stored.clone());
+
+    let compacting_snapshot = "Compacting context (9s • esc to interrupt)\n  └ Making room to continue.\n\n› Ask Codex to do anything";
+    let mut probe = TerminalActivityProbe {
+        session_id: stored.id.clone(),
+        live_last_output_at: 42,
+        snapshot_fingerprint: Some(7),
+        snapshot_probe_sequence: 1,
+        agent_activity: TerminalAgentActivity {
+            agents: vec!["Codex".to_string()],
+            orphaned_agents: Vec::new(),
+        },
+        working_status: terminal_working_status_match_from_snapshot(
+            compacting_snapshot.as_bytes(),
+            10,
+        ),
+        compacting_status: terminal_compacting_status_from_snapshot(
+            compacting_snapshot.as_bytes(),
+            15,
+        ),
+        cline_idle_prompt: false,
+        error_match: None,
+        worked_status: false,
+        pending_build: false,
+        model_family: String::new(),
+    };
+    let (sessions, _) = collect_session_infos_from_probes_locked(
+        &mut state,
+        &stored.path,
+        &stored.path,
+        vec![probe.clone()],
+    );
+    assert_eq!(sessions[0].activity_state, "compacting");
+    assert_eq!(sessions[0].activity_label, "压缩中");
+    assert!(sessions[0].busy);
+
+    // A typed but unexecuted /compact leaves no compaction progress line, so
+    // the session must never be reported as compacting.
+    let typed_snapshot = "› /compact\n\n  GPT-6.1-Sol high · Context 45% used · Fast off";
+    assert!(!terminal_compacting_status_from_snapshot(typed_snapshot.as_bytes(), 15));
+    probe.compacting_status =
+        terminal_compacting_status_from_snapshot(typed_snapshot.as_bytes(), 15);
+    probe.working_status =
+        terminal_working_status_match_from_snapshot(typed_snapshot.as_bytes(), 10);
+    probe.snapshot_probe_sequence = 2;
+    let (sessions, _) = collect_session_infos_from_probes_locked(
+        &mut state,
+        &stored.path,
+        &stored.path,
+        vec![probe],
+    );
+    assert_ne!(sessions[0].activity_state, "compacting");
 }
 
 #[test]
@@ -3606,6 +3719,7 @@ fn orphaned_agent_remains_abnormal_after_output_is_viewed() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: "glm".to_string(),
     }];
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3680,6 +3794,7 @@ fn idle_agent_process_does_not_report_running_or_busy() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     }];
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3743,6 +3858,7 @@ fn cline_idle_prompt_suppresses_pending_review_after_output_window() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     }];
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3851,6 +3967,7 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     };
     let _ = collect_session_infos_from_probes_locked(
@@ -3876,6 +3993,7 @@ fn unchanged_pane_snapshot_does_not_restore_viewed_output_to_completed() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: "glm".to_string(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3949,6 +4067,7 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(
@@ -3979,6 +4098,7 @@ fn restored_session_redraw_rebaselines_without_pending_output() {
         error_match: None,
         worked_status: false,
         pending_build: false,
+        compacting_status: false,
         model_family: String::new(),
     };
     let (sessions, _) = collect_session_infos_from_probes_locked(

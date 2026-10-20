@@ -305,6 +305,9 @@ fn agent_names_for_process(process: &ProcessInfo) -> Vec<&'static str> {
     if is_cline_process(&comm, &cmdline) {
         agents.push("Cline");
     }
+    if is_qoder_process(&comm, &cmdline) {
+        agents.push("Qoder");
+    }
     if is_opencode_process(&comm, &cmdline) {
         agents.push("OpenCode");
     }
@@ -435,6 +438,30 @@ fn is_cline_process(comm: &str, cmdline: &str) -> bool {
             && (script.rsplit('/').next() == Some("cline")
                 || script.contains("node_modules/cline/")
                 || script.contains("node_modules/@cline/")))
+}
+
+#[cfg(not(windows))]
+fn is_qoder_process(comm: &str, cmdline: &str) -> bool {
+    // The CLI installs `~/.local/bin/qodercli` pointing at a versioned binary
+    // such as `~/.qoder/bin/qodercli/qodercli-1.1.74`; comm stays `qodercli`.
+    let mut tokens = cmdline.split_whitespace();
+    let executable = tokens.next().and_then(|token| token.rsplit('/').next());
+    let script = tokens.next().unwrap_or_default();
+    let script_name = script.rsplit('/').next().unwrap_or_default();
+    comm == "qodercli"
+        || comm == "qoderclicn"
+        || comm == "qoder-cli"
+        || comm == "qoder"
+        || executable == Some("qodercli")
+        || executable == Some("qoderclicn")
+        || executable == Some("qoder-cli")
+        || executable == Some("qoder")
+        || (matches!(executable, Some("node") | Some("bun"))
+            && (script_name == "qodercli"
+                || script_name == "qoderclicn"
+                || script_name == "qoder-cli"
+                || script.contains("@qoder/")
+                || script.contains("qodercli")))
 }
 
 #[cfg(not(windows))]
@@ -818,6 +845,61 @@ mod tests {
             ppid: 1,
             comm: "echo".to_string(),
             cmdline: "echo cline".to_string(),
+            cgroup: String::new(),
+        };
+        assert!(agent_names_for_process(&argument).is_empty());
+    }
+
+    #[test]
+    fn agent_detection_recognizes_qoder_launchers() {
+        for process in [
+            ProcessInfo {
+                ppid: 1,
+                comm: "qodercli".to_string(),
+                cmdline: "/home/root/.local/bin/qodercli".to_string(),
+                cgroup: String::new(),
+            },
+            ProcessInfo {
+                ppid: 1,
+                comm: "qodercli".to_string(),
+                cmdline: "/home/root/.qoder/bin/qodercli/qodercli-1.1.74".to_string(),
+                cgroup: String::new(),
+            },
+            ProcessInfo {
+                ppid: 1,
+                comm: "qoderclicn".to_string(),
+                cmdline: "/home/root/.local/bin/qoderclicn".to_string(),
+                cgroup: String::new(),
+            },
+            ProcessInfo {
+                ppid: 1,
+                comm: "node".to_string(),
+                cmdline: "node /usr/local/bin/qodercli".to_string(),
+                cgroup: String::new(),
+            },
+            ProcessInfo {
+                ppid: 1,
+                comm: "bun".to_string(),
+                cmdline: "bun /usr/local/lib/node_modules/@qoder/qodercli/bin/qodercli.js"
+                    .to_string(),
+                cgroup: String::new(),
+            },
+        ] {
+            assert_eq!(agent_names_for_process(&process), vec!["Qoder"]);
+        }
+
+        let search = ProcessInfo {
+            ppid: 1,
+            comm: "rg".to_string(),
+            cmdline: "rg qodercli src".to_string(),
+            cgroup: String::new(),
+        };
+        assert!(agent_names_for_process(&search).is_empty());
+
+        let argument = ProcessInfo {
+            ppid: 1,
+            comm: "echo".to_string(),
+            cmdline: "echo qodercli".to_string(),
             cgroup: String::new(),
         };
         assert!(agent_names_for_process(&argument).is_empty());

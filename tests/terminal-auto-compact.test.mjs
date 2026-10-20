@@ -76,8 +76,18 @@ assert.match(
 );
 assert.match(
   terminalJs,
-  /function syncAutoCompactCompletionStatuses\(\) \{[\s\S]*?Array\.from\(state\.autoCompactCompactingSessionIds\)[\s\S]*?!isSessionCompactCapableAgent\(latest\)[\s\S]*?state\.autoCompactCompactingSessionIds\.delete\(sessionId\)/,
-  "a non-compact agent discovered after sending must leave the compacting state immediately",
+  /function syncAutoCompactCompletionStatuses\(\) \{[\s\S]*?previousStates\.get\(sessionId\) === "compacting"[\s\S]*?currentState !== "compacting"[\s\S]*?autoCompactStatusSessionIds\.add\(sessionId\)/,
+  "the compacted marker must follow the backend compacting state ending",
+);
+assert.doesNotMatch(
+  terminalJs,
+  /autoCompactCompactingSessionIds/,
+  "the selector must not fabricate a compacting state locally",
+);
+assert.match(
+  terminalJs,
+  /已发送 \/compact，等待压缩开始/,
+  "sending /compact must only report delivery, not a running compaction",
 );
 assert.match(
   terminalJs,

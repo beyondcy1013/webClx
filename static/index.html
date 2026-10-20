@@ -56,17 +56,19 @@
     <script defer src="/assets/app-frp-manager.js?v=20260619a"></script>
     <script defer src="/assets/app-proxy-manager.js?v=20260713c"></script>
     <script defer src="/assets/app-auth-manager.js?v=20260926-usage-error-toast"></script>
-    <script defer src="/assets/app-codex-account-manager.js?v=20261013-codebuddy-total-single-value"></script>
+    <script defer src="/assets/app-codex-account-manager.js?v=20261020-devin-desktop"></script>
     <script defer src="/assets/app-llm-account-editor-dialog.js?v=20260924-llm-editor-dialog"></script>
     <script defer src="/assets/app-codebuddy-manager.js?v=20260923a"></script>
-    <script defer src="/assets/app-devin-manager.js?v=20260924a"></script>
+    <script defer src="/assets/app-devin-manager.js?v=20261020-desktop"></script>
     <script defer src="/assets/app-agy-manager.js?v=20261013-agy-action-menu"></script>
     <script defer src="/assets/app-api-manager.js?v=20260926-account-save-refresh"></script>
     <script defer src="/assets/app-sub2api-manager.js?v=20260921c"></script>
     <script defer src="/assets/app-claude-manager.js?v=20260924-claude-editor"></script>
-    <script defer src="/assets/app-account-clipboard-manager.js?v=20260716b"></script>
+    <script defer src="/assets/account-interchange-core.js?v=20261017b"></script>
+    <script defer src="/assets/account-interchange-dialog.js?v=20261017c"></script>
+    <script defer src="/assets/app-account-clipboard-manager.js?v=20261017a"></script>
     <script defer src="/assets/app-preset-sync-manager.js?v=20260821f"></script>
-    <script defer src="/assets/app-compile-status-manager.js?v=20260813b"></script>
+    <script defer src="/assets/app-compile-status-manager.js?v=20261019-progress"></script>
     <script defer src="/assets/app-system-panel-manager.js?v=20260816b"></script>
     <script defer src="/assets/app-settings-formatters.js?v=20260730a"></script>
     <script defer src="/assets/app-terminal-tools-settings.js?v=20260926-workflow-unification"></script>
@@ -85,7 +87,7 @@
     <script defer src="/assets/app-home-session-render.js?v=20260801a"></script>
     <script defer src="/assets/app-preset-ops.js?v=20260926-auth-wrappers"></script>
     <script defer src="/assets/app-frp-proxy-ops.js?v=20260707a"></script>
-    <script defer src="/assets/app-feature-managers-init.js?v=20260926-browser-oauth"></script>
+    <script defer src="/assets/app-feature-managers-init.js?v=20261017a"></script>
     <script defer src="/assets/app-auto-continue-tasks.js?v=20260707a"></script>
     <script defer src="/assets/app-unified-tasks.js?v=20261012-action-first"></script>
     <script defer src="/assets/app-workspace-browser.js?v=20260815a"></script>
@@ -415,8 +417,10 @@
               <h2>LLM_API 账号</h2>
             </div>
             <div class="toolbar">
-              <button id="codex-account-export" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出选中</button>
-              <button id="codex-account-export-file" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出文件</button>
+              <button id="account-global-import" class="button secondary" type="button">全局导入</button>
+              <button id="account-global-export" class="button secondary" type="button">全局导出</button>
+              <button id="codex-account-export" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出账号…</button>
+              <button id="codex-account-export-file" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">下载账号…</button>
               <button id="codex-account-add-oauth" class="button secondary" type="button" data-account-kinds="oauth">添加 OAuth</button>
               <button id="codex-account-login-oauth" class="button primary" type="button" data-account-kinds="oauth">新登录</button>
               <button id="codex-account-save-current" class="button secondary" type="button" disabled data-account-kinds="oauth">保存当前 Codex 登录</button>
@@ -426,7 +430,7 @@
               <button id="codex-account-add-claude" class="button primary" type="button" data-account-kinds="claude">添加 Claude</button>
               <button id="codex-account-add-api" class="button primary" type="button" data-account-kinds="api">添加 API</button>
               <button id="codex-account-add-codebuddy" class="button primary" type="button" data-account-kinds="codebuddy">添加 CodeBuddy</button>
-              <button id="codex-account-add-devin" class="button primary" type="button" data-account-kinds="devin">添加 Devin</button>
+              <button id="codex-account-add-devin" class="button primary" type="button" data-account-kinds="devin">添加 Devin CLI</button>
               <button id="codex-account-add-agy" class="button primary" type="button" data-account-kinds="agy">添加 AGY</button>
               <button id="agy-detect-current" class="button secondary" type="button" hidden>重新读取当前账号</button>
               <button id="agy-refresh" class="button secondary" type="button" hidden>刷新</button>
@@ -478,7 +482,9 @@
           </div>
           <div id="devin-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" hidden>
             <div class="subtab-options-actions">
-              <button id="devin-import-current-toolbar" class="button secondary" type="button" data-account-kinds="devin">导入当前配置</button>
+              <button id="devin-import-current-toolbar" class="button secondary" type="button" data-account-kinds="devin">导入当前 CLI 配置</button>
+              <button id="devin-import-desktop-toolbar" class="button secondary" type="button" data-account-kinds="devin">添加本机 Desktop</button>
+              <button id="devin-detect-desktop" class="button secondary" type="button" data-account-kinds="devin">核验本机 Desktop</button>
             </div>
             <div class="subtab-options-switches">
               <label class="codebuddy-auto-toggle subtab-options-toggle">
@@ -4353,12 +4359,13 @@
           <div class="panel-head wide">
             <div>
               <p class="section-label">Devin</p>
-              <h2 id="devin-add-title">添加 Devin 账号</h2>
+              <h2 id="devin-add-title">添加 Devin CLI 账号</h2>
+              <p class="card-desc">类型：CLI。此处保存 CLI 的 windsurf_api_key；Desktop 使用独立类型，可由工具栏读取 webClx 服务器本机配置。Desktop 读写凭据时必须在终端交互输入 GPG 密码，不能由浏览器跨电脑直接读取文件。</p>
             </div>
           </div>
 
           <div class="toolbar dialog-actions">
-            <button id="devin-import-current-btn" class="button secondary" type="button">从当前系统读取</button>
+            <button id="devin-import-current-btn" class="button secondary" type="button">读取当前 CLI 账号</button>
           </div>
 
           <label class="field">
@@ -4367,7 +4374,7 @@
               id="devin-add-token"
               class="text-input mono-text"
               type="password"
-              placeholder="windsurf_api_key 或 devin token"
+              placeholder="CLI credentials.toml 中的 windsurf_api_key"
               autocomplete="off"
               spellcheck="false"
               required

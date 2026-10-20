@@ -5,7 +5,7 @@ description: 作为 webclx-ops 子技能，排查和修复 webClx 终端切换�
 
 # 终端滚动修复
 
-关键词：下拉切换、跳顶部、停在中间、跟随输出、CodeBuddy 重绘、共享终端、scrollback、viewportY/baseY、scrollTop、scrollIntentRevision、scroll area clamp。
+关键词：下拉切换、跳顶部、停在中间、跟随输出、CodeBuddy 重绘、共享终端、scrollback、viewportY/baseY、scrollTop、scrollIntentRevision、scroll area clamp、首次滚动回弹、页面恢复快照、Devin CLI 无法滚动。
 
 ## 当前产品语义
 
@@ -25,6 +25,8 @@ description: 作为 webclx-ops 子技能，排查和修复 webClx 终端切换�
 - 写入结束不得恢复过期的 follow 决策；旧 viewport 事件不得写入当前会话；切换修复历史见 `244b9c2`。恢复快照必须核对活动 context 的 session，而非仅信任刚更新的页面 session ID。
 - 共享 canonical 行数超过浏览器可见行数时，缓冲区逻辑到底仍可能裁掉输入区。检查 `static/terminal-layout-connection.js` 的尺寸通知与 fit 两处行数限制，并验证最后一行在 viewport 内。
 - xterm 异步刷新缩短 scroll area 时，浏览器会夹紧 DOM scrollTop；若随后被当成用户滚动，逻辑位置与 follow 都会丢失。检查 capture 阶段的 `repairTerminalViewportScrollArea` / `syncTerminalViewportDomToBuffer`；保存意图的 `handleTerminalViewportScroll` 留在 bubble 阶段，确保真实滚动条操作先更新 xterm 逻辑位置。
+- 页面恢复/焦点/可见性快照可能在首次用户滚动前捕获，此时 context 的 `scrollIntentRevision` 尚为 `undefined`；恢复比较必须按 0 处理，否则首次滚轮/触摸会被旧快照回弹。关键词：first-scroll snap-back、revision undefined。回归 `tests/terminal-scroll-intent.test.mjs`；缓存键 `20261020-scroll-intent-zero`；修复 `6eeda59`，详情见专题 `First Scroll After Page Resume Snapped Back (2026-10-20)`。
+- Devin CLI 报告“终端无法滚动”时，先确认它是 normal buffer、无鼠标跟踪、tmux 历史完整且新页面滚轮/触摸可滚；再查页面恢复快照首滚回弹与 HTML 缓存键。2026-10-20 `feishuFwd_2` 实测新页面正常，不要通过注入鼠标模式或修改 xterm 规避。
 
 ## 验证与交付
 
