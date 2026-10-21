@@ -1,0 +1,12 @@
+# Rust 格式化基线。运行 `cargo fmt` 会依据本文件统一风格。
+# 只锁定稳定、项目关心的项，避免与团队现有手写风格产生大规模冲突。
+
+edition = "2024"
+max_width = 100
+
+# 方法链/函数调用的单行宽度上限，超过则折行。
+fn_call_width = 80
+
+# 导入与模块排序，减少人为的 import 顺序噪声。
+reorder_imports = true
+reorder_modules = true

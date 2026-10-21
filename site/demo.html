@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Try a synthetic webClx desktop-to-phone workflow without creating an account or connecting a server.">
+  <title>Try webClx — interactive synthetic demo</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2210%22 fill=%22%230b1517%22/><path d=%22M16 21l10 11-10 11M30 43h18%22 fill=%22none%22 stroke=%22%234bd1af%22 stroke-width=%226%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22/></svg>">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="demo.css">
+</head>
+<body class="demo-page">
+  <a class="skip" href="#demo-main">Skip to demo</a>
+  <header class="topbar">
+    <a class="wordmark" href="./" aria-label="webClx product page">webClx</a>
+    <p class="demo-label" data-en="Interactive synthetic demo" data-zh="交互式合成演示">Interactive synthetic demo</p>
+    <button class="language" type="button" aria-label="Switch language" aria-pressed="false">中文</button>
+  </header>
+
+  <main class="demo-main" id="demo-main">
+    <section class="demo-intro">
+      <div>
+        <p class="eyebrow" data-en="NO ACCOUNT · NO SERVER · NO CUSTOMER DATA" data-zh="无需账号 · 不连接服务器 · 不含客户数据">NO ACCOUNT · NO SERVER · NO CUSTOMER DATA</p>
+        <h1 data-en="Try the remote workflow." data-zh="亲手体验远程工作流。">Try the remote workflow.</h1>
+        <p data-en="This browser-only sandbox simulates one persistent coding session. Complete the four steps to see how webClx carries work from a desktop terminal to a phone and another Harness." data-zh="这个纯浏览器沙盒模拟一个持久编程会话。完成四步，体验 webClx 如何把任务从桌面终端带到手机并交给另一种 Harness 复核。">This browser-only sandbox simulates one persistent coding session. Complete the four steps to see how webClx carries work from a desktop terminal to a phone and another Harness.</p>
+      </div>
+      <div class="demo-progress" aria-label="Demo progress"><span class="progress-fill"></span></div>
+    </section>
+
+    <section class="demo-shell" aria-label="Synthetic webClx workspace">
+      <div class="demo-toolbar">
+        <div class="demo-tabs" role="tablist" aria-label="Device view">
+          <button type="button" role="tab" aria-selected="true" data-view="desktop" data-en="Desktop" data-zh="桌面">Desktop</button>
+          <button type="button" role="tab" aria-selected="false" data-view="mobile" data-en="Phone" data-zh="手机">Phone</button>
+        </div>
+        <span class="synthetic-badge" data-en="SYNTHETIC SESSION" data-zh="合成会话">SYNTHETIC SESSION</span>
+      </div>
+
+      <div class="demo-workspace view-desktop">
+        <aside class="demo-sessions" aria-label="Sessions">
+          <p data-en="Persistent sessions" data-zh="持久会话">Persistent sessions</p>
+          <button type="button" class="session selected" data-session="implement"><strong>feature-implement</strong><small>Codex · active</small></button>
+          <button type="button" class="session" data-session="review"><strong>security-review</strong><small>Claude · ready</small></button>
+          <button type="button" class="session" data-session="release"><strong>release-check</strong><small>DeepSeek · waiting</small></button>
+        </aside>
+
+        <section class="demo-terminal" aria-label="Synthetic terminal output">
+          <div class="terminal-output" role="log" aria-live="polite" aria-relevant="additions text">
+            <p><span class="terminal-prompt">dev@workstation</span>:~/sample-app$ codex</p>
+            <p class="terminal-muted" data-en="Working on responsive checkout validation..." data-zh="正在处理响应式结账校验……">Working on responsive checkout validation...</p>
+            <p data-en="Implemented validation and focused tests." data-zh="已完成校验逻辑与聚焦测试。">Implemented validation and focused tests.</p>
+            <p class="terminal-success" data-en="✓ 18 tests passed" data-zh="✓ 18 项测试通过">✓ 18 tests passed</p>
+          </div>
+          <div class="terminal-actions">
+            <button type="button" class="demo-action primary-action" data-action="disconnect" data-en="Leave desk" data-zh="离开电脑">Leave desk</button>
+            <button type="button" class="demo-action" data-action="resume" disabled data-en="Resume on phone" data-zh="在手机恢复">Resume on phone</button>
+            <button type="button" class="demo-action" data-action="review" disabled data-en="Request Claude review" data-zh="请求 Claude 复核">Request Claude review</button>
+            <button type="button" class="demo-action" data-action="reply" disabled data-en="Receive reply" data-zh="接收回复">Receive reply</button>
+          </div>
+        </section>
+
+        <aside class="demo-phone" aria-label="Phone preview">
+          <div class="phone-speaker"></div>
+          <div class="phone-header">webClx · mobile</div>
+          <div class="phone-screen">
+            <span class="connection-state" data-state="desk" data-en="DESKTOP CONNECTED" data-zh="桌面已连接">DESKTOP CONNECTED</span>
+            <p><span class="terminal-prompt">dev@workstation</span><br>~/sample-app</p>
+            <div class="phone-card"><span data-en="Build finished" data-zh="构建完成">Build finished</span><strong data-en="18/18 tests passed" data-zh="18/18 测试通过">18/18 tests passed</strong></div>
+            <div class="phone-message" hidden></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="demo-steps" aria-label="Demo steps">
+      <article class="current" data-step="1"><span>01</span><strong data-en="Leave the desk" data-zh="离开电脑">Leave the desk</strong></article>
+      <article data-step="2"><span>02</span><strong data-en="Resume on phone" data-zh="在手机恢复">Resume on phone</strong></article>
+      <article data-step="3"><span>03</span><strong data-en="Request review" data-zh="请求复核">Request review</strong></article>
+      <article data-step="4"><span>04</span><strong data-en="Receive reply" data-zh="收到回复">Receive reply</strong></article>
+    </section>
+
+    <section class="demo-complete" hidden>
+      <p class="eyebrow" data-en="WORKFLOW COMPLETE" data-zh="工作流已完成">WORKFLOW COMPLETE</p>
+      <h2 data-en="The terminal context stayed intact across device and Harness changes." data-zh="终端上下文在设备与 Harness 切换中保持完整。">The terminal context stayed intact across device and Harness changes.</h2>
+      <p data-en="The real product connects to your self-hosted environment. Hosted trials are isolated and manually approved." data-zh="真实产品连接你的自托管环境。托管试用按客户隔离并由人工审核。">The real product connects to your self-hosted environment. Hosted trials are isolated and manually approved.</p>
+      <div class="actions">
+        <a class="button primary" href="https://github.com/beyondcy1013/webClx/issues/new?template=hosted-trial.yml&utm_source=interactive-demo&utm_medium=website&utm_campaign=hosted-trial" data-en="Request isolated trial" data-zh="申请隔离试用">Request isolated trial</a>
+        <button type="button" class="button secondary reset-demo" data-en="Restart demo" data-zh="重新体验">Restart demo</button>
+      </div>
+    </section>
+  </main>
+  <script src="site.js"></script>
+  <script src="demo.js"></script>
+</body>
+</html>

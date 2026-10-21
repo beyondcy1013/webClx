@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible webClx problem without sensitive data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: "Never include passwords, cookies, API keys, private repository URLs, or unredacted terminal output. Use private vulnerability reporting for security issues."
+  - type: input
+    id: version
+    attributes:
+      label: webClx version
+      placeholder: "1.8.11"
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options: [Linux source build, Linux systemd service, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Use a minimal workspace without private data.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and redacted logs
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private URLs, customer data, and other secrets.
+          required: true

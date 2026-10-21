@@ -1,0 +1,5 @@
+customer_id=qa-example-01
+max_mib=2048
+backup_recipient=REPLACE_WITH_EXACT_CUSTOMER_GPG_FINGERPRINT
+gpg_home=/etc/webclx/gnupg/qa-example-01
+retention_count=7

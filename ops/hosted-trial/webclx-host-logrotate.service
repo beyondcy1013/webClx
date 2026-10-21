@@ -1,0 +1,6 @@
+[Unit]
+Description=Rotate high-volume logs on the webClx hosted-trial server
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.d/webclx-host

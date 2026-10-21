@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WebClx" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#17191C</item>
+        <item name="android:colorAccent">#E9793F</item>
+        <item name="android:navigationBarColor">#17191C</item>
+        <item name="android:statusBarColor">#17191C</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+    <style name="Theme.WebClx.Dark" parent="Theme.WebClx" />
+    <style name="Theme.WebClx.Light" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">#F7F8FA</item>
+        <item name="android:colorAccent">#D65F26</item>
+        <item name="android:navigationBarColor">#F7F8FA</item>
+        <item name="android:statusBarColor">#F7F8FA</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

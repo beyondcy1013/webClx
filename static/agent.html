@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DeepSeek Agent · webClx</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      (() => {
+        try {
+          const mode = window.localStorage.getItem("webclx:theme-mode");
+          const resolved = mode === "dark" || mode === "light"
+            ? mode
+            : window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch {}
+      })();
+    </script>
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260816b" />
+    <script defer src="/assets/abort-signal-compat.js?v=20260817b"></script>
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      .agent-runtime-page {
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr);
+        width: min(var(--page-max-width), calc(100vw - var(--page-inline-margin)));
+        margin-inline: auto;
+        height: 100vh;
+        height: 100dvh;
+        background: var(--bg);
+      }
+
+      .agent-runtime-nav {
+        min-width: 0;
+      }
+
+      .agent-runtime-bar {
+        min-height: 42px;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: var(--panel);
+      }
+
+      .agent-runtime-title {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--text);
+        font-size: var(--font-size-tier-3);
+        font-weight: 600;
+      }
+
+      .agent-runtime-action {
+        min-height: 30px;
+        box-sizing: border-box;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 5px 10px;
+        border: 1px solid var(--field-border);
+        border-radius: 6px;
+        background: var(--field-bg);
+        color: var(--text);
+        font-size: var(--font-size-tier-2);
+        line-height: 1;
+        text-decoration: none;
+        white-space: nowrap;
+      }
+
+      .agent-runtime-action:hover {
+        border-color: var(--accent);
+        background: var(--field-bg-elevated);
+      }
+
+      .agent-runtime-frame {
+        width: 100%;
+        height: 100%;
+        min-width: 0;
+        min-height: 0;
+        border: 0;
+        background: var(--bg);
+      }
+
+      @media (max-width: 720px) {
+        .agent-runtime-bar {
+          padding-inline: 8px;
+        }
+
+        .agent-runtime-title {
+          font-size: var(--font-size-tier-2);
+        }
+
+        .agent-runtime-action {
+          min-height: 32px;
+          padding-inline: 8px;
+        }
+      }
+    </style>
+  </head>
+  <body class="app-shell">
+    <div class="agent-runtime-page">
+      <header class="topbar slim browser-topbar agent-runtime-nav">
+        <nav class="tabs page-tabs" aria-label="webClx 顶级导航">
+          <a class="tab-button topbar-link-button" href="/terminal">终端管理</a>
+          <a class="tab-button topbar-link-button" href="/workspace">工作区</a>
+          <a class="tab-button topbar-link-button" href="/workspace_history">历史工作区</a>
+          <a class="tab-button topbar-link-button" href="/codex_api">LLM_API</a>
+          <a class="tab-button topbar-link-button" href="/settings">设置</a>
+          <a class="tab-button topbar-link-button active" href="/agent" aria-current="page">DeepSeek Agent</a>
+          <a class="tab-button topbar-link-button" href="/collaboration">智能体协作</a>
+          <a class="tab-button topbar-link-button" href="/archives">归档列表</a>
+          <a class="tab-button topbar-link-button" href="/downloads">编译产物</a>
+        </nav>
+      </header>
+
+      <div class="agent-runtime-bar">
+        <div class="agent-runtime-title">DeepSeek Harness</div>
+        <a class="agent-runtime-action" href="/agent/profiles">终端 Profiles</a>
+        <a class="agent-runtime-action" href="/agent/runtime" target="_blank" rel="noopener">独立打开</a>
+      </div>
+
+      <iframe
+        class="agent-runtime-frame"
+        src="/agent/runtime"
+        title="DeepSeek Harness"
+        allow="clipboard-read; clipboard-write"
+      ></iframe>
+    </div>
+  </body>
+</html>

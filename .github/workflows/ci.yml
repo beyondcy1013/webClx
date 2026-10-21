@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Prepare root test home
+        run: >-
+          sudo mkdir -p /home/root &&
+          sudo sed -i 's|^root:x:0:0:root:/root:|root:x:0:0:root:/home/root:|' /etc/passwd
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Test workspace
+        run: >-
+          sudo -E env "PATH=$PATH" cargo test --workspace --locked --
+          --skip tmux_backed_sessions_survive_manager_restart
+          --skip background_command_accepts_stdin_and_keeps_final_output
+      - name: Test tmux-sensitive cases serially
+        run: >-
+          sudo -E env "PATH=$PATH" cargo test --locked --
+          tmux_backed_sessions_survive_manager_restart
+          background_command_accepts_stdin_and_keeps_final_output
+          --test-threads=1
+
+  browser-contracts:
+    name: Browser and release contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Run public-release contract tests
+        run: >-
+          node --test
+          tests/source-release-package.test.mjs
+          tests/security-client-redirects.test.mjs
+          tests/hosted-trial-instance.test.mjs
+          tests/hosted-trial-qa-lifecycle.test.mjs
+          tests/hosted-trial-data-guard.test.mjs
+          tests/hosted-trial-maintenance.test.mjs
+          tests/public-site.test.mjs
+          tests/i18n-runtime.test.mjs
+          tests/compile-api-compatibility.test.mjs
