@@ -1,0 +1,53 @@
+name: Terminal scroll regression
+
+on:
+  push:
+    paths: &scroll-paths
+      - static/terminal*.js
+      - static/terminal.html
+      - static/styles*.css
+      - static/vendor/xterm*
+      - src/terminal.rs
+      - src/terminal/**
+      - crates/terminal_core/**
+      - tests/terminal*.mjs
+      - tests/terminal*.browser.py
+      - tests/static-entry-assets.mjs
+      - scripts/repo-check.sh
+      - scripts/rebuild-and-deploy.sh
+      - .github/workflows/terminal-scroll.yml
+      - AGENTS.md
+  pull_request:
+    paths: *scroll-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terminal-scroll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WEBCLX_REPO_CHECK_LOG_DIR: ${{ runner.temp }}/webclx-terminal-scroll
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install browser test dependencies
+        run: |
+          python3 -m pip install playwright==1.59.0
+          python3 -m playwright install --with-deps chromium
+      - name: Check scroll intent and browser matrix
+        run: bash scripts/repo-check.sh --terminal-scroll --timeout 180
+      - name: Preserve test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-scroll-report
+          path: ${{ env.WEBCLX_REPO_CHECK_LOG_DIR }}
+          if-no-files-found: warn

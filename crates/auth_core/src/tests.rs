@@ -56,6 +56,7 @@ fn sample_auth() -> AuthFile {
 
 fn sample_api_preset(base_url: &str, model: Option<&str>) -> StoredApiPreset {
     StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-1".to_string(),
         name: "Example".to_string(),
@@ -86,6 +87,7 @@ fn sample_api_preset(base_url: &str, model: Option<&str>) -> StoredApiPreset {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     }
 }
 
@@ -734,6 +736,7 @@ fn api_preset_summary_describes_chatgpt_oauth_in_shared_table() {
 #[test]
 fn auth_name_can_reuse_same_value_when_editing_self() {
     let presets = vec![StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "auth-1".to_string(),
         name: "账号 ccb2e5".to_string(),
@@ -746,6 +749,7 @@ fn auth_name_can_reuse_same_value_when_editing_self() {
         legacy_secondary_config_value: None,
         auth: sample_auth(),
         switch_count: 0,
+        last_switch_at: None,
     }];
 
     let name = resolve_auth_preset_name("账号 ccb2e5", &sample_auth(), &presets, Some("auth-1"));
@@ -755,6 +759,7 @@ fn auth_name_can_reuse_same_value_when_editing_self() {
 #[test]
 fn api_name_can_reuse_same_value_when_editing_self() {
     let presets = vec![StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-1".to_string(),
         name: "API api.openai.comv1".to_string(),
@@ -778,6 +783,7 @@ fn api_name_can_reuse_same_value_when_editing_self() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     }];
 
     let name = resolve_api_preset_name(
@@ -821,6 +827,7 @@ fn fake_jwt(payload: Value) -> String {
 
 fn sample_claude_preset() -> StoredClaudePreset {
     StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-1".to_string(),
         name: "Claude example".to_string(),
@@ -841,11 +848,13 @@ fn sample_claude_preset() -> StoredClaudePreset {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     }
 }
 
 fn sample_third_party_claude_preset() -> StoredClaudePreset {
     StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-2".to_string(),
         name: "Claude third party".to_string(),
@@ -866,12 +875,14 @@ fn sample_third_party_claude_preset() -> StoredClaudePreset {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     }
 }
 
 #[test]
 fn summary_can_derive_basic_details_from_tokens() {
     let preset = StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "auth-2".to_string(),
         name: "旧预设".to_string(),
@@ -888,7 +899,7 @@ fn summary_can_derive_basic_details_from_tokens() {
             tokens: AuthTokens {
                 access_token: fake_jwt(json!({
                     "https://api.openai.com/profile": {
-                        "email": "be02@example.invalid"
+                        "email": "be02@739964.xyz"
                     },
                     "https://api.openai.com/auth": {
                         "chatgpt_plan_type": "team",
@@ -902,10 +913,11 @@ fn summary_can_derive_basic_details_from_tokens() {
             },
         },
         switch_count: 0,
+        last_switch_at: None,
     };
 
     let summary = preset_summary(&preset, None);
-    assert_eq!(summary.details.email.as_deref(), Some("be02@example.invalid"));
+    assert_eq!(summary.details.email.as_deref(), Some("be02@739964.xyz"));
     assert_eq!(summary.details.plan_type.as_deref(), Some("TEAM"));
     assert_eq!(summary.details.login_method.as_deref(), Some("Password"));
 }
@@ -918,7 +930,7 @@ fn refreshed_quota_overrides_plan_and_windows() {
         tokens: AuthTokens {
             access_token: fake_jwt(json!({
                 "https://api.openai.com/profile": {
-                    "email": "be02@example.invalid"
+                    "email": "be02@739964.xyz"
                 }
             })),
             account_id: "100f021d-33a9-46ca-bc96-2d26bcccb2e5".to_string(),
@@ -952,7 +964,7 @@ fn refreshed_quota_overrides_plan_and_windows() {
         },
     );
 
-    assert_eq!(details.email.as_deref(), Some("be02@example.invalid"));
+    assert_eq!(details.email.as_deref(), Some("be02@739964.xyz"));
     assert_eq!(details.plan_type.as_deref(), Some("PLUS"));
     assert_eq!(details.login_method.as_deref(), Some("Password"));
     assert_eq!(details.hourly_percentage, Some(36));
@@ -2070,6 +2082,7 @@ fn current_mode_prefers_api_when_provider_exists() {
 #[test]
 fn api_preset_can_be_marked_active() {
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-1".to_string(),
         name: "Example".to_string(),
@@ -2093,6 +2106,7 @@ fn api_preset_can_be_marked_active() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let auth_state = CurrentAuthState::Api(super::ApiAuthFile {
         openai_api_key: "sk-example".to_string(),
@@ -2568,4 +2582,98 @@ fn interchange_source_survives_preset_serde_without_becoming_configuration() {
     let saved = serde_json::to_value(preset).unwrap();
     assert_eq!(saved["interchange_source"], raw["interchange_source"]);
     assert!(saved["config_overrides"].is_null());
+}
+#[test]
+fn bump_switch_count_records_last_switch_time() {
+    struct Counted {
+        id: String,
+        switch_count: u64,
+        last_switch_at: Option<i64>,
+        switch_history: Vec<i64>,
+    }
+    impl super::SwitchCounted for Counted {
+        fn preset_id(&self) -> &str {
+            &self.id
+        }
+        fn switch_count_mut(&mut self) -> &mut u64 {
+            &mut self.switch_count
+        }
+        fn last_switch_at_mut(&mut self) -> &mut Option<i64> {
+            &mut self.last_switch_at
+        }
+        fn switch_history_mut(&mut self) -> &mut Vec<i64> {
+            &mut self.switch_history
+        }
+    }
+
+    let mut presets = vec![Counted {
+        id: "p1".to_string(),
+        switch_count: 2,
+        last_switch_at: None,
+        switch_history: Vec::new(),
+    }];
+    assert!(super::bump_switch_count(&mut presets, "p1"));
+    assert_eq!(presets[0].switch_count, 3);
+    assert!(presets[0].last_switch_at.unwrap_or(0) > 0);
+    assert_eq!(presets[0].switch_history.len(), 1);
+    assert!(!super::bump_switch_count(&mut presets, "missing"));
+}
+
+#[test]
+fn switch_history_backfills_legacy_last_switch_and_prunes() {
+    let now = 1_800_000_000_000i64;
+    let legacy = now - 10 * 24 * 60 * 60 * 1000; // 10 天前，仍在保留期内
+    let mut history = Vec::new();
+    // 旧数据：历史为空、仅 last_switch_at 有值 -> 播种一条，且不重写磁盘。
+    super::push_switch_event(&mut history, Some(legacy), now);
+    assert_eq!(history, vec![legacy, now]);
+
+    // 再次切换不应重复播种。
+    let later = now + 1000;
+    super::push_switch_event(&mut history, Some(now), later);
+    assert_eq!(history, vec![legacy, now, later]);
+
+    // 超过 90 天的旧记录被裁剪。
+    let ancient = now - 91 * 24 * 60 * 60 * 1000;
+    let mut with_ancient = vec![ancient];
+    super::push_switch_event(&mut with_ancient, None, now);
+    assert_eq!(with_ancient, vec![now]);
+}
+
+#[test]
+fn switch_history_caps_entry_count() {
+    let now = 1_800_000_000_000i64;
+    let mut history: Vec<i64> = (0..super::SWITCH_HISTORY_MAX_ENTRIES)
+        .map(|i| now - i as i64)
+        .collect();
+    super::push_switch_event(&mut history, None, now);
+    assert_eq!(history.len(), super::SWITCH_HISTORY_MAX_ENTRIES);
+    assert_eq!(history.last(), Some(&now));
+}
+
+#[test]
+fn effective_switch_history_falls_back_to_last_switch_at() {
+    assert_eq!(super::effective_switch_history(&[], Some(1234)), vec![1234]);
+    assert!(super::effective_switch_history(&[], None).is_empty());
+    assert_eq!(super::effective_switch_history(&[], Some(0)), Vec::<i64>::new());
+    assert_eq!(super::effective_switch_history(&[1, 2], Some(9999)), vec![1, 2],);
+}
+
+#[test]
+fn legacy_preset_json_without_switch_history_deserializes() {
+    let raw = serde_json::json!({
+        "id": "legacy", "name": "legacy", "saved_at": 1,
+        "base_url": "https://example.test/v1", "api_key": "fixture",
+        "switch_count": 7, "last_switch_at": 1700000000000i64,
+    });
+    let preset: super::StoredApiPreset = serde_json::from_value(raw).unwrap();
+    assert_eq!(preset.switch_count, 7);
+    assert!(preset.switch_history.is_empty());
+    assert_eq!(
+        super::effective_switch_history(&preset.switch_history, preset.last_switch_at),
+        vec![1700000000000i64],
+    );
+    // 空历史不序列化，未触碰的账号文件保持字节稳定。
+    let saved = serde_json::to_value(&preset).unwrap();
+    assert!(saved.get("switch_history").is_none());
 }

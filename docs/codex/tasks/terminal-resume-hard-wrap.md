@@ -43,3 +43,27 @@ for test_file in tests/*.test.mjs; do node "$test_file" || exit 1; done
 - Codex/Claude 说明文字的 UUID 上下文扫描遇到 `devin -r` / `devin --resume` 即停止，不借用其后的 UUID；后端 `extract_resume_info_from_text` 对 Devin 走直接参数分支（要求 slug 与命令同行），同样不借下游 UUID。
 - 未加命令标签的裸 slug 仍按既有逻辑解释为 Codex resume id，不做 Devin 推断。
 - 入口资源版本：`terminal-resume-extract.js?v=20261007-devin`。
+
+## 恢复后自动发送“继续”
+
+- `Ctrl+Alt+R`（`extract_resume`）发送恢复命令后，等 Agent 真正接管 pane 再调用
+  `POST /api/terminal/sessions/{id}/continue`；该接口走语义 Enter 路径，并同步记录
+  auto-continue 冷却时间（会让紧随其后的错误自动继续至少延后一个间隔，这是预期行为）。
+- 就绪判断（`static/terminal-resume-ready.js`，纯文本、无副作用）同时满足三条才算加载完成：
+  - 新出现的启动标记：以发送前的尾部文本为基线，比较标记行数量。Codex 用 `›` 输入行，
+    Claude 用 `Claude Code` 横幅或 `? for shortcuts` 页脚，AGY 用 `? for shortcuts`。
+    只比对数量增量，避免把中断前的旧 TUI 残留当成新启动。
+  - 不在回合中：尾部 8 行内出现 `esc to interrupt)`、`esc to cancel` 或
+    `Thinking…`/`Working…` 等忙碌行时继续等待。
+  - 画面静默：标记出现后尾部文本需稳定 900ms（`RESUME_READY_SETTLE_MS`）才发送，
+    防止 TUI 还在重绘历史时把输入塞进编辑器。
+- 兜底：`RESUME_READY_TIMEOUT_MS` 30 秒内未确认则不发“继续”，只提示未确认加载完成；
+  命令回显后 8 秒仍停在 shell 提示符（恢复根本没启动）时提前结束等待。Devin 没有稳定就绪标记，
+  一律不自动继续。
+- 未确认就绪时绝不发送：宁可少发一次，也不能把“继续”打进 shell 或半初始化的 TUI。
+- 等待过程不占用 `mobileKeySendQueue`（软键盘输入保持可用）；同一终端的后一次恢复会取代前一次等待，
+  连按两次快捷键只会在最后确认就绪后发送一次“继续”。
+- 入口资源版本：`terminal-resume-ready.js?v=20261021resumecontinue`、
+  `terminal-resume-agent.js?v=20261021resumecontinue`。
+- 回归：`node tests/terminal-resume-ready.test.mjs`（含端到端接线）、
+  `node tests/terminal-resume-extract.test.mjs`、`node tests/terminal-ime-policy.test.mjs`。

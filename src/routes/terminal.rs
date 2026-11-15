@@ -49,7 +49,19 @@ pub(super) fn routes() -> Router<AppState> {
             "/api/terminal/sessions/{session_id}/close",
             post(terminal::close_session).delete(terminal::close_session),
         )
+        .route(
+            "/api/terminal/sessions/{session_id}/slash-command",
+            post(terminal::send_session_slash_command),
+        )
         .route("/api/terminal/sessions/{session_id}/group", put(terminal::update_session_group))
+        .route(
+            "/api/terminal/auto-compact-settings",
+            get(terminal::get_auto_compact_settings).post(terminal::update_auto_compact_settings),
+        )
+        .route(
+            "/api/terminal/sessions/{session_id}/auto-compact",
+            post(terminal::set_session_auto_compact),
+        )
         .route("/api/terminal/sessions/{session_id}/input", post(terminal::send_session_input))
         .route("/api/terminal/sessions/{session_id}/enter", post(terminal::send_session_enter))
         .route(
@@ -61,12 +73,24 @@ pub(super) fn routes() -> Router<AppState> {
             post(terminal::send_session_continue),
         )
         .route(
+            "/api/terminal/sessions/{session_id}/recover-balance",
+            post(terminal::recover_session_balance),
+        )
+        .route(
             "/api/terminal/sessions/{session_id}/auto-continue",
             post(terminal::send_session_auto_continue),
         )
         .route(
             "/api/terminal/sessions/{session_id}/input-history",
-            get(terminal::get_session_input_history),
+            get(terminal::get_session_input_history).delete(terminal::clear_session_input_history),
+        )
+        .route(
+            "/api/terminal/sessions/{session_id}/terminal-messages",
+            delete(terminal::clear_session_terminal_messages),
+        )
+        .route(
+            "/api/terminal/sessions/{session_id}/compile-notifications",
+            delete(terminal::clear_session_compile_notifications),
         )
         .route(
             "/api/terminal/sessions/{session_id}/message-delivery",

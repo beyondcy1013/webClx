@@ -28,6 +28,9 @@ async function loadTerminalSettings() {
     state.terminalNewSessionBehavior = WebClxNewTerminal.normalizeBehavior(
       settings.terminal_new_session_behavior,
     );
+    state.terminalAccountSort = normalizeTerminalAccountSort(
+      settings.terminal_account_sort,
+    );
     state.terminalWorkspaceIconPath = normalizeProjectIconPath(
       settings.terminal_workspace_icon_path,
       DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,

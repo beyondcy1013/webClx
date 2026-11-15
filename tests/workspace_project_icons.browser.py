@@ -185,7 +185,59 @@ def test_workspace_icon_select_escapes_scrolling_toolbar() -> None:
         browser.close()
 
 
+def test_terminal_role_icons_and_group_status_spacing() -> None:
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=os.environ.get("WEBCLX_TEST_CHROMIUM", shutil.which("chromium") or "/home/third_party/browser-tools/bin/chromium"),
+            headless=True,
+        )
+        try:
+            for width in (375, 1280):
+                page = browser.new_page(viewport={"width": width, "height": 720})
+                page.route(
+                    "http://icons.test/**",
+                    lambda route: route.fulfill(status=200, content_type="text/html", body="<html><body></body></html>"),
+                )
+                page.goto("http://icons.test/")
+                page.set_content(
+                    """
+                    <select id="sessions" aria-label="切换当前终端">
+                      <option value="super" data-group-role="super_admin" data-group-name="协作组">[工作中] 监督终端</option>
+                      <option value="manager" data-group-role="manager" data-group-name="协作组">[协作组][工作中] 管理终端</option>
+                      <option value="executor" data-group-role="executor" data-group-name="协作组" selected>[协作组] [工作中] 执行终端</option>
+                      <option value="reviewer" data-group-role="reviewer" data-group-name="协作组">[工作中] 复核终端</option>
+                      <option value="solo">[空闲] 独立终端</option>
+                    </select>
+                    """
+                )
+                page.add_style_tag(path=ROOT / "static/styles-base.css")
+                page.add_script_tag(path=ROOT / "static/workspace-project-icons.js")
+                page.evaluate("""() => WebClxWorkspaceProjectIcons.enhanceWorkspaceIconSelect(
+                    document.querySelector('#sessions'), () => 'static/favicon.svg')""")
+                trigger = page.get_by_role("button", name="切换当前终端")
+                assert trigger.locator(".terminal-role-emoji").inner_text() == "🚀"
+                assert trigger.locator(".workspace-icon-select-text").inner_text() == "[协作组] [工作中] 执行终端"
+                assert trigger.locator(".terminal-role-emoji + .workspace-project-icon + .workspace-icon-select-text").count() == 1
+                trigger.click()
+                assert page.locator(".workspace-icon-select-option .terminal-role-emoji").all_inner_texts() == ["👑", "🔱", "🚀", "🔍"]
+                assert page.locator(".workspace-icon-select-option .workspace-icon-select-text").all_inner_texts() == [
+                    "[协作组] [工作中] 监督终端",
+                    "[协作组] [工作中] 管理终端",
+                    "[协作组] [工作中] 执行终端",
+                    "[协作组] [工作中] 复核终端",
+                    "[空闲] 独立终端",
+                ]
+                page.get_by_role("option", name="[协作组] [工作中] 管理终端").click()
+                assert trigger.locator(".terminal-role-emoji").inner_text() == "🔱"
+                assert trigger.locator(".workspace-icon-select-text").inner_text() == "[协作组] [工作中] 管理终端"
+                assert page.locator("#sessions").input_value() == "manager"
+                page.close()
+        finally:
+            browser.close()
+
+
 if __name__ == "__main__":
     test_workspace_icon_select_interaction()
     test_workspace_icon_select_escapes_scrolling_toolbar()
+    test_terminal_role_icons_and_group_status_spacing()
     print("workspace project icon browser test passed")

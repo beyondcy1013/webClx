@@ -10,9 +10,11 @@
 | --- | --- | --- |
 | rust | `cargo fmt --all --check`、`cargo check --workspace`、`cargo test --workspace` | 仅在允许直接构建的环境执行；本机走编译队列（见下） |
 | node | `find tests -name '*.test.mjs'` 全部 Node 契约测试 | 每条用 `timeout --signal=KILL` 包裹，单条上限默认 600s |
-| browser | 固定冒烟清单：`terminal-session-switch-focus`、`workspace_project_icons`、`codex_status_compact` | Playwright 自包含（拦截路由 + 本地静态资源），无需真实服务与本机 token |
+| browser | `terminal-session-switch-focus`、`workspace_project_icons`、`codex_status_compact`，以及 `terminal-session-cache` 四类矩阵 | Playwright 自包含（拦截路由 + 本地静态资源），无需真实服务与本机 token |
+| terminal-scroll | 5 项滚动 Node 回归 + `terminal-session-cache` 桌面、触屏、Android DOM、重连矩阵 | 独立专项入口；默认 browser 组复用同一矩阵，部署前必跑 |
 
 - 默认三组全跑；`--node` / `--browser` / `--rust` 单独触发，`--filter SUBSTR` 按路径过滤，`--list` 只打印命令集不执行，`--timeout SECS` 调整单条上限。
+- `--terminal-scroll` 只运行滚动专项（5 项 Node + 4 类浏览器），各场景显式指定移动、渲染和重连标志，不受调用者残留的测试模式影响。浏览器可通过 `WEBCLX_TEST_CHROMIUM` 指定；本机优先使用系统 Chrome，否则使用 Playwright 安装的 Chromium。
 - 命令集确定性：node 按文件名排序、browser 按固定清单顺序，同一提交两次 `--list` 输出一致。
 - 日志与报告：`${WEBCLX_REPO_CHECK_LOG_DIR:-/tmp/webclx-repo-check}/<UTC时间>-<12位提交>[-dirty]/`，含逐条日志、`report.json`、`report.txt`；整体退出码 0 仅当全部通过，失败清单同时打印并列出。
 - 长驻进程测试由 `timeout --signal=KILL` 兜底；进程类测试本身仍须遵守 AGENTS.md 的 kill-on-drop/RAII 与短超时约定。
@@ -45,9 +47,43 @@ bash /home/root/.codex/skills/webclx-compile-and-deploy/scripts/request-webclx-c
 
 - 需要本机 `X-WebClx-Local-Token` 或真实登录：`terminal-session-origin-isolation`、`font_settings_dialog`。
 - 需要真实 tmux/PTY：`terminal-shared-viewport`。
-- 对 live static 具体内容断言、易随运行时漂移：`terminal-session-cache`（当前即红）。
 
 新增冒烟用例先单独跑绿，再写入脚本的 `BROWSER_SMOKE_TESTS`。
+
+## 终端滚动防回归（2026-10-25）
+
+此前 `terminal-session-cache` 没进入默认清单，旧文档仍以历史失败为由将它排除。
+修复和测试存在并不能保证后续改动会执行它。现在统一入口为：
+
+```bash
+bash scripts/repo-check.sh --terminal-scroll --timeout 180
+```
+
+Node 组覆盖 scroll-intent、session-cache、switch-output、layout-scroll-preserve
+和 backlog-replay；四类浏览器逐帧验证无输出切换保留位置、后台输出滚底且前台
+历史不动、持续输出跟随、IME/布局、缓存回收后重放及重连。
+
+`scripts/rebuild-and-deploy.sh` 在构建、安装和重启前执行同一专项，失败即停止；
+静态文件即时可见，前端修改者仍须在提交前运行并核对线上资源身份。
+`.github/workflows/terminal-scroll.yml` 在相关静态资源、测试和检查脚本变更的
+push/PR 上自动运行，失败日志和 JSON 报告保存为 Actions artifact。
+CI 配置提交后须推送才会触发；禁止合并失败 PR 还需远程仓库分支保护将
+`terminal-scroll` 设为 required check，本地文件无法替代远程保护设置。
+
+项目 `AGENTS.md` 明确当前行为合同和先复现再修复要求；不能删失败用例、放宽
+位置断言或引用历史测试来替代当前提交的验证。语义来源见
+[切换位置合同](terminal-session-switch-output.md#cached-switch-preserves-position-2026-10-25)。
+
+2026-10-25 本机验收：统一入口 9/9 通过；在临时静态目录换回 `640b35a^`
+的错误切换逻辑，同一入口 5 项 Node 通过、4 类浏览器全部失败并返回 1，
+证明失败传播至总结果，未修改运行目录。报告分别位于
+`/tmp/webclx-repo-check/20261024T193909Z-8249abe8b940-dirty/` 和
+`/tmp/webclx-scroll-negative-control/20261024T194044Z-8249abe8b940-dirty/`。
+两次 `--list` 命令集一致，默认 browser 入口也包含同一四类矩阵。
+隔离部署控制流验证确认默认调用及 `--skip-build` 都在滚动专项失败后中止，
+没有进入后续 gate、构建或安装。另跑 `rebuild-deploy-static-same-path` 发现其仍
+断言旧的同目录同步分支；当前 HEAD 同样失败，不属于本专项 9 项检查，也未
+将它改为假通过。历史全量检查基线仍应与专项结果区分。
 
 ## 基线记录（2026-09-19，`b082075470d4` dirty）
 

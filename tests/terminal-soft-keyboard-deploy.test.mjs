@@ -74,8 +74,14 @@ assert.match(
 
 assert.match(
   terminalToolsMenu,
-  /id=\"terminal-codex-full-access-toggle\"[\s\S]*?id=\"terminal-quick-command-buttons\"[\s\S]*?id=\"terminal-copy-all\"[\s\S]*?data-action=\"copy_all_text\"/,
-  "terminal tools should contain full access, quick commands, and copy-all in that order",
+  /id=\"terminal-quick-command-buttons\"[\s\S]*?id=\"terminal-copy-all\"[\s\S]*?data-action=\"copy_all_text\"/,
+  "terminal tools should contain quick commands and copy-all in that order",
+);
+
+assert.doesNotMatch(
+  terminalToolsMenu,
+  /id=\"terminal-codex-full-access-toggle\"/,
+  "terminal tools should not contain codex full access toggle",
 );
 
 assert.doesNotMatch(

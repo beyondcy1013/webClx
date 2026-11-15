@@ -4,7 +4,9 @@ let terminalToolExecutionRunning = false;
 let terminalToolMenuTriggerEl = null;
 let terminalToolSearchQuery = "";
 
-const TERMINAL_TOOL_SESSION_READY_TIMEOUT_MS = 15000;
+const TERMINAL_TOOL_SESSION_READY_TIMEOUT_MS = 30000;
+const TERMINAL_TOOL_SESSION_LIVE_PROBE_INTERVAL_MS = 3000;
+const TERMINAL_TOOL_SESSION_LIVE_PROBE_GRACE_MS = 5000;
 const TERMINAL_TOOL_RESUME_TIMEOUT_MS = 30000;
 const TERMINAL_TOOL_RESUME_SCAN_MAX_LINES = 240;
 const LEGACY_WORKFLOW_SESSION_STORAGE_KEY = "webclx:workflow-terminal-sessions";
@@ -627,6 +629,32 @@ function waitForTerminalToolDelay(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+// 只有同时满足「服务端会话列表里没有」且「不在待首次确认的新建集合里」，
+// 才能断定目标终端已被删除。刚创建、尚未出现在任何一次列表响应里的会话
+// 不能据此判定为删除；探测失败同样不能证明会话已消失。
+async function probeTerminalToolSessionMissing(sessionId) {
+  if (typeof requestJson !== "function") {
+    return false;
+  }
+  let sessions = null;
+  try {
+    const response = await requestJson("/api/terminal/sessions?all=true");
+    sessions = Array.isArray(response?.sessions) ? response.sessions : null;
+  } catch {
+    return false;
+  }
+  if (!sessions) {
+    return false;
+  }
+  if (sessions.some((session) => String(session?.id || "") === sessionId)) {
+    return false;
+  }
+  if (typeof state !== "undefined" && state.pendingCreatedSessionIds?.has(sessionId)) {
+    return false;
+  }
+  return true;
+}
+
 async function waitForTerminalToolSessionReady(
   sessionId,
   timeoutMs = TERMINAL_TOOL_SESSION_READY_TIMEOUT_MS,
@@ -636,6 +664,7 @@ async function waitForTerminalToolSessionReady(
     throw new Error("缺少工作流目标终端。");
   }
   const startedAt = Date.now();
+  let nextLiveProbeAt = 0;
   while (true) {
     const context = ensureTerminalSessionCache().get(targetSessionId);
     if (context?.connectionError) {
@@ -652,12 +681,28 @@ async function waitForTerminalToolSessionReady(
     ) {
       return;
     }
-    if (Date.now() - startedAt >= timeoutMs) {
+    const now = Date.now();
+    const elapsed = now - startedAt;
+    if (elapsed >= timeoutMs) {
       const phase = !context ? "等待终端上下文"
         : !terminalContextSocketOpen(context) || context.disconnected ? "等待连接"
         : context.initialReplayPending ? "等待首屏回放开始"
         : "等待首屏回放写入完成";
-      throw new Error(`等待目标终端完成连接和首屏同步超时（${phase}，${Date.now() - startedAt}ms）。`);
+      const detail = [
+        `socket=${context?.socket ? context.socket.readyState : "none"}`,
+        `disconnected=${Boolean(context?.disconnected)}`,
+        `reconnect=${Boolean(context?.reconnectTimer || context?.reconnectDeferred)}`,
+      ].join(", ");
+      throw new Error(`等待目标终端完成连接和首屏同步超时（${phase}，${elapsed}ms；${detail}）。`);
+    }
+    if (now >= nextLiveProbeAt) {
+      nextLiveProbeAt = now + TERMINAL_TOOL_SESSION_LIVE_PROBE_INTERVAL_MS;
+      if (
+        elapsed >= TERMINAL_TOOL_SESSION_LIVE_PROBE_GRACE_MS
+        && await probeTerminalToolSessionMissing(targetSessionId)
+      ) {
+        throw new Error(`目标终端 ${targetSessionId} 已被删除（可能因启动失败被回滚），不再等待连接。`);
+      }
     }
     await waitForTerminalToolDelay(100);
   }
@@ -715,19 +760,27 @@ function waitForTerminalToolResumeCommand(
 
 async function renameTerminalForTool(sessionId, nextName, path = state.currentPath) {
   const targetSessionId = String(sessionId || "").trim();
+  if (!targetSessionId) {
+    throw new Error("缺少需要更名的目标终端 ID。");
+  }
   const session = state.sessions.find((item) => item.id === targetSessionId);
-  if (!session || isIdleSession(session.id)) {
+  if (session && isIdleSession(session.id)) {
     throw new Error("找不到需要更名的目标终端。");
   }
-  const renamed = await requestJson(`/api/terminal/sessions/${encodeURIComponent(session.id)}`, {
+  const targetPath = session?.path || path;
+  const renamed = await requestJson(`/api/terminal/sessions/${encodeURIComponent(targetSessionId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, name: nextName }),
+    body: JSON.stringify({ path: targetPath, name: nextName }),
   });
   announceSessionMutation("renamed", renamed);
-  state.sessions = sortSessionsByRecentActivity(
-    state.sessions.map((item) => item.id === renamed.id ? renamed : item),
-  );
+  if (typeof insertOrReplaceSession === "function") {
+    insertOrReplaceSession(renamed);
+  } else {
+    state.sessions = sortSessionsByRecentActivity(
+      state.sessions.map((item) => (item.id === renamed.id ? renamed : item)),
+    );
+  }
   renderSessions();
   return renamed;
 }

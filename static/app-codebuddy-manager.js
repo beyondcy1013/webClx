@@ -224,9 +224,14 @@
       let ok = false;
       if (result?.ok) {
         ok = true;
+        if (typeof window.recordAccountRefreshed === "function") {
+          window.recordAccountRefreshed("codebuddy", account.id, Number(result.updatedAt) || Date.now());
+        }
         const remaining = Number(result.totalRemaining || 0);
-        const expireText = result.soonestExpireAt
-          ? `，最早 ${new Date(result.soonestExpireAt).toLocaleDateString()} 到期`
+        const pad = (n) => String(n).padStart(2, "0");
+        const expireDate = new Date(result.soonestExpireAt);
+        const expireText = result.soonestExpireAt && !Number.isNaN(expireDate.getTime())
+          ? `，最早 ${pad(expireDate.getMonth() + 1)}-${pad(expireDate.getDate())} 到期`
           : "";
         showStatus(
           `${account.name} 剩余积分 ${Number.isFinite(remaining) ? remaining.toFixed(2) : "0"}${expireText}`,
@@ -279,6 +284,8 @@
     if (!config) return;
     checkinBox.checked = config.auto.checkin !== false;
     travelBox.checked = config.auto.travel !== false;
+    const blockInternationalBox = el("codebuddy-auto-block-international");
+    if (blockInternationalBox) blockInternationalBox.checked = config.auto.blockInternationalAutoSwitch !== false;
     const summaryText = `${config.accountCount} 个账号 · 签到 ${relativeRunText(config.lastCheckinRunMs)}`
       + ` · 旅行 ${relativeRunText(config.lastTravelRunMs)}`
       + ` · 积分 ${relativeRunText(config.lastCreditsRunMs)}`;
@@ -302,11 +309,13 @@
   async function refreshCliOptions() {
     const bypassBox = el("codebuddy-option-bypass");
     const sandboxBox = el("codebuddy-option-sandbox");
-    if (!bypassBox && !sandboxBox) return;
+    const fingerprintBox = el("codebuddy-option-device-fingerprint");
+    if (!bypassBox && !sandboxBox && !fingerprintBox) return;
     try {
       const response = await requestJson("/api/auth/codebuddy-options");
       if (bypassBox) bypassBox.checked = response?.bypassPermissions === true;
       if (sandboxBox) sandboxBox.checked = response?.sandbox === true;
+      if (fingerprintBox) fingerprintBox.checked = response?.deviceFingerprint !== false;
     } catch {
       // 读取失败时保留当前勾选状态。
     }
@@ -315,14 +324,16 @@
   async function saveCliOptions() {
     const bypassBox = el("codebuddy-option-bypass");
     const sandboxBox = el("codebuddy-option-sandbox");
-    if (!bypassBox && !sandboxBox) return;
+    const fingerprintBox = el("codebuddy-option-device-fingerprint");
+    if (!bypassBox && !sandboxBox && !fingerprintBox) return;
     const bypassPermissions = bypassBox?.checked === true;
     const sandbox = sandboxBox?.checked === true;
+    const deviceFingerprint = fingerprintBox ? fingerprintBox.checked : true;
     try {
       await requestJson("/api/auth/codebuddy-options", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bypassPermissions, sandbox }),
+        body: JSON.stringify({ bypassPermissions, sandbox, deviceFingerprint }),
       });
       const bypassText = bypassPermissions
         ? "已开启最高权限：CodeBuddy 新会话默认 bypassPermissions，不再询问"
@@ -330,7 +341,10 @@
       const sandboxText = sandbox
         ? "已开启危险也不问：CODEBUDDY_IS_SANDBOX=1（已写入 ~/.bashrc，新终端会话生效）"
         : "已关闭危险也不问：已从 ~/.bashrc 移除导出";
-      showStatus(`${bypassText}；${sandboxText}。`, "ok");
+      const fingerprintText = deviceFingerprint
+        ? "已开启设备指纹隔离：切换账号自动轮换独立机器码与防检测头"
+        : "已关闭设备指纹隔离";
+      showStatus(`${bypassText}；${sandboxText}；${fingerprintText}。`, "ok");
     } catch (error) {
       showStatus(error.message || "保存 CodeBuddy 选项失败。", "warn");
       await refreshCliOptions();
@@ -340,13 +354,14 @@
   async function saveAutoConfig() {
     const checkin = el("codebuddy-auto-checkin")?.checked === true;
     const travel = el("codebuddy-auto-travel")?.checked === true;
+    const blockInternationalAutoSwitch = el("codebuddy-auto-block-international")?.checked !== false;
     try {
       await requestJson("/api/auth/codebuddy-auto", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ checkin, travel }),
+        body: JSON.stringify({ checkin, travel, blockInternationalAutoSwitch }),
       });
-      showStatus(`已保存自动任务：签到${checkin ? "开" : "关"} / 旅行${travel ? "开" : "关"}`, "ok");
+      showStatus(`已保存自动任务：签到${checkin ? "开" : "关"} / 旅行${travel ? "开" : "关"}；${blockInternationalAutoSwitch ? "已禁止" : "已允许"}自动切换到国际版账号。`, "ok");
       await refreshAutoBar();
     } catch (error) {
       showStatus(error.message || "保存自动任务失败。", "warn");
@@ -464,12 +479,17 @@
         return true;
       }
     } catch { /* use textarea fallback */ }
+    const openDialogs = document.querySelectorAll("dialog[open]");
+    const container = openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : document.body;
     const area = document.createElement("textarea");
     area.value = text;
-    area.style.cssText = "position:fixed;left:-9999px;top:0";
-    document.body.appendChild(area);
-    area.focus();
+    area.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;";
+    container.appendChild(area);
+    area.focus({ preventScroll: true });
     area.select();
+    if (typeof area.setSelectionRange === "function") {
+      area.setSelectionRange(0, area.value.length);
+    }
     try {
       return Boolean(document.execCommand?.("copy"));
     } finally {
@@ -547,8 +567,10 @@
     el("codebuddy-export-clipboard")?.addEventListener("click", exportAccountsClipboard);
     el("codebuddy-auto-checkin")?.addEventListener("change", saveAutoConfig);
     el("codebuddy-auto-travel")?.addEventListener("change", saveAutoConfig);
+    el("codebuddy-auto-block-international")?.addEventListener("change", saveAutoConfig);
     el("codebuddy-option-bypass")?.addEventListener("change", saveCliOptions);
     el("codebuddy-option-sandbox")?.addEventListener("change", saveCliOptions);
+    el("codebuddy-option-device-fingerprint")?.addEventListener("change", saveCliOptions);
     el("codebuddy-run-checkin")?.addEventListener("click", () => {
       WebClxCodeBuddyManager.runAllCheckin();
     });

@@ -58,6 +58,7 @@
     "任务": "Tasks",
     "构建": "Build",
     "智能体": "Agents",
+    "大模型类型": "Model type",
     "网络": "Network",
     "维护": "Maintenance",
     "菜单": "Menu",
@@ -233,6 +234,9 @@
     "已选 ${count} 个目标": "${count} targets selected",
     "对话历史": "Conversation history",
     "本终端对话历史": "Terminal conversation history",
+    "删除终端消息": "Delete Terminal Messages",
+    "终端消息": "Terminal Message",
+    "清除所有对话史": "Clear All History",
     "扫描选项": "Scan options",
     "显示隐藏目录": "Show hidden directories",
     "新建文档": "New document",
@@ -334,7 +338,32 @@
     applying = false;
   }
 
+  function isAndroid() {
+    return /Android/i.test(navigator.userAgent || "") || typeof window.WebClxAndroid === "object";
+  }
+
   function addLanguageControl() {
+    if (isAndroid()) {
+      // Existing choices also count: Android never keeps a floating language control.
+      if (localStorage.getItem(STORAGE_KEY)) return;
+      if (document.getElementById("webclx-language-welcome")) return;
+      const dialog = document.createElement("dialog");
+      dialog.id = "webclx-language-welcome";
+      dialog.className = "webclx-language-welcome";
+      dialog.setAttribute("aria-labelledby", "webclx-language-welcome-title");
+      dialog.innerHTML = '<h2 id="webclx-language-welcome-title">选择语言 / Choose language</h2><p>选择后将自动记住 / Your choice will be saved</p><div><button type="button" data-locale="zh-CN" lang="zh-CN">使用中文</button><button type="button" data-locale="en" lang="en">Use English</button></div>';
+      dialog.querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => {
+          setLocale(button.dataset.locale);
+          dialog.close();
+          dialog.remove();
+        });
+      });
+      document.body.append(dialog);
+      dialog.showModal();
+      return;
+    }
+
     if (document.getElementById("webclx-language-control")) return;
     const label = document.createElement("label");
     label.id = "webclx-language-control";

@@ -831,6 +831,14 @@
   white-space: nowrap;
 }
 
+:is(#agy-view, #api-view) .agy-col-last-switch,
+:is(#agy-view, #api-view) .agy-last-switch-cell {
+  width: 1%;
+  min-width: 170px;
+  padding-inline: 6px;
+  white-space: nowrap;
+}
+
 :is(#agy-view, #api-view) .agy-actions {
   display: flex;
   align-items: center;
@@ -1764,6 +1772,16 @@
   border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.08));
 }
 
+.llm-usage-window-bar #account-usage-window {
+  width: auto;
+  min-width: 170px;
+  padding: 6px 10px;
+}
+
+.llm-usage-window-bar .field-help {
+  margin: 0;
+}
+
 .subtab-options-actions {
   display: inline-flex;
   flex-wrap: wrap;
@@ -1855,6 +1873,26 @@
 }
 
 /* 用量窗口列：与 sub2api 账号表格一致的多行紧凑展示 */
+.codex-account-table .codex-account-refreshed-column {
+  white-space: nowrap;
+}
+
+.codex-account-table .codex-account-refreshed-cell {
+  font-size: 0.78rem;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.codex-account-table .codex-account-last-switch-column {
+  white-space: nowrap;
+}
+
+.codex-account-table .codex-account-last-switch-cell {
+  font-size: 0.78rem;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
 .codex-account-table .usage-window-cell {
   font-size: 0.75rem;
   white-space: nowrap;
@@ -2333,3 +2371,86 @@
     column-gap: 8px;
   }
 }
+
+/* LLM_API: compact agent navigation and progressive disclosure on touch screens. */
+#api-view .account-type-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft, rgba(128, 128, 128, .06));
+}
+#api-view .account-type-tab {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 10px 8px;
+  border: 0;
+  border-radius: 8px;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+}
+#api-view .account-type-tab.active {
+  color: var(--accent-strong);
+  background: var(--panel, #fff);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .12);
+  font-weight: 650;
+}
+#api-view details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 10px 0;
+  min-height: 40px;
+  box-sizing: border-box;
+}
+#api-view details > summary:focus-visible,
+#api-view .account-type-tab:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+#api-view .llm-more-actions { margin-left: auto; }
+#api-view .llm-more-actions[open] { flex-basis: 100%; }
+#api-view .llm-more-actions > summary { text-align: right; }
+#api-view .llm-more-actions .toolbar { padding: 8px 0; }
+#api-view .subtab-options-bar { margin: 6px 0; padding: 8px 10px; gap: 6px 12px; border-color: var(--line); }
+#api-view .llm-login-details { flex-basis: 100%; }
+#api-view .llm-login-details > summary { padding-block: 6px; min-height: 32px; }
+#api-view #native-login-status { margin: 2px 0 6px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+#api-view .llm-permission-options { flex-basis: 100%; }
+#api-view .llm-permission-options .subtab-options-switches { padding: 4px 0 8px; }
+#api-view .subtab-options-meta:has(> :only-child:empty) { display: none; }
+@media (max-width: 640px) {
+  #api-view { min-width: 0; }
+  #api-view .codex-account-list-card { padding: 8px; }
+  #api-view .codex-account-list-card > .panel-head { align-items: center; flex-direction: row; flex-wrap: wrap; margin: 0; }
+  #api-view .codex-account-list-card > .panel-head .section-label { display: none; }
+  #api-view .codex-account-list-card > .panel-head h2 { font-size: 17px; margin: 0; }
+  #api-view .account-type-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 8px 0; }
+  #api-view .account-type-tab { width: 100%; padding: 10px 2px; font-size: 11px; }
+  #api-view .subtab-options-actions,
+  #api-view .llm-more-actions .toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; gap: 6px; }
+  #api-view .subtab-options-actions .button,
+  #api-view .llm-more-actions .button { width: 100%; min-width: 0; min-height: 40px; padding: 8px; font-size: 12px; line-height: 1.4; white-space: normal; border-radius: 8px; }
+  #api-view #native-login-backup .subtab-options-actions > .button:not([hidden]):first-child { grid-column: 1 / -1; }
+  #api-view .subtab-options-switches,
+  #api-view .llm-global-codex-options { display: flex; flex-direction: column; align-items: stretch; gap: 4px; }
+  #api-view .subtab-options-toggle { min-height: 40px; line-height: 1.5; }
+  #api-view .subtab-options-meta { flex-wrap: wrap; margin-left: 0; max-width: 100%; }
+  #api-view .llm-global-options-note:empty { display: none; }
+  #api-view .inline-status { overflow-wrap: anywhere; }
+}
+#api-view .llm-advanced-oauth { margin-top: 8px; }
+#api-view .llm-advanced-oauth .panel-head { flex-wrap: wrap; }
+#api-view .llm-advanced-oauth .toolbar { flex-wrap: wrap; }
+#api-view .llm-advanced-oauth .table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; }
+#api-view .llm-advanced-oauth[hidden],
+#api-view .subtab-options-bar [hidden] { display: none !important; }
+@media (max-width: 640px) {
+  #api-view .llm-advanced-oauth .toolbar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  #api-view .llm-advanced-oauth .button { min-width: 0; white-space: normal; min-height: 40px; }
+}
+#api-view .llm-tab-tools { width: 100%; min-width: 0; }
+#api-view .llm-tab-tools > .subtab-options-actions { margin-bottom: 6px; }
+#api-view .llm-tab-tools > .subtab-options-meta { margin-top: 6px; }

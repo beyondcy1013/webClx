@@ -211,6 +211,78 @@ function extractLatestResumeCommand(bufferText) {
   return id ? resumeCommandFromId(id, program) : "";
 }
 
+const TERMINAL_RESUME_SHELL_RETURN_GRACE_MS = 8000;
+
+// Wait until the resumed agent really owns the pane. The resume marker must be
+// fresh relative to the screen captured before the command was injected, the
+// agent must not be in a live turn, and the pane must have stopped changing for
+// the settle window. A shell prompt that persists after the command echo means
+// the resume never started, so the wait ends early instead of burning the full
+// timeout. Returning false is the default for anything ambiguous: never send
+// "继续" into a pane whose state we cannot prove.
+function waitForTerminalResumeReady(context, kind, baselineTail) {
+  const readiness = globalThis.WebClxTerminalResumeReady;
+  if (!readiness || !kind || !context?.term) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let previousTail = baselineTail;
+    let stableSince = Date.now();
+    let settled = false;
+    let timerId = null;
+    const finish = (ready) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearInterval(timerId);
+      resolve(ready);
+    };
+    const inspect = () => {
+      const tail = readTerminalBufferTailTextFrom(context.term, readiness.RESUME_SCAN_LINES);
+      const now = Date.now();
+      if (tail !== previousTail) {
+        previousTail = tail;
+        stableSince = now;
+      }
+      const stableFor = now - stableSince;
+      const advanced = tail !== baselineTail;
+      if (!readiness.terminalResumeAgentReady(kind, tail, baselineTail)) {
+        if (advanced && stableFor >= TERMINAL_RESUME_SHELL_RETURN_GRACE_MS && readiness.terminalResumeShellReturned(tail)) {
+          finish(false);
+        }
+        return;
+      }
+      if (readiness.terminalResumeAgentWorking(tail)) {
+        stableSince = now;
+        return;
+      }
+      if (stableFor >= readiness.RESUME_READY_SETTLE_MS) {
+        finish(true);
+      }
+    };
+    timerId = globalThis.setInterval(() => {
+      if (Date.now() - startedAt >= readiness.RESUME_READY_TIMEOUT_MS) {
+        finish(false);
+        return;
+      }
+      inspect();
+    }, readiness.RESUME_READY_POLL_MS);
+    inspect();
+  });
+}
+
+async function sendTerminalResumeContinue(sessionId) {
+  try {
+    await requestJson(`/api/terminal/sessions/${encodeURIComponent(sessionId)}/continue`, {
+      method: "POST",
+    });
+    return true;
+  } catch (error) {
+    console.warn("terminal resume continue failed", error);
+    return false;
+  }
+}
+
 function injectLatestResumeCommand() {
   const command = extractLatestResumeCommand(readTerminalBufferTailText());
   if (!command) {
@@ -222,16 +294,64 @@ function injectLatestResumeCommand() {
     return;
   }
 
+  const sessionId = state.activeSessionId;
+  const sourceContext = activeTerminalContext;
+  const readiness = globalThis.WebClxTerminalResumeReady || null;
+  const kind = readiness?.terminalResumeAgentKind?.(command) || "";
+
+  updateStatus(`已发送：${command} 并执行，等待 Agent 加载完成后发送“继续”。`, "info");
+
   mobileKeySendQueue = mobileKeySendQueue
     .catch(() => {})
     .then(async () => {
       // WebClx 自动注入的 resume 命令 → 走 auto-typed 通道，避免污染
       // "本终端对话历史" 面板。服务端的 `build_terminal_quick_command_input`
       // 已经在串尾自带 `\n`，这里不需要额外的 Enter。
-      await sendTerminalAutoTypedInput(command);
+      const baselineTail = readTerminalBufferTailTextFrom(
+        sourceContext?.term, readiness?.RESUME_SCAN_LINES || 80,
+      );
+      const sent = await sendTerminalAutoTypedInput(command, { sessionId });
+      focusTerminalAfterSoftKeyboardInput();
+      if (!sent) {
+        updateStatus("恢复命令发送失败。", "warn");
+        return;
+      }
+      // The readiness wait must not block mobileKeySendQueue: typing on the soft
+      // keyboard has to stay responsive while the agent boots.
+      terminalResumeContinueWhenReady(sessionId, command, sourceContext, kind, baselineTail);
     });
-  updateStatus(`已发送：${command} 并执行。`, "ok");
-  focusTerminalAfterSoftKeyboardInput();
+}
+
+// Pressing the shortcut twice queues two resume commands; only the newest wait
+// may follow through, otherwise the agent receives two competing "继续" turns.
+const terminalResumeContinueGeneration = new Map();
+
+function terminalResumeContinueWhenReady(sessionId, command, sourceContext, kind, baselineTail) {
+  const generation = (terminalResumeContinueGeneration.get(sessionId) || 0) + 1;
+  terminalResumeContinueGeneration.set(sessionId, generation);
+  const stillCurrent = () => terminalResumeContinueGeneration.get(sessionId) === generation;
+  return waitForTerminalResumeReady(sourceContext, kind, baselineTail)
+    .then(async (ready) => {
+      if (!stillCurrent()) return;
+      if (!ready) {
+        terminalResumeContinueGeneration.delete(sessionId);
+        updateStatus(`已发送：${command}，但未确认 Agent 加载完成，未自动发送“继续”。`, "warn");
+        return;
+      }
+      const continued = await sendTerminalResumeContinue(sessionId);
+      if (!stillCurrent()) return;
+      terminalResumeContinueGeneration.delete(sessionId);
+      updateStatus(
+        continued ? "恢复完成，已发送“继续”。" : "恢复完成，但发送“继续”失败。",
+        continued ? "ok" : "warn",
+      );
+    })
+    .catch((error) => {
+      if (!stillCurrent()) return;
+      terminalResumeContinueGeneration.delete(sessionId);
+      console.warn("terminal resume continue failed", error);
+      updateStatus("恢复后发送“继续”失败。", "warn");
+    });
 }
 function showCopyResumeOverlay(value, { successMessage = `已复制：${value}` } = {}) {
   // Remove any existing overlay
@@ -338,8 +458,94 @@ async function copyCurrentTerminalName() {
   }
 }
 
-function buildSessionQuestionPrompt(sessionId) {
-  return `调用codex db维护skill读取session id为 ${String(sessionId || "").trim()}并接受指令：`;
+function resolveSessionAgentType(detected, sessionId = null, context = null) {
+  let candidate = String(
+    (typeof detected === "object" && detected !== null)
+      ? (detected.program || detected.agent || "")
+      : (detected || "")
+  ).trim().toLowerCase();
+  if (candidate === "cdx") candidate = "codex";
+
+  // 如果已经明确检测为非 codex 智能体（如 agy, claude, codebuddy, devin 等），直接返回
+  if (candidate && candidate !== "codex") {
+    return candidate;
+  }
+
+  // 检查 detected.command 是否含有特征
+  const command = String(detected?.command || "").toLowerCase();
+  if (command.includes("agy") || command.includes("antigravity")) {
+    return "agy";
+  }
+  if (command.includes("claude")) {
+    return "claude";
+  }
+  if (command.includes("codebuddy")) {
+    return "codebuddy";
+  }
+  if (command.includes("devin")) {
+    return "devin";
+  }
+
+  // 检查终端名称（session.name）及当前终端对象
+  const targetId = String(sessionId || detected?.sessionId || state?.activeSessionId || "").trim();
+  const session = (Array.isArray(state?.sessions) ? state.sessions.find((s) => s.id === targetId) : null)
+    || (typeof activeSession === "function" ? activeSession() : null);
+
+  if (session) {
+    const sessionName = String(session.name || "").toLowerCase();
+    const sessionCommand = String(session.command || "").toLowerCase();
+    if (
+      sessionName.includes("agy") ||
+      sessionName.includes("antigravity") ||
+      sessionCommand.includes("agy ") ||
+      sessionCommand.includes("antigravity")
+    ) {
+      return "agy";
+    }
+    if (sessionName.includes("claude") || sessionCommand.includes("claude")) {
+      return "claude";
+    }
+    if (sessionName.includes("codebuddy") || sessionCommand.includes("codebuddy")) {
+      return "codebuddy";
+    }
+    if (sessionName.includes("devin") || sessionCommand.includes("devin")) {
+      return "devin";
+    }
+  }
+
+  // 检查终端输出缓冲区
+  const term = context?.term || activeTerminalContext?.term;
+  if (term && typeof readTerminalBufferTailTextFrom === "function") {
+    const tailText = readTerminalBufferTailTextFrom(term, 80);
+    if (/(\bagy\b|antigravity|Google Deepmind)/i.test(tailText)) {
+      return "agy";
+    }
+    if (/(\bclaude\b|Anthropic)/i.test(tailText)) {
+      return "claude";
+    }
+  }
+
+  return candidate || "codex";
+}
+
+function buildSessionQuestionPrompt(sessionId, agentType = "") {
+  let id = "";
+  let agent = "";
+  if (sessionId && typeof sessionId === "object") {
+    id = String(sessionId.resumeId || sessionId.id || "").trim();
+    agent = String(agentType || sessionId.program || sessionId.agent || "").trim();
+  } else {
+    id = String(sessionId || "").trim();
+    agent = String(agentType || "").trim();
+  }
+
+  const resolved = resolveSessionAgentType(
+    agent ? { program: agent } : { program: "codex" },
+    state?.activeSessionId,
+    activeTerminalContext,
+  );
+  const normalizedAgent = (resolved === "cdx" ? "codex" : resolved) || "codex";
+  return `调用codex db维护skill读取${normalizedAgent} session id为 ${id}并接受指令：`;
 }
 
 async function copyCurrentSessionIdAndAsk() {
@@ -363,7 +569,8 @@ async function copyCurrentSessionIdAndAsk() {
       return;
     }
 
-    const prompt = buildSessionQuestionPrompt(detected.resumeId);
+    const agentType = resolveSessionAgentType(detected, sourceSessionId, sourceContext);
+    const prompt = buildSessionQuestionPrompt(detected.resumeId, agentType);
     const copied = await copyTextToClipboard(prompt);
 
     updateStatus(

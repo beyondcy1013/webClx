@@ -139,6 +139,8 @@ body {
 }
 
 html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
   background-color: var(--bg);
   /* 预留滚动条槽位：切换页签/子页签导致页面高度跨越视口时，
      滚动条出现或消失不再挤压内容造成整页横向位移。 */
@@ -1552,6 +1554,7 @@ h2:has(+ .card-desc),
 
 .workspace-icon-select-text {
   min-width: 0;
+  padding-left: 4px;
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;
@@ -1882,20 +1885,110 @@ h2:has(+ .card-desc),
   box-shadow: inset 0 0 0 1px var(--line);
 }
 
+#terminal-group-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-width: 760px;
+}
+
 #terminal-group-dialog .terminal-rename-dialog-form {
-  height: min(64vh, 700px);
-  grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto auto auto;
+  height: min(68vh, 740px);
+  grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr) auto auto auto;
+}
+
+.terminal-group-join-row {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.terminal-group-join-option {
+  display: grid;
+  gap: 4px;
+}
+
+.terminal-group-join-option span {
+  font-size: 0.86rem;
+  line-height: 1.2;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.terminal-group-join-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.terminal-group-join-control select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  line-height: 34px;
+  font-size: 0.88rem;
+  box-sizing: border-box;
+}
+
+.terminal-group-join-button,
+.terminal-group-rename-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  padding: 6px 14px;
+  font-size: 0.86rem;
+}
+
+.terminal-group-join-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 /* 窄屏下固定高度会把会话列表挤没，改为自适应并保留列表充足最小高度。 */
 @media (max-width: 640px) {
+  #terminal-group-dialog {
+    width: calc(100vw - 16px);
+  }
+
+  .terminal-group-join-control {
+    flex-wrap: wrap;
+  }
+
   #terminal-group-dialog .terminal-rename-dialog-form {
     height: auto;
     max-height: min(80vh, 700px);
+    padding: 12px;
+    gap: 10px;
   }
 
   #terminal-group-dialog .terminal-group-session-list {
     min-height: 140px;
+  }
+
+  .terminal-group-session-option {
+    gap: 6px;
+    padding: 5px 6px;
+    font-size: 0.86rem;
+  }
+
+  .terminal-group-role-select,
+  .terminal-group-role-trigger {
+    min-width: 74px;
+    font-size: 0.8rem;
+    padding: 2px 4px;
+  }
+
+  .terminal-group-session-option .terminal-group-session-rename {
+    padding: 2px 6px;
+    font-size: 0.74rem;
+  }
+
+  .terminal-group-session-agent {
+    min-width: 52px;
+    font-size: 0.7rem;
+    padding: 1px 4px;
   }
 }
 
@@ -1977,6 +2070,27 @@ h2:has(+ .card-desc),
   margin: 0;
 }
 
+.terminal-group-role-picker {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.terminal-group-role-native-select {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .terminal-group-role-select {
   flex: 0 0 auto;
   width: auto;
@@ -1987,6 +2101,115 @@ h2:has(+ .card-desc),
   background: var(--background);
   color: var(--text);
   font-size: 0.84rem;
+}
+
+.terminal-group-role-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 84px;
+  min-height: 26px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--text);
+  font-size: 0.84rem;
+  line-height: 1.4;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.terminal-group-role-trigger:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.terminal-group-role-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.terminal-group-role-trigger.is-open {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.terminal-group-role-trigger-label {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.terminal-group-role-trigger-arrow {
+  flex: 0 0 auto;
+  width: 10px;
+  height: 6px;
+  display: inline-block;
+  vertical-align: middle;
+  color: var(--muted);
+  transition: transform 0.2s ease, color 0.15s ease;
+  pointer-events: none;
+}
+
+.terminal-group-role-trigger:hover:not(:disabled) .terminal-group-role-trigger-arrow {
+  color: var(--text);
+}
+
+.terminal-group-role-trigger.is-open .terminal-group-role-trigger-arrow {
+  transform: rotate(180deg);
+  color: var(--accent);
+}
+
+.terminal-group-role-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  border-color: var(--border);
+}
+
+.terminal-group-role-menu {
+  position: fixed;
+  z-index: 1200;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 90px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-strong, var(--background));
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.terminal-group-role-menu[hidden] {
+  display: none !important;
+}
+
+.terminal-group-role-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.82rem;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.12s ease;
+}
+
+.terminal-group-role-option:hover {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.terminal-group-role-option.is-selected {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .terminal-group-session-option.is-manager {
@@ -2011,19 +2234,84 @@ h2:has(+ .card-desc),
   min-width: 0;
 }
 
+.terminal-group-session-agent {
+  flex: 0 0 auto;
+  min-width: 62px;
+  text-align: center;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  padding: 1px 6px;
+  border-radius: 4px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.terminal-group-session-agent[data-agent="Shell"],
+.terminal-group-session-agent[data-agent="-"] {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--text) 5%, transparent);
+  border-color: var(--border);
+}
+
 .terminal-group-session-name {
   flex: 1 1 auto;
   min-width: 0;
+  line-height: 1.38;
+  word-break: break-all;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.terminal-group-current-badge {
+  flex: 0 0 auto;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  padding: 1px 5px;
+  border-radius: 4px;
+  line-height: 1.3;
 }
 
 .terminal-group-session-marker {
   flex: 0 0 auto;
-  color: var(--accent);
-  font-size: 0.78rem;
-  font-weight: 700;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  border: 1px solid var(--border);
+  line-height: 1.3;
+}
+
+.terminal-group-session-marker.is-other-group {
+  color: var(--badge-group-color, var(--accent));
+  background: color-mix(in srgb, var(--badge-group-color, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--badge-group-color, var(--accent)) 30%, transparent);
+  cursor: pointer;
+  user-select: none;
+  transition: opacity 0.15s, transform 0.1s;
+}
+
+.terminal-group-session-marker.is-other-group:hover {
+  opacity: 0.85;
+  transform: translateY(-1px);
+}
+
+.terminal-group-session-option .terminal-group-session-quick-join {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  white-space: nowrap;
 }
 
 .workspace-icon-select-group-marker {
@@ -3068,4 +3356,28 @@ body.is-resizing-table-column {
 /* LLM_API 账号类型仍是统一列表内的二级导航，必须保持可见。 */
 .account-type-tabs {
   display: inline-flex;
+}
+
+/* Android language onboarding appears once; no persistent overlay control. */
+.webclx-language-welcome {
+  width: min(340px, calc(100vw - 40px));
+  box-sizing: border-box;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 20px;
+  color: var(--text);
+  background: var(--panel);
+}
+.webclx-language-welcome::backdrop { background: rgba(0, 0, 0, .45); }
+.webclx-language-welcome h2 { font-size: 17px; margin: 0 0 12px; }
+.webclx-language-welcome p { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.webclx-language-welcome > div { display: grid; gap: 10px; margin-top: 18px; }
+.webclx-language-welcome button {
+  min-height: 44px;
+  border: 1px solid var(--field-border);
+  border-radius: 8px;
+  background: var(--field-bg);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
 }

@@ -412,7 +412,7 @@ assert.match(
 
 assert.match(
   terminalManagerRs,
-  /fn collect_session_activity_probes\([\s\S]*let agent_detector = TerminalAgentDetector::new\(\);[\s\S]*let agent_activity = agent_detector\.detect\(&session_id\);[\s\S]*TerminalActivityProbe \{[\s\S]*agent_activity,[\s\S]*fn terminal_activity_snapshot_from_probe_locked\([\s\S]*let activity_agent = probe[\s\S]*\.then\(\|\| probe\.agent_activity\.agents\.join\("\/"\)\);/,
+  /fn collect_session_activity_probes\([\s\S]*let agent_detector = TerminalAgentDetector::new\(\);[\s\S]*let agent_activity = agent_detector\.detect\(&session_id\);[\s\S]*TerminalActivityProbe \{[\s\S]*agent_activity,[\s\S]*fn terminal_activity_snapshot_from_probe_locked\([\s\S]*let activity_agent = probe[\s\S]*\.then\(\|\| probe\.agent_activity\.agents\.join\("\/"\)\)/,
   "backend activity should detect running program names before state-specific activity decisions",
 );
 

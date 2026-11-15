@@ -69,6 +69,44 @@ xterm focus; when it is open they leave the focus unchanged.
 
 ## Verification
 
+### 2026-10-25 Android soft-key IME recurrence
+
+The no-refocus rule alone did not cover all native IME triggers.
+`syncTerminalImePolicy()` rewrote six textarea attributes on every pointer,
+touch and delayed restore, even when their values were unchanged. Updating
+input attributes on a focused WebView textarea can restart its native input
+connection. Synchronization now writes only changed attributes.
+
+The October 14 fix (`0a9c1ffa`) also exempted soft keys from clearing stale
+helper focus when native Android reported the keyboard closed. Its soft-key
+snapshot used helper focus OR native visibility, allowing stale focus to
+override an explicit native `false`. The capture gate now clears stale focus
+for soft keys too, and snapshots use the common native-first visibility helper.
+An already-visible keyboard retains focus; these changes never refocus xterm.
+
+Earlier broad button coverage stubbed `triggerMobileKey`, and the dismissed
+keyboard case explicitly blurred the helper during setup. Those checks missed
+both repeated attribute writes and Android Back dismissal retaining focus.
+`tests/terminal-ime-policy.browser.py` now additionally taps real Home/Tab/End
+buttons, checks exact WebSocket bytes, zero helper focus calls and zero IME
+attribute mutations. It covers open, closed and closed-with-stale-focus states
+under both canvas and Android WebView UA/DOM rendering. Native visibility is
+simulated through the actual bridge lookup; it is not a device IME test.
+
+Verification: the new behavioral assertion fails on the old implementation's
+attribute writes and passes after the fix in both renderers. IME policy,
+session activity/details Node checks and document/dialog Chinese-composition
+browser checks pass. The latter needed one rerun after a WebSocket assertion
+race. `terminal-cursor-guard.test.mjs` still fails on its pre-existing hardcoded
+stylesheet version (`20260926-workflow-history`, while HEAD loads
+`20261021-account-sort-all`); that failure is unrelated to these changes.
+
+Static loaders use `20261025-ime-state`; live HTTP SHA-256 matches both changed
+JS files. The Android client loads server pages, so a page reload applies the
+fix without rebuilding the APK. Device verification remains tracked as R7 in
+`todo.md`: native IME hidden/open events must remain unchanged when tapping
+ordinary soft keys, including immediately after Back dismisses the keyboard.
+
 ```bash
 node --check static/terminal.js
 node tests/terminal-layout-scroll-preserve.test.mjs

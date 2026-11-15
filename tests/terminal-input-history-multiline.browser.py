@@ -47,6 +47,38 @@ async def main():
         assert await page.locator('#terminal-input-history-dialog').evaluate('el=>el.open'),'dialog closed after drag selection ended outside'
         assert await ta.evaluate('el=>el.readOnly'),'history textarea must be read-only'
         assert await ta.evaluate("el=>el.value.includes('\\n')"),'multiline content lost'
+        # Verify fallback copy when navigator.clipboard.writeText is rejected (e.g. HTTP LAN origin)
+        await page.evaluate("""() => {
+          window.__fallbackCopies = [];
+          Object.defineProperty(navigator, 'clipboard', {
+            configurable: true,
+            value: { writeText: async () => { throw new Error('NotAllowedError'); } },
+          });
+          document.addEventListener('copy', (e) => {
+            window.__fallbackCopies.push({
+              targetTag: e.target ? e.target.tagName : null,
+              targetVal: e.target ? e.target.value : null,
+              selection: window.getSelection().toString(),
+            });
+          });
+        }""")
+        item_copy_btn = page.locator('.terminal-input-history-copy-item').first
+        await item_copy_btn.click()
+        await page.wait_for_function("() => window.__fallbackCopies.length >= 1", timeout=5000)
+        assert await page.locator('#terminal-input-history-status').inner_text() == '已复制本条对话历史。'
+        last_copy = await page.evaluate("() => window.__fallbackCopies[window.__fallbackCopies.length - 1]")
+        assert last_copy['targetTag'] == 'TEXTAREA'
+        assert '第一行历史内容' in last_copy['targetVal']
+        assert '第三行历史内容' in last_copy['targetVal']
+
+        # Verify copy all fallback
+        await page.locator('#terminal-input-history-copy').click()
+        await page.wait_for_function("() => window.__fallbackCopies.length >= 2", timeout=5000)
+        assert await page.locator('#terminal-input-history-status').inner_text() == '已复制对话历史。'
+        last_copy_all = await page.evaluate("() => window.__fallbackCopies[window.__fallbackCopies.length - 1]")
+        assert last_copy_all['targetTag'] == 'TEXTAREA'
+        assert '第一行历史内容' in last_copy_all['targetVal']
+
         await page.evaluate("""() => {
           window.__historyCopiedText = null;
           Object.defineProperty(navigator, 'clipboard', {

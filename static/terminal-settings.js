@@ -9,6 +9,7 @@
   const DEFAULT_TERMINAL_QUICK_COMMANDS = Object.freeze([
     Object.freeze({ key: "1", label: "codex", command: "codex" }),
     Object.freeze({ key: "2", label: "claude", command: "claude" }),
+    Object.freeze({ key: "3", label: "codebuddy", command: "codebuddy" }),
   ]);
   // Toggle-style commands now surfaced as toolbar checkboxes, not dropdown options.
   const TERMINAL_KEYBOARD_CHECKBOX_ACTIONS = Object.freeze(new Set([
@@ -51,6 +52,7 @@
     Object.freeze({ key: "resume", label: "/resume", action: "send_slash_command", command: "/resume" }),
     Object.freeze({ key: "status", label: "/status", action: "send_slash_command", command: "/status" }),
     Object.freeze({ key: "fork", label: "/fork", action: "send_slash_command", command: "/fork" }),
+    Object.freeze({ key: "model", label: "/model", action: "send_slash_command", command: "/model" }),
     Object.freeze({ key: "compact", label: "/compact", action: "send_slash_command", command: "/compact" }),
   ]);
   const TERMINAL_SESSION_ID_COMMAND_KEYS = Object.freeze([
@@ -170,6 +172,18 @@
       new_command: "opencode",
       resume_command: "opencode --session {session_id}",
     }),
+    Object.freeze({
+      key: "codearts",
+      label: "CodeArts",
+      new_command: "codearts",
+      resume_command: "codearts --session {session_id}",
+    }),
+    Object.freeze({
+      key: "qoder",
+      label: "Qoder",
+      new_command: "qodercli",
+      resume_command: "qodercli --resume {session_id}",
+    }),
     Object.freeze({ key: "other", label: "其它", new_command: "", resume_command: "" }),
   ]);
   const MAX_TERMINAL_AGENT_COMMANDS = 20;
@@ -200,10 +214,14 @@
   const DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES = 20;
   const DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT = true;
   const DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY = true;
+  const DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS = 120;
+  const DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS = 8;
   const DEFAULT_TERMINAL_ACTIVITY_AGENT_DISPLAY = "hidden";
   const DEFAULT_TERMINAL_USER = "root";
   const DEFAULT_THEME_MODE = "system";
   const THEME_MODE_STORAGE_KEY = "webclx:theme-mode";
+  const FONT_SIZE_TIERS_STORAGE_KEY = "webclx:font-size-tiers";
+  const TERMINAL_SOFT_KEYBOARD_SCALE_STORAGE_KEY = "webclx:terminal-soft-keyboard-scale";
   const TERMINAL_COMPLETION_BELL_URL = "/api/terminal/completion-bell.wav";
 
   function normalizeHostName(value) {
@@ -927,6 +945,29 @@
     }
   }
 
+  function readStoredFontSizeTiers() {
+    try {
+      const raw = root.localStorage?.getItem(FONT_SIZE_TIERS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length >= 4) {
+          return normalizeFontSizeTiers(parsed);
+        }
+      }
+    } catch {}
+    return [...DEFAULT_FONT_SIZE_TIERS];
+  }
+
+  function readStoredTerminalSoftKeyboardScale() {
+    try {
+      const raw = root.localStorage?.getItem(TERMINAL_SOFT_KEYBOARD_SCALE_STORAGE_KEY);
+      if (raw) {
+        return normalizeTerminalSoftKeyboardScale(raw);
+      }
+    } catch {}
+    return DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE;
+  }
+
   function normalizeFontSizeTier(value, fallback) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) {
@@ -1006,6 +1047,8 @@
     DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
     DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
     DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
+    DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+    DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
     DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
     DEFAULT_TERMINAL_FAB_ACTION_COLOR,
     DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
@@ -1033,6 +1076,8 @@
     MAX_TERMINAL_COMMAND_COLLECTION_ITEMS,
     TERMINAL_COMPLETION_BELL_URL,
     THEME_MODE_STORAGE_KEY,
+    FONT_SIZE_TIERS_STORAGE_KEY,
+    TERMINAL_SOFT_KEYBOARD_SCALE_STORAGE_KEY,
     cloneDefaultTerminalFunctionCommands,
     cloneDefaultTerminalQuickCommands,
     cloneDefaultTerminalCommandCollections,
@@ -1078,6 +1123,8 @@
     normalizeTerminalUser,
     normalizeThemeMode,
     readStoredThemeMode,
+    readStoredFontSizeTiers,
+    readStoredTerminalSoftKeyboardScale,
     resolveThemeMode,
   };
 });

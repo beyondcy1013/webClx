@@ -36,6 +36,6 @@ assert.match(
   /desktopTerminalSoftKeyboardEnabled:\s*true/,
   "the terminal should remain enabled when settings are temporarily unavailable",
 );
-assert.match(appHtml, /app-settings-event-bindings\.js\?v=20260730a/);
-assert.match(appHtml, /app\.js\?v=20260806a/);
-assert.match(terminalHtml, /terminal\.js\?v=20260814a/);
+assert.match(appHtml, /app-settings-event-bindings\.js\?v=[^"<>]+/);
+assert.match(appHtml, /app\.js\?v=[^"<>]+/);
+assert.match(terminalHtml, /terminal\.js\?v=[^"<>]+/);

@@ -18,6 +18,25 @@
           document.documentElement.dataset.theme = resolved;
           document.documentElement.style.colorScheme = resolved;
         } catch {}
+        try {
+          const rawTiers = window.localStorage.getItem("webclx:font-size-tiers");
+          if (rawTiers) {
+            const tiers = JSON.parse(rawTiers);
+            if (Array.isArray(tiers) && tiers.length >= 4) {
+              const rootStyle = document.documentElement.style;
+              rootStyle.setProperty("--font-size-tier-1", `${tiers[0]}rem`);
+              rootStyle.setProperty("--font-size-tier-2", `${tiers[1]}rem`);
+              rootStyle.setProperty("--font-size-tier-3", `${tiers[2]}rem`);
+              rootStyle.setProperty("--font-size-tier-4", `${tiers[3]}rem`);
+              const rawScale = window.localStorage.getItem("webclx:terminal-soft-keyboard-scale");
+              const scale = Number(rawScale) > 0 ? Number(rawScale) : 1.08;
+              rootStyle.setProperty(
+                "--terminal-key-font-size",
+                `${Math.round(tiers[2] * scale * 100) / 100}rem`,
+              );
+            }
+          }
+        } catch {}
       })();
     </script>
     <script>
@@ -41,10 +60,10 @@
       });
     </script>
     <link rel="stylesheet" href="/assets/vendor/xterm.css?v=20260408d" />
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20261014-group-row" />
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20261113-group-join-existing" />
     <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
-    <link rel="stylesheet" href="/assets/styles-auth.css?v=20260925nav1" />
-    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260926-workflow-history" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20261110-usage-window" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20261102-selection-ime-menu" />
     <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260923scroll1" />
     <style>
       body.terminal-embedded-agent .terminal-page-nav { display: none; }
@@ -52,28 +71,29 @@
     </style>
     <script defer src="/assets/abort-signal-compat.js?v=20260817a"></script>
     <script defer src="/assets/dialog-backdrop-guard.js?v=20260916c"></script>
-    <script defer src="/assets/i18n.js?v=20260918message"></script>
+    <script defer src="/assets/i18n.js?v=20261025-android-language-once"></script>
     <script defer src="/assets/vendor/xterm.js?v=20260923scroll1"></script>
     <script defer src="/assets/vendor/xterm-addon-fit.js?v=20260408d"></script>
     <script defer src="/assets/terminal-selection-geometry.js?v=20260509b"></script>
     <script defer src="/assets/terminal-cursor-guard.js?v=20260627a"></script>
     <script defer src="/assets/terminal-ime-policy.js?v=20260516c"></script>
-    <script defer src="/assets/terminal-touch-selection-policy.js?v=20260803c"></script>
-    <script defer src="/assets/terminal-resume-extract.js?v=20261007-devin"></script>
-    <script defer src="/assets/terminal-settings.js?v=20260928-cline-opencode"></script>
+    <script defer src="/assets/terminal-touch-selection-policy.js?v=20261031-double-tap-selection"></script>
+    <script defer src="/assets/terminal-resume-extract.js?v=20261115-qoder"></script>
+    <script defer src="/assets/terminal-settings.js?v=20261115-model-command"></script>
     <script defer src="/assets/terminal-session-activity.js?v=20260918groupcolor7nobubblewhite"></script>
     <script defer src="/assets/terminal-session-storage.js?v=20260916groups3"></script>
-    <script defer src="/assets/workspace-project-icons.js?v=20261017-stable-session-menu"></script>
-    <script defer src="/assets/terminal-common.js?v=20260920groupbadge1"></script>
+    <script defer src="/assets/workspace-project-icons.js?v=20261111-executor-rocket-spacing"></script>
+    <script defer src="/assets/terminal-common.js?v=20261113-dialog-clipboard-fix"></script>
     <script defer src="/assets/specified-preset-actions.js?v=20260928-cline-opencode"></script>
     <script defer src="/assets/new-terminal.js?v=20260916groups3"></script>
     <script defer src="/assets/terminal-session-cache.js?v=20261004-android-opt1"></script>
-    <script defer src="/assets/terminal-shell-settings.js?v=20261016-background-bottom"></script>
-    <script defer src="/assets/terminal-paste.js?v=20260922-scheduled-status"></script>
-    <script defer src="/assets/terminal-dialogs.js?v=20261014-win-doc-ime2"></script>
+    <script defer src="/assets/terminal-shell-settings.js?v=20261025-cached-scroll-position"></script>
+    <script defer src="/assets/terminal-paste.js?v=20261026-paste-upload"></script>
+    <script defer src="/assets/terminal-dialogs.js?v=20261111-terminal-super-admin"></script>
     <script defer src="/assets/terminal-report-filter.js?v=20260924a"></script>
-    <script defer src="/assets/terminal-focus-selection.js?v=20261015-dialog-ime"></script>
-    <script defer src="/assets/terminal-resume-agent.js?v=20260906a"></script>
+    <script defer src="/assets/terminal-focus-selection.js?v=20261109-ime-armed-gate"></script>
+    <script defer src="/assets/terminal-resume-ready.js?v=20261026-agy-ready"></script>
+    <script defer src="/assets/terminal-resume-agent.js?v=20261026-agy-ready"></script>
     <link rel="stylesheet" href="/assets/terminal-universal-shortcut.css?v=20261018-keyboard" />
     <script defer src="/assets/terminal-universal-shortcut.js?v=20261018-keyboard"></script>
     <script defer src="/assets/terminal-input-transport.js?v=20261004-android-opt1"></script>
@@ -82,33 +102,35 @@
     <script defer src="/assets/terminal-output-scroll.js?v=20261016-background-bottom"></script>
 <script defer src="/assets/terminal-quota.js?v=20260905c"></script>
     <script defer src="/assets/terminal-command-quickstart.js?v=20261011-compact-agent-guard"></script>
-    <script defer src="/assets/terminal-tools.js?v=20260916a"></script>
+    <script defer src="/assets/terminal-tools.js?v=20261031-remove-full-access"></script>
     <script defer src="/assets/terminal-android-select-menu.js?v=20260804b"></script>
-    <script defer src="/assets/terminal-server-switch.js?v=20260830a"></script>
+    <script defer src="/assets/terminal-server-switch.js?v=20261025-session-isolation"></script>
     <script defer src="/assets/terminal-server-probe.js?v=20261004-android-opt1"></script>
-    <script defer src="/assets/terminal-specified-task.js?v=20261015-workspace-all-tabs"></script>
+    <script defer src="/assets/terminal-specified-task.js?v=20261113-agy-multi-quota"></script>
     <script defer src="/assets/terminal-future-tasks.js?v=20260916a"></script>
     <script defer src="/assets/terminal-multi-model-advisor.js?v=20260919group1"></script>
     <script defer src="/assets/terminal-multi-terminal-discussion.js?v=20260919group1"></script>
     <script defer src="/assets/terminal-workspace-restores.js?v=20260918a"></script>
     <script defer src="/assets/terminal-tool-actions.js?v=20260926-workflow-history"></script>
-    <script defer src="/assets/terminal-settings-loader.js?v=20260904a"></script>
+    <script defer src="/assets/terminal-settings-loader.js?v=20261021-account-sort-all"></script>
     <script defer src="/assets/terminal-cursor-correction.js?v=20261009-codebuddy-agent-gate"></script>
-    <script defer src="/assets/terminal-navigation-layout.js?v=20261020-scroll-intent-zero"></script>
-    <script defer src="/assets/terminal-session-render.js?v=20261015-dialog-ime"></script>
-    <script defer src="/assets/terminal-auto-continue.js?v=20261020-compacting-observed"></script>
+    <script defer src="/assets/terminal-navigation-layout.js?v=20261025-cached-scroll-position"></script>
+    <script defer src="/assets/terminal-session-render.js?v=20261111-terminal-super-admin"></script>
+    <script defer src="/assets/terminal-auto-continue.js?v=20261115-server-autocompact"></script>
     <script defer src="/assets/terminal-experience-save.js?v=20261018-save-only"></script>
-    <script defer src="/assets/terminal-sessions.js?v=20261017-background-close"></script>
+    <script defer src="/assets/terminal-sessions.js?v=20261115-default-autocompact"></script>
     <script defer src="/assets/terminal-preset-extraction.js?v=20260727a"></script>
-    <script defer src="/assets/terminal-mobile-keys.js?v=20261014-soft-key-ime"></script>
+    <script defer src="/assets/terminal-project-precompile.js?v=20261114-precompile2"></script>
+    <script defer src="/assets/terminal-mobile-keys.js?v=20261115-slash-draft"></script>
     <script defer src="/assets/terminal-designate-preset.js?v=20260829a"></script>
     <script defer src="/assets/terminal-permanent-preset-switch.js?v=20260801a"></script>
     <script defer src="/assets/terminal-in-place-preset-switch.js?v=20260905a"></script>
     <script defer src="/assets/terminal-layout-connection.js?v=20261015-scroll-geometry"></script>
     <script defer src="/assets/terminal-preconnect.js?v=20261004-android-opt1"></script>
-    <script defer src="/assets/terminal.js?v=20261020-compacting-observed"></script>
+    <script defer src="/assets/terminal.js?v=20261115-server-autocompact"></script>
     <script defer src="/assets/terminal-work-agent.js?v=20260728a"></script>
     <script defer src="/assets/app-unified-tasks.js?v=20261012-action-first"></script>
+    <script defer src="/assets/terminal-countdown-dialog.js?v=20261114-countdown-dock"></script>
   </head>
   <body class="app-shell terminal-body">
     <script>
@@ -124,7 +146,6 @@
           <a id="top-nav-workspace-history" class="tab-button topbar-link-button" href="/workspace_history" data-home-path="/workspace_history">历史工作区</a>
           <a id="top-nav-api" class="tab-button topbar-link-button" href="/codex_api" data-home-path="/codex_api">LLM_API</a>
           <a id="top-nav-settings" class="tab-button topbar-link-button" href="/settings" data-home-path="/settings">设置</a>
-          <a class="tab-button topbar-link-button" href="/agent">DeepSeek Agent</a>
           <a class="tab-button topbar-link-button" href="/collaboration">智能体协作</a>
 
           <button
@@ -157,7 +178,7 @@
           <button id="delete-session" class="button secondary danger" type="button" title="先转入隐藏终端，再关闭终端">结束</button>
           <button id="save-experience-session" class="button secondary" type="button" title="提交经验落盘任务，转入隐藏并在完成后自行关闭">落盘并结束</button>
           <button id="idle-session" class="button secondary" type="button">闲置</button>
-          <button id="archive-resume" class="button secondary" type="button">归档</button>
+          <button id="archive-resume" class="button secondary" type="button" hidden style="display: none;">归档</button>
           <select
             id="idle-session-select"
             class="terminal-session-select terminal-archive-select"
@@ -264,11 +285,10 @@
         <form id="terminal-group-form" class="terminal-rename-dialog-form">
           <div class="panel-head wide">
             <div class="card-title-help">
-              <p class="section-label">终端管理</p>
-              <h2 id="terminal-group-dialog-title">群组终端管理</h2>
+              <h2 id="terminal-group-dialog-title">终端群组管理</h2>
               <span class="card-desc" role="button" tabindex="0" aria-pressed="false" aria-label="帮助说明" title="点击查看说明">
                 <span class="card-desc-icon">?</span>
-                <span class="card-desc-text">勾选成员后为每个终端指定角色：每组一名管理者负责计划和派发任务，其余成员为执行者或复核者；把某个终端设为管理者时，原管理者会自动改为执行者。点击成员行里的「改名」可修改该终端名称。</span>
+              <span class="card-desc-text">勾选成员后为每个终端指定角色：超级管理员（👑）是组内最高负责人，统筹计划、派发任务和最终裁决；普通管理员（🔱）负责日常管理，其余成员为执行者或复核者。每组最多一名超级管理员和一名普通管理员；未指定超级管理员时由普通管理员负责。终端角色不改变 WebUI 登录或操作系统权限。点击成员行里的「改名」可修改该终端名称。</span>
               </span>
             </div>
           </div>
@@ -296,6 +316,34 @@
             >名称倒序</button>
           </div>
           <p id="terminal-group-token-display" class="session-group-help" hidden></p>
+          <div id="terminal-group-join-container" class="terminal-group-join-row" hidden>
+            <label class="terminal-group-join-option">
+              <span>加入现有群组</span>
+              <div class="terminal-group-join-control">
+                <select
+                  id="terminal-group-join-select"
+                  class="text-input select-input"
+                  aria-label="选择要加入的现有群组"
+                >
+                  <option value="">— 选择现有群组加入 —</option>
+                </select>
+                <button
+                  type="button"
+                  id="terminal-group-join-button"
+                  class="button secondary terminal-group-join-button"
+                  disabled
+                >加入此组</button>
+                <button
+                  type="button"
+                  id="terminal-group-rename-button"
+                  class="button secondary terminal-group-rename-button"
+                  disabled
+                  title="为选中的群组命名或更名"
+                >命名/更名</button>
+              </div>
+            </label>
+            <p id="terminal-group-join-hint" class="session-group-help terminal-group-join-hint" hidden></p>
+          </div>
           <div class="terminal-group-name-color-row">
             <label class="terminal-group-name-option">
               <span>分组名称</span>
@@ -401,6 +449,24 @@
               hidden
             >
               复制选中
+            </button>
+            <button
+              id="terminal-selection-copy-all"
+              class="button secondary terminal-selection-copy"
+              type="button"
+              aria-label="复制终端全部内容"
+              hidden
+            >
+              复制全部
+            </button>
+            <button
+              id="terminal-selection-open-ime"
+              class="button secondary terminal-selection-open-ime"
+              type="button"
+              aria-label="打开系统输入法"
+              hidden
+            >
+              打开输入法
             </button>
             <button
               id="terminal-selection-start-handle"
@@ -562,6 +628,7 @@
                 <option value="open_artifact_downloads">下载中心</option>
                 <option value="codes_backup">!codes_backup</option>
                 <option value="deploy_project" data-shortcut="^B">本项目部署脚本</option>
+                <option value="precompile_project">预编译预热</option>
                 <option value="open_agents_doc">文档</option>
                 <option value="permanent_switch_preset">永久</option>
                 <option value="open_specified_task">临时</option>
@@ -662,6 +729,83 @@
         </div>
       </div>
 
+      <!-- 倒计时对话框 / 悬浮面板：位于窗体右边中间（跳顶部与跳底部按钮之间） -->
+      <div id="terminal-countdown-dock" class="terminal-countdown-dock" aria-label="排队倒计时">
+        <button
+          id="terminal-countdown-toggle"
+          class="terminal-countdown-toggle"
+          type="button"
+          aria-expanded="false"
+          title="点击展开倒计时对话框"
+        >
+          <span class="terminal-countdown-toggle-icon" aria-hidden="true">&#9200;</span>
+          <span id="terminal-countdown-toggle-text" class="terminal-countdown-toggle-text">倒计时</span>
+        </button>
+
+        <div id="terminal-countdown-card" class="terminal-countdown-card" hidden>
+          <div class="terminal-countdown-head">
+            <div class="terminal-countdown-title-wrap">
+              <span class="terminal-countdown-head-icon" aria-hidden="true">&#9200;</span>
+              <strong class="terminal-countdown-title">排队倒计时</strong>
+            </div>
+            <button
+              id="terminal-countdown-close"
+              class="terminal-countdown-close-btn"
+              type="button"
+              aria-label="收起倒计时卡片"
+              title="收起"
+            >&times;</button>
+          </div>
+
+          <div class="terminal-countdown-body">
+            <div class="terminal-countdown-display">
+              <span id="terminal-countdown-digits" class="terminal-countdown-digits">--:--</span>
+              <span id="terminal-countdown-desc" class="terminal-countdown-desc">无进行中的排队</span>
+            </div>
+            <div id="terminal-countdown-preview" class="terminal-countdown-preview" hidden></div>
+          </div>
+
+          <div class="terminal-countdown-actions">
+            <div class="terminal-countdown-delay-group" role="group" aria-label="推迟倒计时选项">
+              <button
+                type="button"
+                class="terminal-countdown-btn terminal-countdown-delay-btn"
+                data-delay-seconds="20"
+                title="向后推迟20秒"
+              >延迟 20秒</button>
+              <button
+                type="button"
+                class="terminal-countdown-btn terminal-countdown-delay-btn"
+                data-delay-seconds="60"
+                title="向后推迟1分钟"
+              >延迟 1分钟</button>
+              <button
+                type="button"
+                class="terminal-countdown-btn terminal-countdown-delay-btn"
+                data-delay-seconds="120"
+                title="向后推迟2分钟"
+              >延迟 2分钟</button>
+            </div>
+            <div class="terminal-countdown-sub-actions">
+              <button
+                id="terminal-countdown-flush-btn"
+                type="button"
+                class="terminal-countdown-btn terminal-countdown-primary-btn"
+                title="跳过倒计时，立即发送"
+                disabled
+              >立即发送</button>
+              <button
+                id="terminal-countdown-cancel-btn"
+                type="button"
+                class="terminal-countdown-btn terminal-countdown-danger-btn"
+                title="取消此排队任务"
+                disabled
+              >取消</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div id="terminal-fab" class="terminal-fab-group terminal-fab" aria-hidden="false">
         <button
           id="terminal-fab-toggle"
@@ -721,6 +865,7 @@
         <button type="button" role="menuitem" data-project-action="open_artifact_downloads">下载中心</button>
         <button type="button" role="menuitem" data-project-action="codes_backup">!codes_backup</button>
         <button type="button" role="menuitem" data-project-action="deploy_project">部署项目</button>
+        <button type="button" role="menuitem" data-project-action="precompile_project" title="仅编译当前项目，复用正式构建缓存">预编译预热</button>
         <button type="button" role="menuitem" data-project-action="open_agents_doc">文档</button>
         <button type="button" role="menuitem" data-project-action="permanent_switch_preset">永久</button>
         <button type="button" role="menuitem" data-project-action="open_specified_task">临时</button>
@@ -785,6 +930,20 @@
         </label>
         <span class="terminal-tools-actions" role="group" aria-label="全能命令列表">
           <button
+            id="terminal-paste-image-button"
+            class="terminal-tools-action"
+            type="button"
+            role="menuitem"
+            data-action="open_terminal_image_paste_dialog"
+          >粘贴图片</button>
+          <button
+            id="terminal-paste-dialog-button"
+            class="terminal-tools-action"
+            type="button"
+            role="menuitem"
+            data-action="open_terminal_paste_dialog"
+          >Ctrl+V 粘贴对话框</button>
+          <button
             id="terminal-file-upload-button"
             class="terminal-tools-action"
             type="button"
@@ -816,16 +975,6 @@
             role="menuitem"
           >更新所有终端预设</button>
         </span>
-        <label class="terminal-tools-option terminal-tools-full-access-option">
-          <span>Codex 最高权限</span>
-          <input
-            id="terminal-codex-full-access-toggle"
-            class="terminal-tools-switch"
-            type="checkbox"
-            role="switch"
-            aria-describedby="terminal-tools-status"
-          />
-        </label>
         <span
           id="terminal-tools-status"
           class="inline-status terminal-tools-status"
@@ -866,6 +1015,33 @@
           <button
             type="button"
             class="terminal-tools-action"
+            id="terminal-tools-paste-image-button"
+            data-action="open_terminal_image_paste_dialog"
+            role="menuitem"
+            aria-label="粘贴图片"
+            title="打开单独的粘贴图片对话框"
+          >粘贴图片</button>
+          <button
+            type="button"
+            class="terminal-tools-action"
+            id="terminal-tools-paste-dialog-button"
+            data-action="open_terminal_paste_dialog"
+            role="menuitem"
+            aria-label="Ctrl+V 粘贴"
+            title="打开粘贴对话框"
+          >Ctrl+V 粘贴</button>
+          <button
+            type="button"
+            class="terminal-tools-action"
+            id="terminal-tools-upload-image-button"
+            data-action="upload_terminal_image"
+            role="menuitem"
+            aria-label="上传图片"
+            title="选择图片上传至当前终端"
+          >上传图片</button>
+          <button
+            type="button"
+            class="terminal-tools-action"
             id="terminal-sort-directory-sessions"
             data-action="sort_directory_sessions_by_path"
             role="menuitem"
@@ -900,11 +1076,15 @@
           <span>智能体</span>
         </label>
         <label class="terminal-tools-option">
+          <input id="session-model-family-toggle" type="checkbox" role="menuitemcheckbox" />
+          <span>大模型类型</span>
+        </label>
+        <label class="terminal-tools-option">
           <input id="session-context-toggle" type="checkbox" role="menuitemcheckbox" />
           <span>上下文</span>
         </label>
         <label class="terminal-tools-option">
-          <input id="session-auto-continue-toggle" type="checkbox" role="menuitemcheckbox" />
+          <input id="session-auto-continue-toggle" type="checkbox" role="menuitemcheckbox" title="自动继续；CodeBuddy 积分或频率额度耗尽时，自动换号、恢复原会话并继续" />
           <span>继续</span>
         </label>
         <label class="terminal-tools-option">
@@ -1004,11 +1184,13 @@
           <label class="terminal-specified-task-field" for="terminal-server-switch-select">
             <span>服务器</span>
             <select id="terminal-server-switch-select" class="text-input mono-text" required>
-              <option value="PUBLIC_DOMAIN">PUBLIC_DOMAIN:PORT</option>
-              <option value="PUBLIC_DOMAIN:PORT">PUBLIC_DOMAIN:PORT</option>
-              <option value="PUBLIC_DOMAIN:14151">PUBLIC_DOMAIN:14151</option>
-              <option value="us.PUBLIC_DOMAIN">us.PUBLIC_DOMAIN:PORT</option>
-              <option value="jd.PUBLIC_DOMAIN">jd.PUBLIC_DOMAIN:PORT</option>
+              <option value="fpsq.xyz">fpsq.xyz:11111</option>
+              <option value="frp6.ccszxc.site:25401">frp6.ccszxc.site:25401</option>
+              <option value="fpsq.xyz:11112">fpsq.xyz:11112</option>
+              <option value="fpsq.xyz:14151">fpsq.xyz:14151</option>
+              <option value="us.fpsq.xyz">us.fpsq.xyz:11111</option>
+              <option value="jd.fpsq.xyz">jd.fpsq.xyz:11111</option>
+              <option value="192.168.3.38">192.168.3.38:11111</option>
             </select>
           </label>
           <div class="toolbar dialog-actions">
@@ -1048,7 +1230,7 @@
               autocomplete="off"
               spellcheck="false"
               required
-              placeholder="例如 PUBLIC_DOMAIN:PORT"
+              placeholder="例如 fpsq.xyz:11111"
             />
           </label>
           <p id="terminal-server-edit-status" class="inline-status" role="status" aria-live="polite" hidden></p>
@@ -1210,7 +1392,7 @@
           </fieldset>
 
          <div id="terminal-specified-task-preset-field" class="terminal-specified-task-field terminal-specified-task-preset-field">
-           <span>Codex 账号</span>
+           <span>账号</span>
            <select id="terminal-specified-task-preset" class="text-input" required>
              <option value="">正在读取预设…</option>
            </select>
@@ -1218,6 +1400,11 @@
              <input id="terminal-specified-task-session-only" type="checkbox" name="terminal-specified-task-session-only" />
              <span>仅对此会话</span>
            </label>
+           <span
+             id="terminal-specified-task-preset-note"
+             class="terminal-specified-task-preset-note"
+             hidden
+           ></span>
          </div>
          <label id="terminal-specified-task-other-command-field" class="terminal-specified-task-field" hidden>
            <span>终端命令</span>
@@ -1326,7 +1513,8 @@
               disabled
             >
               <option value="executor">执行者</option>
-              <option value="manager">管理者</option>
+              <option value="super_admin">👑 超级管理员</option>
+              <option value="manager">普通管理员</option>
               <option value="reviewer">复核者</option>
             </select>
           </label>
@@ -1792,6 +1980,13 @@
               <p class="section-label">终端粘贴</p>
               <h2>粘贴到终端输入区</h2>
             </div>
+            <button
+              id="terminal-paste-close"
+              class="button secondary terminal-paste-close"
+              type="button"
+              aria-label="关闭"
+              title="关闭"
+            >&#10005;</button>
           </div>
 
           <textarea
@@ -1841,11 +2036,59 @@
           </div>
 
           <div class="toolbar dialog-actions terminal-paste-actions">
-            <button id="terminal-paste-cancel" class="button secondary" type="button">取消</button>
-            <button id="terminal-paste-schedule-toggle" class="button secondary" type="button">定时发送</button>
+            <button id="terminal-paste-upload-image-button" class="button secondary" type="button">上传图片</button>
             <button id="terminal-paste-submit" class="button primary" type="button">粘贴到终端</button>
-            <button id="terminal-paste-submit-enter" class="button primary" type="submit">粘贴并发送</button>
+            <button id="terminal-paste-submit-enter" class="button primary" type="submit">直接发送</button>
+            <button id="terminal-paste-schedule-toggle" class="button secondary" type="button">定时发送</button>
           </div>
+          <input
+            id="terminal-paste-image-input"
+            class="sr-only"
+            type="file"
+            accept="image/*"
+            multiple
+            aria-label="选择要上传的图片"
+          />
+        </form>
+      </dialog>
+
+      <dialog id="terminal-image-paste-dialog" class="auth-import-dialog terminal-image-paste-dialog" aria-labelledby="terminal-image-paste-title">
+        <form id="terminal-image-paste-form" class="auth-import-form" method="dialog">
+          <div class="panel-head wide">
+            <div>
+              <p class="section-label">终端工具</p>
+              <h2 id="terminal-image-paste-title">粘贴图片</h2>
+            </div>
+          </div>
+
+          <div class="terminal-image-paste-toolbar">
+            <button id="terminal-image-paste-select-button" class="button secondary" type="button">选择图片上传</button>
+            <span class="meta-text">可选择图片或在此窗口直接 Ctrl+V 粘贴截图</span>
+          </div>
+
+          <div id="terminal-image-paste-assets" class="terminal-paste-assets" hidden></div>
+
+          <textarea
+            id="terminal-image-paste-text"
+            class="dialog-textarea"
+            spellcheck="false"
+            rows="3"
+            placeholder="附加提示词或文字说明（可选，例如：请分析这张图片）"
+          ></textarea>
+
+          <div class="toolbar dialog-actions terminal-paste-actions">
+            <button id="terminal-image-paste-cancel" class="button secondary" type="button">取消</button>
+            <button id="terminal-image-paste-submit" class="button primary" type="button">粘贴到终端</button>
+            <button id="terminal-image-paste-submit-enter" class="button primary" type="submit">直接发送</button>
+          </div>
+          <input
+            id="terminal-image-paste-input"
+            class="sr-only"
+            type="file"
+            accept="image/*"
+            multiple
+            aria-label="选择要上传的图片"
+          />
         </form>
       </dialog>
 
@@ -1963,6 +2206,16 @@
               <p class="section-label">对话历史</p>
               <h2>本终端对话历史</h2>
             </div>
+            <div class="terminal-input-history-filters">
+              <label class="terminal-input-history-toggle" title="勾选后不显示跨终端协作消息">
+                <input id="terminal-input-history-hide-messages" type="checkbox">
+                <span>隐藏终端消息</span>
+              </label>
+              <label class="terminal-input-history-toggle" title="勾选后不显示编译与部署回调通知">
+                <input id="terminal-input-history-hide-compile" type="checkbox">
+                <span>隐藏编译通知</span>
+              </label>
+            </div>
             <div
               id="terminal-input-history-status"
               class="inline-status terminal-input-history-status"
@@ -1975,6 +2228,9 @@
           <div id="terminal-input-history-list" class="terminal-input-history-list"></div>
 
           <div class="toolbar dialog-actions">
+            <button id="terminal-input-history-clear-messages" class="button secondary" type="button">删除终端消息</button>
+            <button id="terminal-input-history-clear-compile" class="button secondary" type="button">删除编译通知</button>
+            <button id="terminal-input-history-clear" class="button secondary danger" type="button">清除所有对话史</button>
             <button id="terminal-input-history-copy" class="button secondary" type="button">复制全部</button>
             <button id="terminal-input-history-close" class="button primary" type="button">关闭</button>
           </div>
@@ -1985,8 +2241,7 @@
         <form method="dialog" class="terminal-scheduled-tasks-form">
           <div class="panel-head wide">
             <div>
-              <p class="section-label">定时</p>
-              <h2 id="terminal-scheduled-tasks-title">定时任务统一管理器</h2>
+              <h2 id="terminal-scheduled-tasks-title">定时消息管理器</h2>
               <p id="unified-task-dialog-scope" class="meta-text compact-meta">只显示当前工作目录。</p>
             </div>
             <div class="toolbar">

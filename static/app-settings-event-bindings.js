@@ -205,10 +205,18 @@ function bindSettingsEventHandlers() {
   });
 
   window.addEventListener("storage", (event) => {
-    if (event.key !== THEME_MODE_STORAGE_KEY) {
+    if (event.key === THEME_MODE_STORAGE_KEY) {
+      applyThemeMode(event.newValue || DEFAULT_THEME_MODE);
       return;
     }
-    applyThemeMode(event.newValue || DEFAULT_THEME_MODE);
+    if (event.key === "webclx:font-size-tiers" && event.newValue) {
+      try {
+        const parsed = JSON.parse(event.newValue);
+        if (Array.isArray(parsed) && parsed.length >= 4) {
+          applyTypographySettings(parsed);
+        }
+      } catch {}
+    }
   });
 
   saveSettingsButton.addEventListener("click", () => {
@@ -255,6 +263,7 @@ function bindSettingsEventHandlers() {
       showDotEntriesInputEl.checked,
       showAllWorkspaceSessionsInputEl.checked,
       terminalNewSessionBehaviorInputEl.value,
+      terminalAccountSortInputEl?.value || "credits",
       desktopTerminalSoftKeyboardInputEl.checked,
       readTerminalSoftKeyboardScaleFromInput(),
       readTerminalFloatingButtonOffsetVhFromInput(),
@@ -269,6 +278,14 @@ function bindSettingsEventHandlers() {
       readTerminalAutoContinueBackoffMaxMinutesFromInput(),
       terminalAutoContinueRespectManualInterruptInputEl?.checked !== false,
       terminalAutoCompactSkipCodebuddyInputEl?.checked !== false,
+      readTerminalReportDebounceSecondsFromInput(),
+      readTerminalMessageQueueSecondsFromInput(),
+      (() => {
+        const value = Number(terminalTaskTimeoutSecsInputEl?.value);
+        return Number.isFinite(value)
+          ? Math.min(120, Math.max(10, Math.trunc(value)))
+          : DEFAULT_TERMINAL_TASK_TIMEOUT_SECS;
+      })(),
       parseTerminalAutoContinueTimePatternsInput(terminalAutoContinueTimePatternsInputEl?.value || ""),
       normalizeTerminalAutoContinueActiveWindow(terminalAutoContinueActiveWindowInputEl?.value || ""),
       normalizeTerminalScheduledInputAvoidWindow(terminalScheduledInputAvoidWindowInputEl?.value || ""),
@@ -402,6 +419,25 @@ function bindSettingsEventHandlers() {
       terminalAutoCompactSkipCodebuddyInputEl.checked =
         DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY;
     }
+    const terminalMessageQueueInputEl = document.getElementById(
+      "terminal-message-queue-seconds-input",
+    );
+    if (terminalMessageQueueInputEl) {
+      terminalMessageQueueInputEl.value = formatTerminalMessageQueueSeconds(
+        DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
+      );
+    }
+    const terminalReportDebounceInputEl = document.getElementById(
+      "terminal-report-debounce-seconds-input",
+    );
+    if (terminalReportDebounceInputEl) {
+      terminalReportDebounceInputEl.value = formatTerminalReportDebounceSeconds(
+        DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+      );
+    }
+    if (terminalTaskTimeoutSecsInputEl) {
+      terminalTaskTimeoutSecsInputEl.value = String(DEFAULT_TERMINAL_TASK_TIMEOUT_SECS);
+    }
     if (terminalAutoContinueTimePatternsInputEl) {
       terminalAutoContinueTimePatternsInputEl.value = formatTerminalAutoContinueTimePatterns(
         DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS,
@@ -442,6 +478,9 @@ function bindSettingsEventHandlers() {
     if (terminalNewSessionBehaviorInputEl) {
       terminalNewSessionBehaviorInputEl.value = "dialog";
     }
+    if (terminalAccountSortInputEl) {
+      terminalAccountSortInputEl.value = "credits";
+    }
     claudeModelOptionsInputEl.value = DEFAULT_CLAUDE_MODEL_OPTIONS.join("\n");
     renderClaudeDefaultConfigEntries(cloneDefaultClaudeDefaultConfigEntries());
     renderCodexApiAutoProxyMatchProviders(DEFAULT_CODEX_API_AUTO_PROXY_MATCH_PROVIDER_IDS);
@@ -455,13 +494,13 @@ function bindSettingsEventHandlers() {
     if (terminalWorkspaceIconPathInputEl) {
       terminalWorkspaceIconPathInputEl.value = DEFAULT_TERMINAL_WORKSPACE_ICON_PATH;
     }
-    if (terminalGroupManagerEmojiInputEl) terminalGroupManagerEmojiInputEl.value = "👑";
-    if (terminalGroupExecutorEmojiModeEl) terminalGroupExecutorEmojiModeEl.value = "random";
-    if (terminalGroupExecutorEmojiInputEl) terminalGroupExecutorEmojiInputEl.value = "⚙️";
+    if (terminalGroupManagerEmojiInputEl) terminalGroupManagerEmojiInputEl.value = "🔱";
+    if (terminalGroupExecutorEmojiModeEl) terminalGroupExecutorEmojiModeEl.value = "fixed";
+    if (terminalGroupExecutorEmojiInputEl) terminalGroupExecutorEmojiInputEl.value = "🚀";
     window.localStorage.removeItem("webclx:terminal-group-manager-emoji");
     window.localStorage.removeItem("webclx:terminal-group-executor-emoji-mode");
     window.localStorage.removeItem("webclx:terminal-group-executor-emoji");
-    if (terminalGroupExecutorEmojiFieldEl) terminalGroupExecutorEmojiFieldEl.hidden = true;
+    if (terminalGroupExecutorEmojiFieldEl) terminalGroupExecutorEmojiFieldEl.hidden = false;
     document.dispatchEvent(new CustomEvent("webclx:terminal-role-emoji-changed"));
     setThemeModeInputs(DEFAULT_THEME_MODE);
     if (fontSizeTier1InputEl) {
@@ -494,6 +533,7 @@ function bindSettingsEventHandlers() {
       true,
       true,
       "dialog",
+      "credits",
       false,
       DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
       DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
@@ -508,6 +548,9 @@ function bindSettingsEventHandlers() {
       DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
       DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
       DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
+      DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+      DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
+      DEFAULT_TERMINAL_TASK_TIMEOUT_SECS,
       [...DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS],
       "",
       "",
@@ -541,9 +584,9 @@ function bindSettingsEventHandlers() {
   }
 
   const refreshTerminalRoleEmojiSettings = () => {
-    const manager = String(terminalGroupManagerEmojiInputEl?.value || "👑").trim().slice(0, 8) || "👑";
-    const mode = terminalGroupExecutorEmojiModeEl?.value === "fixed" ? "fixed" : "random";
-    const executor = String(terminalGroupExecutorEmojiInputEl?.value || "⚙️").trim().slice(0, 8) || "⚙️";
+    const manager = String(terminalGroupManagerEmojiInputEl?.value || "🔱").trim().slice(0, 8) || "🔱";
+    const mode = terminalGroupExecutorEmojiModeEl?.value === "random" ? "random" : "fixed";
+    const executor = String(terminalGroupExecutorEmojiInputEl?.value || "🚀").trim().slice(0, 8) || "🚀";
     state.terminalGroupManagerEmoji = manager;
     state.terminalGroupExecutorEmojiMode = mode;
     state.terminalGroupExecutorEmoji = executor;

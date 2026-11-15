@@ -26,6 +26,32 @@ function formatTerminalAutoContinueIntervalSeconds(value) {
   return String(normalizeTerminalAutoContinueIntervalSeconds(value));
 }
 
+function formatTerminalReportDebounceSeconds(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS);
+  return String(Math.min(600, Math.max(0, Math.trunc(num))));
+}
+
+function readTerminalReportDebounceSecondsFromInput() {
+  const el = document.getElementById("terminal-report-debounce-seconds-input");
+  const num = Number(el?.value);
+  if (!Number.isFinite(num)) return DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS;
+  return Math.min(600, Math.max(0, Math.trunc(num)));
+}
+
+function formatTerminalMessageQueueSeconds(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS);
+  return String(Math.min(600, Math.max(1, Math.trunc(num))));
+}
+
+function readTerminalMessageQueueSecondsFromInput() {
+  const el = document.getElementById("terminal-message-queue-seconds-input");
+  const num = Number(el?.value);
+  if (!Number.isFinite(num)) return DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS;
+  return Math.min(600, Math.max(1, Math.trunc(num)));
+}
+
 function readTerminalAutoContinueIntervalSecondsFromInput() {
   return normalizeTerminalAutoContinueIntervalSeconds(
     terminalAutoContinueIntervalInputEl?.value || DEFAULT_TERMINAL_AUTO_CONTINUE_INTERVAL_SECONDS,
@@ -256,6 +282,12 @@ function applyThemeMode(themeMode = state.themeMode, { persist = false } = {}) {
   return normalized;
 }
 
+function persistTypographySettings(tiers) {
+  try {
+    window.localStorage.setItem("webclx:font-size-tiers", JSON.stringify(tiers));
+  } catch {}
+}
+
 function applyTypographySettings(fontSizeTiers = state.fontSizeTiers) {
   const tiers = normalizeFontSizeTiers(fontSizeTiers);
   state.fontSizeTiers = tiers;
@@ -264,6 +296,7 @@ function applyTypographySettings(fontSizeTiers = state.fontSizeTiers) {
   rootStyle.setProperty("--font-size-tier-2", `${tiers[1]}rem`);
   rootStyle.setProperty("--font-size-tier-3", `${tiers[2]}rem`);
   rootStyle.setProperty("--font-size-tier-4", `${tiers[3]}rem`);
+  persistTypographySettings(tiers);
 }
 
 function updateFontSettingsSummary() {

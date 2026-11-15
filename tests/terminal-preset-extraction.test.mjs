@@ -15,7 +15,6 @@ const terminalStyles = readFileSync(
 
 test("terminal tools menu starts with batch preset update and ends with single extraction", () => {
   const toolsMenuStart = terminalHtml.indexOf('id="terminal-tools-menu"');
-  const fullAccessToggle = terminalHtml.indexOf('id="terminal-codex-full-access-toggle"', toolsMenuStart);
   const embeddedToolsStart = terminalHtml.indexOf('id="terminal-tool-menu"', toolsMenuStart);
   const nextMenuStart = terminalHtml.indexOf('id="terminal-command-collections-menu"', toolsMenuStart);
   const singleAction = terminalHtml.indexOf('id="extract-session-preset"');
@@ -23,10 +22,10 @@ test("terminal tools menu starts with batch preset update and ends with single e
 
   assert.ok(toolsMenuStart >= 0);
   assert.ok(batchAction > toolsMenuStart);
-  assert.ok(fullAccessToggle > batchAction);
   assert.ok(embeddedToolsStart > toolsMenuStart);
   assert.ok(singleAction > embeddedToolsStart);
   assert.ok(nextMenuStart > singleAction);
+  assert.equal(terminalHtml.indexOf('id="terminal-codex-full-access-toggle"'), -1);
   assert.match(terminalHtml, /id="extract-session-preset"[\s\S]*?>命令提取预设<\/button>/);
   assert.match(terminalHtml, /id="extract-all-session-presets"[\s\S]*?>更新所有终端预设<\/button>/);
   assert.equal(terminalHtml.match(/id="extract-session-preset"/g)?.length, 1);
@@ -62,7 +61,7 @@ test("single extraction updates the matching session from the status provider", 
       return {
         session_id: "s1",
         preset_name: "sub2api_gpt-5.6_1M",
-        base_url: "http://HOST:PORT/v1",
+        base_url: "http://192.168.3.2:18381/v1",
       };
     },
     renderSessions() {
@@ -79,7 +78,7 @@ test("single extraction updates the matching session from the status provider", 
     id: "s1",
     name: "terminal_1",
     codex_api_preset_name: "sub2api_gpt-5.6_1M",
-    codex_api_base_url: "http://HOST:PORT/v1",
+    codex_api_base_url: "http://192.168.3.2:18381/v1",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
     ["/api/terminal/sessions/s1/extract-preset", { method: "POST" }],

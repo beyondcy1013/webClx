@@ -17,6 +17,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use terminal_core::tmux_session_name;
 use time::{OffsetDateTime, format_description::FormatItem, macros::format_description};
 use tracing::{info, warn};
@@ -87,6 +88,10 @@ pub struct CompileRequest {
     audit_paths: Vec<String>,
     #[serde(default)]
     required_artifacts: Vec<String>,
+    /// "precompile" marks a warm-up build that must yield to any later real
+    /// build request for the same project. Empty or "compile" is a real build.
+    #[serde(default)]
+    purpose: String,
     #[serde(default)]
     note: String,
     #[serde(default)]
@@ -403,6 +408,7 @@ fn queue_build_request(
         .map_err(|error| AppError::internal(format!("创建编译队列失败: {error}")))?;
 
     let request_id = build_request_id();
+    let purpose = normalize_request_purpose(request_kind, &payload.purpose)?;
     let debounce_secs = payload
         .debounce_secs
         .unwrap_or(DEFAULT_DEBOUNCE_SECS)
@@ -425,6 +431,7 @@ fn queue_build_request(
         "install_command": payload.install_command.clone(),
         "audit_paths": payload.audit_paths.clone(),
         "required_artifacts": payload.required_artifacts.clone(),
+        "purpose": purpose,
         "requested_at": requested_at,
         "debounce_secs": debounce_secs,
         "skip_sync": payload.skip_sync,
@@ -435,6 +442,22 @@ fn queue_build_request(
         .map_err(|error| AppError::internal(format!("序列化编译请求失败: {error}")))?;
     fs::write(&request_path, bytes)
         .map_err(|error| AppError::internal(format!("写入编译请求失败: {error}")))?;
+    // Every request records itself as the newest build for this project. A real
+    // build must stop a warm-up that is still running; a newer warm-up also
+    // stops an older one, because a warm-up is expendable and the newest click
+    // already reflects the state the user wants warmed. The marker is written
+    // before the request returns so the superseded build cannot finish a link
+    // step after the new request was queued and replace its artifacts.
+    if let Err(error) = record_project_supersede_marker(
+        &queue_dir,
+        &project_dir,
+        &request_id,
+        requested_at,
+        purpose,
+    ) {
+        let _ = fs::remove_file(&request_path);
+        return Err(AppError::internal(format!("记录同项目编译取代标记失败: {error}")));
+    }
 
     // The setting value is already clamped to 60..=3600 by the settings normalizer
     // (normalize_compile_command_timeout_secs); pass it straight through.
@@ -715,6 +738,7 @@ fn find_compile_request_in_queue(
             "success" => ("succeeded", true),
             "failed" => ("failed", true),
             "timed_out" => ("timed_out", true),
+            "cancelled" => ("cancelled", true),
             other => (other, false),
         };
         // progress.json 在 run 结束后仍保留最后一次上报值，直接读取，
@@ -1097,6 +1121,72 @@ fn validate_required_artifacts(required_artifacts: &[String]) -> ApiResult<()> {
     Ok(())
 }
 
+/// Deploy requests always supersede a warm-up; compile requests only do when the
+/// caller marks them as precompile. Anything else is rejected instead of being
+/// silently treated as a real build.
+fn normalize_request_purpose(
+    request_kind: BuildRequestKind,
+    purpose: &str,
+) -> ApiResult<&'static str> {
+    if request_kind == BuildRequestKind::Deploy {
+        return Ok("deploy");
+    }
+    match purpose.trim() {
+        "" | "compile" => Ok("compile"),
+        "precompile" => Ok("precompile"),
+        other => Err(AppError::bad_request(format!(
+            "purpose 仅支持 compile 或 precompile，收到 {other:?}"
+        ))),
+    }
+}
+
+fn project_supersede_marker_path(queue_dir: &Path, project_dir: &str) -> PathBuf {
+    let digest = hex::encode(Sha256::digest(project_dir.as_bytes()));
+    queue_dir.join("supersede").join(format!("{digest}.json"))
+}
+
+/// Record the newest real build request per project directory. The compile
+/// worker reads this marker and stops a warm-up build that was queued or started
+/// before the real request, so the warm-up cannot rewrite the shared target
+/// directory after the real build produced its artifacts.
+fn record_project_supersede_marker(
+    queue_dir: &Path,
+    project_dir: &Path,
+    request_id: &str,
+    requested_at: u64,
+    purpose: &str,
+) -> std::io::Result<()> {
+    let marker_dir = queue_dir.join("supersede");
+    fs::create_dir_all(&marker_dir)?;
+    let project_dir_text = project_dir.display().to_string();
+    let path = project_supersede_marker_path(queue_dir, &project_dir_text);
+    if let Ok(existing) = fs::read(&path)
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&existing)
+    {
+        let existing_at = value
+            .get("requested_at")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let existing_id = value
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if existing_at > requested_at || (existing_at == requested_at && existing_id >= request_id)
+        {
+            return Ok(());
+        }
+    }
+    let body = json!({
+        "request_id": request_id,
+        "purpose": purpose,
+        "project_dir": project_dir_text,
+        "requested_at": requested_at,
+    });
+    let temporary = marker_dir.join(format!(".{}-{request_id}.tmp", std::process::id()));
+    fs::write(&temporary, serde_json::to_vec_pretty(&body).map_err(std::io::Error::other)?)?;
+    fs::rename(&temporary, &path)
+}
+
 fn install_command_script_candidates(command: &[String]) -> BTreeSet<String> {
     fn is_script_path(value: &str) -> bool {
         !value.is_empty()
@@ -1104,6 +1194,7 @@ fn install_command_script_candidates(command: &[String]) -> BTreeSet<String> {
             && (value == "noop-deploy.sh"
                 || value.ends_with(".sh")
                 || value.ends_with(".bash")
+                || value.ends_with(".py")
                 || value.starts_with("scripts/")
                 || value.starts_with("./scripts/")
                 || value.contains("/scripts/"))
@@ -1512,6 +1603,10 @@ fn compile_run_summary_from_dir(run_dir: &Path) -> Option<CompileRunSummary> {
         } else {
             "unknown"
         }
+    } else if run_dir_has_file_prefix(run_dir, "precompile-superseded-") {
+        // A warm-up stopped because a newer same-project request arrived did not
+        // fail and did not complete its build; report the cancellation itself.
+        "cancelled"
     } else if run_dir_has_file_prefix(run_dir, "timedout-") {
         "timed_out"
     } else if status_codes.iter().any(|status| *status != 0) {
@@ -2161,6 +2256,98 @@ mod tests {
     }
 
     #[test]
+    fn request_purpose_separates_warmup_from_real_builds() {
+        assert_eq!(normalize_request_purpose(BuildRequestKind::Compile, "").unwrap(), "compile");
+        assert_eq!(
+            normalize_request_purpose(BuildRequestKind::Compile, "compile").unwrap(),
+            "compile"
+        );
+        assert_eq!(
+            normalize_request_purpose(BuildRequestKind::Compile, "precompile").unwrap(),
+            "precompile"
+        );
+        // A deploy request always supersedes warm-ups, whatever the payload says.
+        assert_eq!(
+            normalize_request_purpose(BuildRequestKind::Deploy, "precompile").unwrap(),
+            "deploy"
+        );
+        assert!(normalize_request_purpose(BuildRequestKind::Compile, "warmup").is_err());
+    }
+
+    #[test]
+    fn cancelled_precompile_run_reports_cancelled_state() {
+        let root = std::env::temp_dir().join(format!(
+            "webclx-precompile-cancel-{}-{}",
+            std::process::id(),
+            build_request_id()
+        ));
+        let run_dir = query_fixture_run_dir(&root);
+        fs::create_dir_all(&run_dir).expect("create run fixture");
+        fs::write(
+            run_dir.join("req-warmup.json"),
+            json!({"request_id": "req-warmup", "project": "p", "purpose": "precompile"})
+                .to_string(),
+        )
+        .expect("write request fixture");
+        fs::write(run_dir.join("specs.jsonl"), "{\"project\":\"p\"}\n")
+            .expect("write specs fixture");
+        fs::write(run_dir.join("status-warmup"), "0\n").expect("write status fixture");
+        fs::write(run_dir.join("run-finished-at"), "2026-11-14 17:51:00\n")
+            .expect("write finished fixture");
+        fs::write(run_dir.join("precompile-superseded-warmup"), "174601-real\n")
+            .expect("write cancellation fixture");
+        fs::write(run_dir.join("run.log"), "precompile build stopped\n")
+            .expect("write log fixture");
+
+        let query = find_compile_request_in_queue(&root, "req-warmup", 20);
+        assert_eq!(query.state, "cancelled");
+        assert!(query.done);
+        assert_eq!(query.exit_codes, vec![0]);
+        assert!(
+            query
+                .run
+                .as_ref()
+                .is_some_and(|run| run.status == "cancelled")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn supersede_marker_keeps_the_newest_real_request() {
+        let queue = std::env::temp_dir().join(format!(
+            "webclx-supersede-marker-{}-{}",
+            std::process::id(),
+            build_request_id()
+        ));
+        let project = PathBuf::from("/home/codes/example-project");
+        record_project_supersede_marker(&queue, &project, "100-older", 100, "compile").unwrap();
+        record_project_supersede_marker(&queue, &project, "200-newer", 200, "deploy").unwrap();
+        // A late, older request must not move the marker backwards: the warm-up
+        // would otherwise be allowed to run after a newer real build was queued.
+        record_project_supersede_marker(&queue, &project, "050-stale", 50, "compile").unwrap();
+
+        let marker = project_supersede_marker_path(&queue, "/home/codes/example-project");
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).expect("marker file")).expect("marker json");
+        assert_eq!(value["request_id"], "200-newer");
+        assert_eq!(value["requested_at"], 200);
+        assert_eq!(value["purpose"], "deploy");
+
+        // A newer warm-up supersedes an older real build marker too: warm-ups
+        // are expendable and the newest click wins.
+        record_project_supersede_marker(&queue, &project, "300-warmup", 300, "precompile").unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker).expect("marker file")).expect("marker json");
+        assert_eq!(value["request_id"], "300-warmup");
+        assert_eq!(value["purpose"], "precompile");
+
+        // Different projects keep independent markers.
+        let other = project_supersede_marker_path(&queue, "/home/codes/other-project");
+        assert_ne!(other, marker);
+        let _ = fs::remove_dir_all(&queue);
+    }
+
+    #[test]
     fn deploy_install_command_must_invoke_script() {
         let tmp = std::env::temp_dir().join(format!(
             "webclx-install-command-{}-{}",
@@ -2170,6 +2357,7 @@ mod tests {
         fs::create_dir_all(tmp.join("scripts")).unwrap();
         fs::write(tmp.join("scripts/deploy.sh"), "#!/bin/bash\n").unwrap();
         fs::write(tmp.join("scripts/deploy with spaces.sh"), "#!/bin/bash\n").unwrap();
+        fs::write(tmp.join("deploy.py"), "#!/usr/bin/env python3\n").unwrap();
         let relative = ["bash".to_string(), "scripts/deploy.sh".to_string()];
         let absolute = [
             "bash".to_string(),
@@ -2202,6 +2390,8 @@ mod tests {
         ];
 
         assert!(validate_install_command_script(&relative, &tmp).is_ok());
+        let python_relative = ["python3".to_string(), "deploy.py".to_string()];
+        let python_missing = ["python3".to_string(), "missing.py".to_string()];
         assert!(validate_install_command_script(&absolute, &tmp).is_ok());
         assert!(validate_install_command_script(&inline, &tmp).is_ok());
         assert!(validate_install_command_script(&direct_with_spaces, &tmp).is_ok());
@@ -2209,6 +2399,10 @@ mod tests {
         assert!(validate_install_command_script(&partly_missing, &tmp).is_err());
         let error = validate_install_command_script(&missing, &tmp)
             .expect_err("missing deploy scripts must be rejected before queueing");
+        assert!(error.to_string().contains("不存在"));
+        assert!(validate_install_command_script(&python_relative, &tmp).is_ok());
+        let error = validate_install_command_script(&python_missing, &tmp)
+            .expect_err("missing python deploy scripts must be rejected before queueing");
         assert!(error.to_string().contains("不存在"));
         assert!(validate_install_command_script(&shell_fragment, &tmp).is_err());
 

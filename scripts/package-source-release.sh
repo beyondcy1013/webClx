@@ -23,19 +23,39 @@ fi
 
 mkdir -p "$STAGE" "$(dirname "$OUTPUT")"
 git -C "$PROJECT_DIR" archive HEAD | tar -x -C "$STAGE"
-rm -f "$STAGE/static"
-cp -aL "$PROJECT_DIR/static" "$STAGE/static"
+# Skills are never published: drop the whole skill tree and every SKILL.md.
 rm -rf \
+  "$STAGE/.agents" \
   "$STAGE/.claude" \
   "$STAGE/.codex/plans" \
-  "$STAGE/.codex/skills/webclx-nas-deploy" \
-  "$STAGE/.codex/skills/webclx-remote-deploy" \
-  "$STAGE/.codex/skills/webclx-windows-deploy" \
-  "$STAGE/.codex/skills/webclx-workspace-icon-setting" \
+  "$STAGE/.codex/skills" \
   "$STAGE/.qoder" \
   "$STAGE/.zcode" \
-  "$STAGE/docs/cross-model-verification"
-rm -f "$STAGE/AGENTS.md" "$STAGE/AGENTS.MD" "$STAGE/scripts/deploy-remote-servers.sh"
+  "$STAGE/docs/cross-model-verification" \
+  "$STAGE/docs/codex/collaboration" \
+  "$STAGE/docs/codex/evidence" \
+  "$STAGE/docs/archive/patches" \
+  "$STAGE/patches" \
+  "$STAGE/scripts/patches" \
+  "$STAGE/static.checkout-copy"
+rmdir "$STAGE/.codex" 2>/dev/null || true
+rm -rf "$STAGE/builtin-skills"
+mkdir "$STAGE/builtin-skills"
+touch "$STAGE/builtin-skills/.gitkeep"
+rm -f "$STAGE/AGENTS.md" "$STAGE/AGENTS.MD" "$STAGE/scripts/deploy-remote-servers.sh" \
+  "$STAGE/todo.md" "$STAGE/pelican_bike.html" "$STAGE/pelican-cycle.html" \
+  "$STAGE/docs/codex/tasks/agent-api.md" \
+  "$STAGE/docs/codex/tasks/terminal-scheduled-message-delivery.md" \
+  "$STAGE/tests/builtin-terminal-message-skill.test.mjs" \
+  "$STAGE/tests/terminal-message-delivery.test.mjs" \
+  "$STAGE/tests/terminal-message-scheduled-skill.test.py" \
+  "$STAGE/tests/compile-api-compatibility.test.mjs" \
+  "$STAGE/tests/compile-deploy-target-path.test.mjs" \
+  "$STAGE/tests/security-client-redirects.test.mjs"
+find "$STAGE" -name 'SKILL.md' -delete
+find "$STAGE/docs/archive/audits" -mindepth 1 \
+  ! -name '2026-06-11-optimization-suggestions.md' -delete 2>/dev/null || true
+find "$STAGE" -type f \( -name '*.bak' -o -name '*.bak-*' -o -name '*.orig' \) -delete
 
 ARCHIVE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$STAGE/Cargo.toml" | head -n 1)"
 if [ "$ARCHIVE_VERSION" != "$VERSION" ]; then

@@ -19,7 +19,13 @@
   };
   const request = async (url, options = {}) => { const response = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options }); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.error || body.message || `请求失败 (${response.status})`); return body; };
   const esc = (value) => { const node = document.createElement("span"); node.textContent = value == null ? "" : String(value); return node.innerHTML; };
-  const formatTime = (seconds) => seconds ? new Date(seconds * 1000).toLocaleString() : "-";
+  const formatTime = (seconds) => {
+    if (!seconds) return "-";
+    const date = new Date(Number(seconds) * 1000);
+    if (Number.isNaN(date.getTime())) return "-";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
   const copyText = async (text) => {
     if (!text) return false;
     try {
@@ -42,63 +48,197 @@
       return false;
     }
   };
-  const formatQuotaItems = (summary, provider) => {
+  const findWeeklyResetTime = (summary) => {
     const groups = Array.isArray(summary?.groups) ? summary.groups : [];
-    const classifyGroup = (group) => {
-      const text = [group?.displayName, group?.description, ...(Array.isArray(group?.buckets) ? group.buckets.map((bucket) => bucket?.bucketId) : [])]
-        .filter(Boolean).join(" ").toLowerCase();
-      if (text.includes("gemini")) return "gemini";
-      if (text.includes("claude") || text.includes("3p") || text.includes("gpt")) return "claude";
-      return "other";
+    for (const g of groups) {
+      if (Array.isArray(g?.buckets)) {
+        for (const b of g.buckets) {
+          const w = String(b?.window || b?.bucketId || b?.id || "").toLowerCase();
+          const rt = b?.resetTime || b?.reset_time;
+          if (w.includes("weekly") && rt) {
+            return rt;
+          }
+        }
+      }
+    }
+    return "";
+  };
+
+  const extractGeminiFromModels = (models, window, summary) => {
+    if (!models || typeof models !== "object") return null;
+    let fraction = null;
+    let resetTime = null;
+    for (const [key, val] of Object.entries(models)) {
+      const lower = key.toLowerCase();
+      if (!lower.includes("gemini") || lower.includes("argon") || val?.disabled === true) continue;
+      const qi = val?.quotaInfo || val?.quota_info;
+      if (qi) {
+        const frac = qi.remainingFraction != null ? qi.remainingFraction : qi.remaining_fraction;
+        if (typeof frac === "number" && Number.isFinite(frac) && frac >= 0) {
+          fraction = fraction == null ? frac : Math.min(fraction, frac);
+        }
+        const rt = qi.resetTime || qi.reset_time;
+        if (rt && !resetTime) {
+          resetTime = rt;
+        }
+      }
+    }
+    if (fraction == null && !resetTime) return null;
+    if (window === "weekly") {
+      const weeklyReset = findWeeklyResetTime(summary) || resetTime || "";
+      return {
+        bucketId: "gemini-weekly",
+        window: "weekly",
+        displayName: "Weekly Limit Remaining",
+        remainingFraction: 1.0,
+        resetTime: weeklyReset,
+      };
+    }
+    return {
+      bucketId: "gemini-5h",
+      window: "5h",
+      displayName: "Five Hour Limit Remaining",
+      remainingFraction: fraction,
+      resetTime: resetTime || "",
     };
-    const bucketByProviderAndWindow = (window) => groups
-      .filter((group) => classifyGroup(group) === provider)
-      .flatMap((group) => Array.isArray(group?.buckets) ? group.buckets : [])
-      .find((bucket) => String(bucket?.window || bucket?.bucketId || "").toLowerCase().includes(window));
-    const formatBucket = (bucket) => {
-      const fraction = bucket?.remainingFraction;
-      if (typeof fraction !== "number" || !Number.isFinite(fraction)) return { value: "没有数据", percent: null, resetTitle: "" };
+  };
+
+  const extractArgonFromModels = (models, window, summary) => {
+    if (!models || typeof models !== "object") return null;
+    let fraction = null;
+    let resetTime = null;
+    for (const [key, val] of Object.entries(models)) {
+      if (!key.toLowerCase().includes("argon") || val?.disabled === true) continue;
+      const qi = val?.quotaInfo || val?.quota_info;
+      if (qi) {
+        const frac = qi.remainingFraction != null ? qi.remainingFraction : qi.remaining_fraction;
+        if (typeof frac === "number" && Number.isFinite(frac) && frac >= 0) {
+          fraction = fraction == null ? frac : Math.min(fraction, frac);
+        }
+        const rt = qi.resetTime || qi.reset_time;
+        if (rt && !resetTime) {
+          resetTime = rt;
+        }
+      }
+    }
+    if (fraction == null && !resetTime) return null;
+    const weeklyReset = resetTime || findWeeklyResetTime(summary) || "";
+    if (window === "weekly") {
+      return {
+        bucketId: "argon-weekly",
+        window: "weekly",
+        displayName: "Gemini 4 Argon Weekly Limit",
+        remainingFraction: fraction,
+        resetTime: weeklyReset,
+      };
+    }
+    return null;
+  };
+
+  const classifyGroup = (group) => {
+    const text = [
+      group?.displayName,
+      group?.name,
+      group?.description,
+      ...(Array.isArray(group?.buckets) ? group.buckets.map((b) => b?.bucketId || b?.id || b?.displayName || b?.name) : [])
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (text.includes("argon")) return "argon";
+    if (text.includes("gemini")) return "gemini";
+    if (text.includes("claude") || text.includes("3p") || text.includes("gpt")) return "claude";
+    return "other";
+  };
+
+  const formatQuotaItems = (summary, provider, models) => {
+    const groups = Array.isArray(summary?.groups) ? summary.groups : [];
+    const bucketByProviderAndWindow = (window) => {
+      let b = groups
+        .filter((group) => classifyGroup(group) === provider)
+        .flatMap((group) => Array.isArray(group?.buckets) ? group.buckets : [])
+        .find((bucket) => String(bucket?.window || bucket?.bucketId || bucket?.id || "").toLowerCase().includes(window));
+      if (!b && provider === "gemini" && models) {
+        b = extractGeminiFromModels(models, window, summary);
+      }
+      if (!b && provider === "argon" && models) {
+        b = extractArgonFromModels(models, window, summary);
+      }
+      return b;
+    };
+    const formatBucket = (bucket, window) => {
+      const fraction = bucket?.remainingFraction != null ? bucket.remainingFraction : bucket?.remaining_fraction;
+      if (typeof fraction !== "number" || !Number.isFinite(fraction)) {
+        return { value: "-", percent: null, resetTitle: "" };
+      }
       const percent = Math.min(100, Math.max(0, fraction * 100));
-      const resetText = bucket?.resetTime ? `复位时间: ${new Date(bucket.resetTime).toLocaleString("zh-CN", { hour12: false })}` : "";
+      const rt = bucket?.resetTime || bucket?.reset_time;
+      const resetText = rt ? `复位时间: ${formatNumericDate(new Date(rt))}` : "";
       const resetTitle = [bucket?.description, resetText].filter(Boolean).join(" | ");
       return { value: `${percent.toFixed(1)}%`, percent, resetTitle };
     };
+
+    if (provider === "argon") {
+      const wBucket = bucketByProviderAndWindow("weekly");
+      const h5Bucket = bucketByProviderAndWindow("5h");
+      if (!wBucket && !h5Bucket) return [];
+      const res = [];
+      if (wBucket) {
+        res.push({ label: "周", ...formatBucket(wBucket, "weekly") });
+      }
+      if (h5Bucket) {
+        res.push({ label: "5h", ...formatBucket(h5Bucket, "5h") });
+      }
+      return res;
+    }
+
     return ["weekly", "5h"].map((window) => {
       const label = window === "weekly" ? "周" : "5h";
-      return { label, ...formatBucket(bucketByProviderAndWindow(window)) };
+      return { label, ...formatBucket(bucketByProviderAndWindow(window), window) };
     });
   };
-  const formatQuotaCell = (summary) => {
-    if (!summary) return null;
-    const claudeItems = formatQuotaItems(summary, "claude");
-    const geminiItems = formatQuotaItems(summary, "gemini");
-    const hasAny = [...claudeItems, ...geminiItems].some((item) => item.percent != null);
+
+  const formatQuotaCell = (summary, models) => {
+    if (summary && typeof summary === "object") {
+      if (!models && summary.models) models = summary.models;
+      if (summary.quotaSummary) summary = summary.quotaSummary;
+    }
+    if (!summary && !models) return null;
+    const claudeItems = formatQuotaItems(summary, "claude", models);
+    const geminiItems = formatQuotaItems(summary, "gemini", models);
+    const argonItems = formatQuotaItems(summary, "argon", models);
+    const hasAny = [...claudeItems, ...geminiItems, ...argonItems].some((item) => item?.percent != null);
     if (!hasAny) return null;
     const renderRow = (label, items) => {
+      if (!items || !items.length) return "";
       const itemsHtml = items.map(quotaItemHtml).join('<span class="agy-quota-sep">·</span>');
       return `<div class="agy-time-row"><span class="agy-quota-window agy-model-label">${esc(label)}</span>${itemsHtml}</div>`;
     };
-    return `<div class="agy-time-lines">${renderRow("Claude", claudeItems)}${renderRow("Gemini", geminiItems)}</div>`;
+    const cRow = renderRow("Claude", claudeItems);
+    const gRow = renderRow("Gemini", geminiItems);
+    const aRow = argonItems.length && argonItems.some((i) => i.percent != null) ? renderRow("Argon", argonItems) : "";
+    return `<div class="agy-time-lines">${cRow}${gRow}${aRow}</div>`;
   };
-  const getProviderResetInfo = (summary, provider) => {
+
+  const getProviderResetInfo = (summary, provider, models) => {
     const groups = Array.isArray(summary?.groups) ? summary.groups : [];
-    const classifyGroup = (group) => {
-      const text = [group?.displayName, group?.description, ...(Array.isArray(group?.buckets) ? group.buckets.map((bucket) => bucket?.bucketId) : [])]
-        .filter(Boolean).join(" ").toLowerCase();
-      if (text.includes("gemini")) return "gemini";
-      if (text.includes("claude") || text.includes("3p") || text.includes("gpt")) return "claude";
-      return "other";
+    const bucketByProviderAndWindow = (window) => {
+      let b = groups
+        .filter((group) => classifyGroup(group) === provider)
+        .flatMap((group) => Array.isArray(group?.buckets) ? group.buckets : [])
+        .find((bucket) => String(bucket?.window || bucket?.bucketId || bucket?.id || "").toLowerCase().includes(window));
+      if (!b && provider === "gemini" && models) {
+        b = extractGeminiFromModels(models, window, summary);
+      }
+      if (!b && provider === "argon" && models) {
+        b = extractArgonFromModels(models, window, summary);
+      }
+      return b;
     };
-    const bucketByProviderAndWindow = (window) => groups
-      .filter((group) => classifyGroup(group) === provider)
-      .flatMap((group) => Array.isArray(group?.buckets) ? group.buckets : [])
-      .find((bucket) => String(bucket?.window || bucket?.bucketId || "").toLowerCase().includes(window));
 
     const now = Date.now();
     const parse = (window, label) => {
       const b = bucketByProviderAndWindow(window);
       if (!b) return null;
-      const d = b.resetTime ? new Date(b.resetTime) : null;
+      const rt = b.resetTime || b.reset_time;
+      const d = rt ? new Date(rt) : null;
       const valid = d && !Number.isNaN(d.getTime());
       const diff = valid ? d.getTime() - now : -1;
       return {
@@ -138,34 +278,72 @@
     return `${minutes}分`;
   };
 
-  const formatResetTimeCell = (summary) => {
-    const c = getProviderResetInfo(summary, "claude");
-    const g = getProviderResetInfo(summary, "gemini");
-    if (!c && !g) return null;
+  const formatResetTimeCell = (summary, models) => {
+    if (summary && typeof summary === "object") {
+      if (!models && summary.models) models = summary.models;
+      if (summary.quotaSummary) summary = summary.quotaSummary;
+    }
+    const c = getProviderResetInfo(summary, "claude", models);
+    const g = getProviderResetInfo(summary, "gemini", models);
+    const a = getProviderResetInfo(summary, "argon", models);
+    if (!c && !g && !a) return null;
     const renderRow = (label, info) => {
       if (!info) return "";
-      const h5Str = info.h5?.date ? `5h ${formatNumericDate(info.h5.date)}` : "5h -";
-      const wStr = info.weekly?.date ? `周 ${formatNumericDate(info.weekly.date)}` : "周 -";
-      const full5h = info.h5?.date ? `5h: ${info.h5.date.toLocaleString("zh-CN", { hour12: false })}` : "5h: 无数据";
-      const fullW = info.weekly?.date ? `周: ${info.weekly.date.toLocaleString("zh-CN", { hour12: false })}` : "周: 无数据";
-      const title = `${label} 复位时间 | ${fullW} | ${full5h}`;
-      return `<div class="agy-time-row" title="${esc(title)}"><span class="agy-quota-window agy-model-label">${esc(label)}</span><span class="mono-text">${esc(wStr)} · ${esc(h5Str)}</span></div>`;
+      const parts = [];
+      if (info.weekly?.date) {
+        parts.push(`周 ${formatNumericDate(info.weekly.date)}`);
+      } else if (label !== "Argon") {
+        parts.push("周 -");
+      }
+      if (info.h5?.date) {
+        parts.push(`5h ${formatNumericDate(info.h5.date)}`);
+      } else if (label !== "Argon") {
+        parts.push("5h -");
+      }
+      if (!parts.length) return "";
+      const text = parts.join(" · ");
+      const full5h = info.h5?.date ? `5h: ${formatNumericDate(info.h5.date)}` : (label === "Argon" ? "" : "5h: 无数据");
+      const fullW = info.weekly?.date ? `周: ${formatNumericDate(info.weekly.date)}` : (label === "Argon" ? "" : "周: 无数据");
+      const title = [label + " 复位时间", fullW, full5h].filter(Boolean).join(" | ");
+      return `<div class="agy-time-row" title="${esc(title)}"><span class="agy-quota-window agy-model-label">${esc(label)}</span><span class="mono-text">${esc(text)}</span></div>`;
     };
-    return `<div class="agy-time-lines">${renderRow("Claude", c)}${renderRow("Gemini", g)}</div>`;
+    const cRow = renderRow("Claude", c);
+    const gRow = renderRow("Gemini", g);
+    const aRow = a ? renderRow("Argon", a) : "";
+    return `<div class="agy-time-lines">${cRow}${gRow}${aRow}</div>`;
   };
 
-  const formatCountdownCell = (summary) => {
-    const c = getProviderResetInfo(summary, "claude");
-    const g = getProviderResetInfo(summary, "gemini");
-    if (!c && !g) return null;
+  const formatCountdownCell = (summary, models) => {
+    if (summary && typeof summary === "object") {
+      if (!models && summary.models) models = summary.models;
+      if (summary.quotaSummary) summary = summary.quotaSummary;
+    }
+    const c = getProviderResetInfo(summary, "claude", models);
+    const g = getProviderResetInfo(summary, "gemini", models);
+    const a = getProviderResetInfo(summary, "argon", models);
+    if (!c && !g && !a) return null;
     const renderRow = (label, info) => {
       if (!info) return "";
-      const h5Str = info.h5 ? `5h ${formatCountdown(info.h5.diff)}` : "5h -";
-      const wStr = info.weekly ? `周 ${formatCountdown(info.weekly.diff)}` : "周 -";
-      const title = `${label} 倒计时 | ${wStr} | ${h5Str}`;
-      return `<div class="agy-time-row" title="${esc(title)}"><span class="agy-quota-window agy-model-label">${esc(label)}</span><span class="mono-text">${esc(wStr)} · ${esc(h5Str)}</span></div>`;
+      const parts = [];
+      if (info.weekly) {
+        parts.push(`周 ${formatCountdown(info.weekly.diff)}`);
+      } else if (label !== "Argon") {
+        parts.push("周 -");
+      }
+      if (info.h5) {
+        parts.push(`5h ${formatCountdown(info.h5.diff)}`);
+      } else if (label !== "Argon") {
+        parts.push("5h -");
+      }
+      if (!parts.length) return "";
+      const text = parts.join(" · ");
+      const title = `${label} 倒计时 | ${parts.join(" | ")}`;
+      return `<div class="agy-time-row" title="${esc(title)}"><span class="agy-quota-window agy-model-label">${esc(label)}</span><span class="mono-text">${esc(text)}</span></div>`;
     };
-    return `<div class="agy-time-lines">${renderRow("Claude", c)}${renderRow("Gemini", g)}</div>`;
+    const cRow = renderRow("Claude", c);
+    const gRow = renderRow("Gemini", g);
+    const aRow = a ? renderRow("Argon", a) : "";
+    return `<div class="agy-time-lines">${cRow}${gRow}${aRow}</div>`;
   };
 
   const quotaItemHtml = (entry) => {
@@ -223,9 +401,9 @@
     }
 
     const cachedItems = item.quota_cache?.ok ? {
-      quota: formatQuotaCell(item.quota_cache.quotaSummary),
-      reset: formatResetTimeCell(item.quota_cache.quotaSummary),
-      countdown: formatCountdownCell(item.quota_cache.quotaSummary),
+      quota: formatQuotaCell(item.quota_cache.quotaSummary, item.quota_cache.models),
+      reset: formatResetTimeCell(item.quota_cache.quotaSummary, item.quota_cache.models),
+      countdown: formatCountdownCell(item.quota_cache.quotaSummary, item.quota_cache.models),
     } : null;
     const timeTitle = item.quota_cached_at ? `缓存时间：${formatTime(item.quota_cached_at)}` : "尚未缓存";
     const quotaBody = cachedItems?.quota || "-";
@@ -239,28 +417,57 @@
     const nameCellHtml = `<td class="agy-col-name agy-name-clickable" data-copy-email="${esc(item.email || "")}" title="${nameTitle}">${esc(item.name || "未命名")}${currentBadge}</td>`;
     const emailCellHtml = `<td class="agy-col-email">${esc(item.email || "未解析")}</td>`;
     const statusCellHtml = `<td class="agy-col-status">${item.valid ? '<span class="status-badge success">可用</span>' : '<span class="status-badge error">无效</span>'}</td>`;
-    const quotaAtCellHtml = `<td class="agy-col-quota-at agy-quota-at-cell" data-quota-id="${esc(item.id)}">${esc(formatTime(item.quota_cached_at))}</td>`;
+    const quotaAtText = typeof window.formatAccountRefreshedTime === "function"
+      ? window.formatAccountRefreshedTime(item.quota_cached_at ? item.quota_cached_at * 1000 : null)
+      : formatTime(item.quota_cached_at);
+    const quotaAtCellHtml = `<td class="agy-col-quota-at agy-quota-at-cell" data-quota-id="${esc(item.id)}">${esc(quotaAtText)}</td>`;
     const savedCellHtml = `<td class="agy-col-saved agy-saved-cell">${esc(formatTime(item.saved_at))}</td>`;
+    const lastSwitchValue = item.last_switch_at ?? item.lastSwitchAt ?? null;
+    const lastSwitchText = typeof window.formatAccountRefreshedTime === "function"
+      ? window.formatAccountRefreshedTime(lastSwitchValue)
+      : formatTime(lastSwitchValue ? Number(lastSwitchValue) / 1000 : null);
+    const lastSwitchTitle = lastSwitchText === "-" || lastSwitchText === "—"
+      ? "切换时间未记录"
+      : `最近切换时间：${lastSwitchText}`;
+    const lastSwitchCellHtml = `<td class="agy-col-last-switch agy-last-switch-cell" title="${esc(lastSwitchTitle)}">${esc(lastSwitchText)}</td>`;
+    const usageCount = typeof window.windowedUsageCount === "function"
+      ? window.windowedUsageCount(item)
+      : Number(item.switch_count || 0);
+    const usageLabel = typeof window.getAccountUsageWindowLabel === "function"
+      ? window.getAccountUsageWindowLabel()
+      : "全部（累计）";
+    const usageTitle = `「使用」统计窗口：${usageLabel}`;
+    const usageCellHtml = `<td class="agy-col-usage agy-usage-cell" title="${esc(usageTitle)}">${esc(String(usageCount))}</td>`;
 
     row.appendChild(actionsCell);
     row.insertAdjacentHTML(
       "beforeend",
-      `${nameCellHtml}${emailCellHtml}${statusCellHtml}${quotaCellHtml}${resetCellHtml}${countdownCellHtml}${quotaAtCellHtml}${savedCellHtml}`
+      `${nameCellHtml}${emailCellHtml}${statusCellHtml}${quotaCellHtml}${resetCellHtml}${countdownCellHtml}${quotaAtCellHtml}${savedCellHtml}${lastSwitchCellHtml}${usageCellHtml}`
     );
     return row;
   };
+  let lastAgyItems = [];
+  function paintAgyRows(items) {
+    if (!list) return;
+    list.innerHTML = "";
+    if (!items.length) {
+      list.innerHTML = '<tr><td colspan="11" class="muted-text">暂无 AGY 预设</td></tr>';
+      return;
+    }
+    for (const item of items) {
+      list.appendChild(renderRow(item));
+    }
+  }
+  // 切换「使用」统计窗口时用缓存重画，不发起网络请求。
+  function renderUsageWindow() {
+    paintAgyRows(lastAgyItems);
+  }
   async function load() {
     if (!list) return;
     try {
       const items = await request("/api/agy/presets");
-      list.innerHTML = "";
-      if (!items.length) {
-        list.innerHTML = '<tr><td colspan="9" class="muted-text">暂无 AGY 预设</td></tr>';
-        return;
-      }
-      for (const item of items) {
-        list.appendChild(renderRow(item));
-      }
+      lastAgyItems = Array.isArray(items) ? items : [];
+      paintAgyRows(lastAgyItems);
     } catch (error) { setStatus(error.message, "error"); }
   }
   const importItemsFromParsed = (parsed) => {
@@ -306,7 +513,22 @@
       await load();
     } catch (error) { setStatus(error.message, "error"); }
   }
-  async function importCurrent() { try { setStatus("正在读取本机 AGY 登录…", "info"); await request("/api/agy/current/import", { method: "POST" }); setStatus("本机已登录账号已加入 AGY 预设", "success"); await load(); } catch (error) { setStatus(error.message, "error"); } }
+  async function importCurrent() {
+    try {
+      setStatus("正在读取本机 AGY 登录…", "info");
+      const res = await request("/api/agy/current/import", { method: "POST" });
+      const label = res?.email || res?.name || res?.id || "";
+      setStatus(
+        res?.imported
+          ? `本机已登录账号已备份到 AGY 预设${label ? `：${label}` : ""}`
+          : `已同步本机登录账号到 AGY 预设${label ? `：${label}` : ""}`,
+        "success",
+      );
+      await load();
+    } catch (error) {
+      setStatus(error.message, "error");
+    }
+  }
   async function startOauth() { try { setStatus("正在生成 AGY OAuth 登录链接…", "info"); const session = await request("/api/agy/oauth/start", { method: "POST" }); oauthSession = session; const open = document.getElementById("agy-oauth-open"); const panel = document.getElementById("agy-oauth-panel"); if (open) { open.href = session.auth_url; open.hidden = false; } if (panel) panel.hidden = false; window.open(session.auth_url, "agy-oauth", "noopener,noreferrer"); setStatus("请完成 Google 登录，然后粘贴回调 URL 或 code", "info"); } catch (error) { setStatus(error.message, "error"); } }
   async function exchangeOauth() { const raw = document.getElementById("agy-oauth-code")?.value.trim() || ""; if (!oauthSession || !raw) { setStatus("请先启动 OAuth 并粘贴回调 URL 或 code", "error"); return; } try { let code = raw; let state = oauthSession.state; try { const parsed = new URL(raw); code = parsed.searchParams.get("code") || raw; state = parsed.searchParams.get("state") || state; } catch (_) {} await request("/api/agy/oauth/exchange", { method: "POST", body: JSON.stringify({ session_id: oauthSession.session_id, state, code }) }); setStatus("AGY OAuth 登录成功，账号已保存", "success"); oauthSession = null; document.getElementById("agy-oauth-panel").hidden = true; document.getElementById("agy-oauth-open").hidden = true; document.getElementById("agy-oauth-code").value = ""; await load(); } catch (error) { setStatus(error.message, "error"); } }
   async function action(id, type) {
@@ -338,10 +560,10 @@
         const detail = typeof result.error === "string" ? result.error : result.error?.message || JSON.stringify(result.error || "查询失败");
         throw new Error(detail);
       }
-      const quotaHtml = formatQuotaCell(result.quotaSummary);
-      const resetHtml = formatResetTimeCell(result.quotaSummary);
-      const countdownHtml = formatCountdownCell(result.quotaSummary);
-      const nowTitle = `缓存时间：${new Date().toLocaleString()}`;
+      const quotaHtml = formatQuotaCell(result.quotaSummary, result.models);
+      const resetHtml = formatResetTimeCell(result.quotaSummary, result.models);
+      const countdownHtml = formatCountdownCell(result.quotaSummary, result.models);
+      const nowTitle = `缓存时间：${formatNumericDate(new Date())}`;
       if (cells.quota) {
         cells.quota.innerHTML = quotaHtml || "-";
         cells.quota.dataset.tone = quotaHtml ? "success" : "info";
@@ -358,7 +580,9 @@
         cells.countdown.title = nowTitle;
       }
       if (cells.quotaAt) {
-        cells.quotaAt.textContent = new Date().toLocaleString();
+        cells.quotaAt.textContent = typeof window.formatAccountRefreshedTime === "function"
+          ? window.formatAccountRefreshedTime(Date.now())
+          : formatNumericDate(new Date());
       }
       setStatus(quotaHtml ? "AGY 剩余额度已更新" : "接口已返回配额数据，但没有可展示的配额分组。", quotaHtml ? "success" : "info");
     } catch (error) {
@@ -474,7 +698,21 @@
     if (parsed) {
       let items = null;
       if (Array.isArray(parsed)) items = parsed;
-      else if (parsed && typeof parsed === "object" && (parsed.email || parsed.refresh_token || parsed.refreshToken)) items = [parsed];
+      else if (
+        parsed &&
+        typeof parsed === "object" &&
+        (parsed.email ||
+          parsed.id_token_email ||
+          parsed.refresh_token ||
+          parsed.refreshToken ||
+          (parsed.token &&
+            typeof parsed.token === "object" &&
+            (parsed.token.refresh_token || parsed.token.refreshToken)) ||
+          (parsed.format === "webclx-native-login" &&
+            parsed.files?.[".gemini/antigravity-cli/antigravity-oauth-token"]))
+      ) {
+        items = [parsed];
+      }
       else if (parsed && Array.isArray(parsed.accounts)) items = parsed.accounts;
       else if (parsed && Array.isArray(parsed.items)) items = parsed.items;
       if (Array.isArray(items) && items.length) return items;
@@ -650,7 +888,9 @@
     try {
       const res = await request("/api/agy/presets/detect-current", { method: "POST" });
       await load();
-      if (res?.matched && res?.name) {
+      if (res?.imported && (res?.email || res?.name || res?.id)) {
+        setStatus(`已读取本机 AGY 登录并备份到账号列表：${res.name || res.email || res.id}（${res.email || res.id}）`, "success");
+      } else if (res?.matched && res?.name) {
         setStatus(`已重新读取本地 AGY 当前生效账号：${res.name}（${res.email || res.id}）`, "success");
       } else if (res?.email) {
         setStatus(`已重新读取本地 AGY 当前生效凭据：${res.email}（未在 AGY 账号列表中）`, "info");
@@ -719,5 +959,5 @@
   document.getElementById("agy-option-auto-edits")?.addEventListener("change", saveOptions);
   refreshOptions();
 
-  window.agyManager = { load, renderRow, parseImportText, detectCurrent, refreshOptions, saveOptions };
+  window.agyManager = { load, renderRow, renderUsageWindow, parseImportText, detectCurrent, importCurrent, setStatus, refreshOptions, saveOptions };
 })();

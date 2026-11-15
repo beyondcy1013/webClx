@@ -117,7 +117,7 @@ test("apply accepts optional project and proxy preference parameters", async () 
   });
   assert.equal(
     harness.requests[0].url,
-    "/api/auth/codex-accounts/api/preset-1/apply?project_path=%2Fhome%2Fcodes%2FwebClx&respect_saved_proxy_preference=false",
+    "/api/auth/codex-accounts/api/preset-1/apply?project_path=%2Fhome%2Fcodes%2Ftools%2FwebClx&respect_saved_proxy_preference=false",
   );
 });
 

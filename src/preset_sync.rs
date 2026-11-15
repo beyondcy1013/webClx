@@ -506,6 +506,7 @@ async fn fetch_remote_preset_config(remote_url: &str) -> ApiResult<(String, Pres
     // 含 userinfo（http://user:pass@host）时，先调远程 /api/auth/login 拿到
     // session cookie，再带 cookie 请求 preset-config 接口。
     let mut cookie_value: Option<String> = None;
+    let mut cookie_name = SESSION_COOKIE_NAME.to_string();
     if let (Some(user), Some(pass)) = (username.as_deref(), password.as_deref()) {
         let login_response = client
             .post(&login_url)
@@ -532,8 +533,15 @@ async fn fetch_remote_preset_config(remote_url: &str) -> ApiResult<(String, Pres
             for pair in value.split(';') {
                 let pair = pair.trim();
                 if let Some((k, v)) = pair.split_once('=')
-                    && k.trim() == SESSION_COOKIE_NAME
+                    && (k.trim() == SESSION_COOKIE_NAME
+                        || k.trim()
+                            .strip_prefix("webclx_session_")
+                            .is_some_and(|suffix| {
+                                suffix.len() == 24
+                                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+                            }))
                 {
+                    cookie_name = k.trim().to_string();
                     cookie_value = Some(v.trim().to_string());
                     break;
                 }
@@ -548,7 +556,7 @@ async fn fetch_remote_preset_config(remote_url: &str) -> ApiResult<(String, Pres
 
     let mut request = client.get(&source_url);
     if let Some(ref cookie) = cookie_value {
-        request = request.header("Cookie", format!("{SESSION_COOKIE_NAME}={cookie}"));
+        request = request.header("Cookie", format!("{cookie_name}={cookie}"));
     }
     let response = request
         .send()

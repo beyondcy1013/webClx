@@ -48,7 +48,9 @@ function showManualCopyFallback(text) {
   buttonRow.append(selectButton, closeButton);
   card.append(heading, hint, textarea, buttonRow);
   overlay.appendChild(card);
-  document.body.appendChild(overlay);
+  const openDialogs = document.querySelectorAll("dialog[open]");
+  const container = openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : document.body;
+  container.appendChild(overlay);
 
   window.requestAnimationFrame(() => {
     textarea.focus();
@@ -84,16 +86,30 @@ async function copyTextToClipboard(text) {
     }
   }
 
+  const openDialogs = document.querySelectorAll("dialog[open]");
+  const container = openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : document.body;
   const textarea = document.createElement("textarea");
   textarea.value = text;
-  textarea.setAttribute("readonly", "true");
   textarea.dataset.terminalClipboardHelper = "true";
+  textarea.setAttribute("tabindex", "-1");
+  textarea.setAttribute("aria-hidden", "true");
   textarea.style.position = "fixed";
+  textarea.style.top = "-9999px";
+  textarea.style.left = "-9999px";
+  textarea.style.width = "2em";
+  textarea.style.height = "2em";
+  textarea.style.padding = "0";
+  textarea.style.border = "none";
+  textarea.style.outline = "none";
+  textarea.style.boxShadow = "none";
+  textarea.style.background = "transparent";
   textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.focus();
+  container.appendChild(textarea);
+  textarea.focus({ preventScroll: true });
   textarea.select();
+  if (typeof textarea.setSelectionRange === "function") {
+    textarea.setSelectionRange(0, textarea.value.length);
+  }
 
   try {
     const copied = Boolean(document.execCommand?.("copy"));
@@ -109,8 +125,7 @@ async function copyTextToClipboard(text) {
           return false;
         }
       } catch {
-        showManualCopyFallback(text);
-        return false;
+        // Fall through to browser clipboard APIs outside the native client.
       }
     }
     return true;
@@ -255,11 +270,48 @@ function sessionContextDetailLabel(session) {
   return "未记录";
 }
 
+function sessionModelFamilyLabel(session) {
+  if (typeof sharedSessionModelFamilyLabel === "function") {
+    return sharedSessionModelFamilyLabel(session);
+  }
+  const explicit = String(session?.model_family || session?.modelFamily || "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  const statusModel = String(
+    session?.codex_status?.model ||
+    (typeof state !== "undefined" && typeof state?.sessionContextCache?.get === "function"
+      ? state.sessionContextCache.get(session?.id)?.model
+      : null) ||
+    ""
+  ).trim();
+  if (statusModel) {
+    const lower = statusModel.toLowerCase();
+    if (lower.includes("deepseek")) return "deepseek";
+    if (lower.includes("glm") || lower.includes("zhipu")) return "glm";
+    if (lower.includes("claude") || lower.includes("sonnet") || lower.includes("opus") || lower.includes("haiku")) return "claude";
+    if (lower.includes("gpt") || lower.includes("o1") || lower.includes("o3")) return "gpt";
+    if (lower.includes("gemini")) return "gemini";
+    if (lower.includes("qwen")) return "qwen";
+    if (lower.includes("kimi") || lower.includes("moonshot")) return "kimi";
+    return statusModel;
+  }
+  const text = `${session?.name || ""} ${session?.codex_api_preset_name || ""} ${session?.title || ""}`.toLowerCase();
+  if (text.includes("deepseek")) return "deepseek";
+  if (text.includes("glm") || text.includes("zhipu")) return "glm";
+  if (text.includes("claude") || text.includes("sonnet") || text.includes("opus") || text.includes("haiku")) return "claude";
+  if (text.includes("gpt") || text.includes("openai") || text.includes("o1") || text.includes("o3")) return "gpt";
+  if (text.includes("gemini")) return "gemini";
+  if (text.includes("qwen")) return "qwen";
+  if (text.includes("kimi") || text.includes("moonshot")) return "kimi";
+  return "";
+}
+
 function sessionOptionLabel(session) {
   const groupName = String(session?.group_name || session?.groupName || "").trim();
-  const groupBadge = groupName ? `【${groupName}】` : "";
+  const groupBadge = groupName ? `[${groupName}] ` : "";
   const label = `${groupBadge}${sessionActivityAgentPrefix(session)}${sessionActivityPrefix(session)}${session?.name || session?.id || "未命名终端"}${sessionActivityAgentSuffix(session)}`;
-  if (!state.showSessionDetails && !state.showSessionAgent && !state.showSessionContext) {
+  if (!state.showSessionDetails && !state.showSessionAgent && !state.showSessionModelFamily && !state.showSessionContext) {
     return label;
   }
   const detailParts = [];
@@ -275,6 +327,10 @@ function sessionOptionLabel(session) {
   if (state.showSessionAgent) {
     const agentDetail = sessionActivityAgentLabel(session) || "未记录";
     detailParts.push(agentDetail);
+  }
+  if (state.showSessionModelFamily) {
+    const modelFamilyDetail = sessionModelFamilyLabel(session) || "未记录";
+    detailParts.push(modelFamilyDetail);
   }
   if (state.showSessionContext) {
     const contextDetail = sessionContextDetailLabel(session) || "未记录";

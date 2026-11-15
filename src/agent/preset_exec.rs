@@ -232,6 +232,7 @@ mod tests {
 
     fn preset(id: &str, name: &str) -> StoredApiPreset {
         StoredApiPreset {
+            switch_history: Vec::new(),
             interchange_source: None,
             id: id.to_string(),
             name: name.to_string(),
@@ -255,6 +256,7 @@ mod tests {
             access_mode: None,
             favorite: false,
             switch_count: 0,
+            last_switch_at: None,
         }
     }
 

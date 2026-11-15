@@ -97,6 +97,9 @@
       if (normalized === "timed_out") {
         return { text: "已超时", tone: "warn" };
       }
+      if (normalized === "cancelled") {
+        return { text: "已取消", tone: "muted" };
+      }
       if (normalized === "unknown") {
         return { text: "未知", tone: "muted" };
       }
@@ -105,7 +108,7 @@
 
     function isCompileRunEnded(run) {
       const normalized = String(run?.status || "").trim().toLowerCase();
-      return normalized === "success" || normalized === "failed" || normalized === "timed_out";
+      return normalized === "success" || normalized === "failed" || normalized === "timed_out" || normalized === "cancelled";
     }
 
     function formatCompileRunProgress(run) {

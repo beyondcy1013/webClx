@@ -1,6 +1,8 @@
 import asyncio
 import json
 import mimetypes
+import os
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -9,7 +11,10 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
-CHROMIUM = "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome"
+CHROMIUM = os.environ.get(
+    "WEBCLX_TEST_CHROMIUM",
+    shutil.which("chromium") or "/home/codes/third_party/browser-tools/bin/chromium",
+)
 SESSION_ID = "shortcut-session"
 TERMINAL_NAME = "Shortcut Terminal 20260813001234567890"
 RESUME_ID = "123e4567-e89b-12d3-a456-426614174000"
@@ -596,7 +601,7 @@ async def main():
         ).click()
         await page.wait_for_function(
             """() => window.__shortcutCopiedText ===
-              '调用codex db维护skill读取session id为 '
+              '调用codex db维护skill读取codex session id为 '
               + '019f8d03-c14d-7712-b5ac-2a63ebd7af36'
               + '并接受指令：'"""
         )
@@ -604,7 +609,7 @@ async def main():
         assert copy_id_and_ask_inputs == [], copy_id_and_ask_inputs
         copy_id_and_ask_clipboard = await page.evaluate("window.__shortcutCopiedText")
         assert copy_id_and_ask_clipboard == (
-            "调用codex db维护skill读取session id为 "
+            "调用codex db维护skill读取codex session id为 "
             f"{INTERRUPTED_RESUME_ID}并接受指令："
         ), copy_id_and_ask_clipboard
         await page.wait_for_function(

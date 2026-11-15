@@ -160,8 +160,23 @@ assert.match(
 
 assert.match(
   terminalFocusJs,
-  /helper\.setAttribute\([\s\S]*"inputmode",[\s\S]*terminalSystemImeSuppressedBySoftKeyboardMode\(\) \? "none" : "text"[\s\S]*\);/,
-  "desktop terminal helper textarea should keep text inputmode so Chinese IME can be selected",
+  /inputmode:[\s\S]*?terminalSystemImeArmed && !terminalSystemImeSuppressedBySoftKeyboardMode\(\)[\s\S]*?\? "text"[\s\S]*?: "none"/,
+  "an unfocused helper must be inputmode=none unless an explicit system-IME action armed it",
+);
+assert.match(
+  terminalFocusJs,
+  /if \(helperFocused && name === "inputmode" && value === "none"\) \{[\s\S]*?continue;/,
+  "a focused helper must never be disarmed, because rewriting inputmode would hide the keyboard mid-gesture",
+);
+assert.match(
+  terminalFocusJs,
+  /function focusTerminalForDirectInput\(\) \{[\s\S]*?terminalSystemImeArmed = true;[\s\S]*?term\.focus\(\);/,
+  "direct input is the single arming point and must arm before focusing the helper",
+);
+assert.match(
+  terminalFocusJs,
+  /helper\.addEventListener\("blur", \(\) => \{[\s\S]*?terminalSystemImeArmed = false;/,
+  "losing helper focus must end the IME grant so later stray focus cannot reopen the keyboard",
 );
 
 assert.match(
@@ -208,7 +223,7 @@ assert.match(
 
 assert.match(
   injectLatestResumeCommandBody,
-  /sendTerminalAutoTypedInput\(command\);[\s\S]*focusTerminalAfterSoftKeyboardInput\(\);/,
+  /sendTerminalAutoTypedInput\(command, \{ sessionId \}\);[\s\S]*focusTerminalAfterSoftKeyboardInput\(\);/,
   "mobile resume extraction should not reopen the system keyboard after sending input",
 );
 
@@ -276,8 +291,8 @@ assert.doesNotMatch(
 );
 assert.match(
   terminalMobileKeysJs,
-  /const isMainSoftKey = Boolean\(mobileKeysEl\?\.contains\(control\)\);[\s\S]*!isMainSoftKey && now < softKeyboardMenuImeFocusUntil[\s\S]*terminalHelperTextareaFocused\(\)[\s\S]*if \(isMainSoftKey\) \{[\s\S]*softKeyboardMenuImeFocus = helperWasFocused/,
-  "main soft keys such as Home must sample current focus while nested menu items inherit only their menu chain state",
+  /const isMainSoftKey = Boolean\(mobileKeysEl\?\.contains\(control\)\);[\s\S]*!isMainSoftKey && now < softKeyboardMenuImeFocusUntil[\s\S]*terminalSystemImeEnabled && terminalNativeKeyboardVisible\(\)[\s\S]*if \(isMainSoftKey\) \{[\s\S]*softKeyboardMenuImeFocus = helperWasFocused/,
+  "main soft keys must sample native IME visibility instead of stale helper focus while nested items inherit their menu chain state",
 );
 assert.match(
   terminalEntryJs,
@@ -376,6 +391,17 @@ assert.match(
   terminalHtml,
   /terminal-dialogs\.js\?v=[0-9a-z]+/,
   "terminal dialogs should use the no-autofocus cache version",
+);
+
+assert.match(
+  terminalFocusJs,
+  /function showTerminalSystemKeyboardNatively\(\) \{[\s\S]*?WebClxAndroid\?\.showSystemKeyboard !== "function"[\s\S]*?return false;[\s\S]*?showSystemKeyboard\(\) === true/,
+  "the selection menu must ask the native shell to reveal the IME and fall back whenever no bridge exists",
+);
+assert.match(
+  terminalEntryJs,
+  /terminalSelectionOpenImeButton\.addEventListener\("click"[\s\S]*?setTerminalSystemImeEnabled\(true, \{ clearSuppression: true \}\);[\s\S]*?focusTerminalFromTerminalTap\(\);[\s\S]*?showTerminalSystemKeyboardNatively\(\);/,
+  "opening the IME from the selection menu focuses the terminal first and only then asks the native shell to raise the keyboard",
 );
 
 for (const asset of [

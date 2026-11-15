@@ -23,6 +23,25 @@
           document.documentElement.dataset.theme = resolved;
           document.documentElement.style.colorScheme = resolved;
         } catch {}
+        try {
+          const rawTiers = window.localStorage.getItem("webclx:font-size-tiers");
+          if (rawTiers) {
+            const tiers = JSON.parse(rawTiers);
+            if (Array.isArray(tiers) && tiers.length >= 4) {
+              const rootStyle = document.documentElement.style;
+              rootStyle.setProperty("--font-size-tier-1", `${tiers[0]}rem`);
+              rootStyle.setProperty("--font-size-tier-2", `${tiers[1]}rem`);
+              rootStyle.setProperty("--font-size-tier-3", `${tiers[2]}rem`);
+              rootStyle.setProperty("--font-size-tier-4", `${tiers[3]}rem`);
+              const rawScale = window.localStorage.getItem("webclx:terminal-soft-keyboard-scale");
+              const scale = Number(rawScale) > 0 ? Number(rawScale) : 1.08;
+              rootStyle.setProperty(
+                "--terminal-key-font-size",
+                `${Math.round(tiers[2] * scale * 100) / 100}rem`,
+              );
+            }
+          }
+        } catch {}
       })();
     </script>
     <script>
@@ -35,40 +54,42 @@
         );
       });
     </script>
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20261013-no-mask" />
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20261111-spacing-state" />
     <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
-    <link rel="stylesheet" href="/assets/styles-auth.css?v=20261013-agy-action-menu" />
-    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260926-workflow-history" />
+    <link rel="stylesheet" href="/assets/styles-auth.css?v=20261110-usage-window" />
+    <link rel="stylesheet" href="/assets/styles-terminal.css?v=20261021-account-sort-all" />
     <link rel="stylesheet" href="/assets/styles-responsive.css?v=20260921-global-dialog" />
     <script defer src="/assets/abort-signal-compat.js?v=20260817a"></script>
     <script defer src="/assets/dialog-backdrop-guard.js?v=20260916c"></script>
-    <script defer src="/assets/i18n.js?v=20260820a"></script>
-    <script defer src="/assets/terminal-settings.js?v=20261009-codebuddy-compact"></script>
+    <script defer src="/assets/i18n.js?v=20261025-android-language-once"></script>
+    <script defer src="/assets/terminal-settings.js?v=20261115-model-command"></script>
     <script defer src="/assets/terminal-session-activity.js?v=20260918groupcolor7nobubblewhite"></script>
-    <script defer src="/assets/terminal-session-render.js?v=20260926history1"></script>
+    <script defer src="/assets/terminal-session-render.js?v=20261111-terminal-super-admin"></script>
     <script defer src="/assets/terminal-session-storage.js?v=20260916groups3"></script>
     <script defer src="/assets/terminal-android-select-menu.js?v=20260804b"></script>
-    <script defer src="/assets/workspace-project-icons.js?v=20261017-stable-session-menu"></script>
+    <script defer src="/assets/workspace-project-icons.js?v=20261111-executor-rocket-spacing"></script>
     <script defer src="/assets/specified-preset-actions.js?v=20260928-cline-opencode"></script>
     <script defer src="/assets/new-terminal.js?v=20260916groups3"></script>
-    <script defer src="/assets/terminal-specified-task.js?v=20261015-workspace-all-tabs"></script>
+    <script defer src="/assets/terminal-specified-task.js?v=20261113-agy-multi-quota"></script>
     <script defer src="/assets/terminal-designate-preset.js?v=20260829a"></script>
     <script defer src="/assets/app-frp-manager.js?v=20260619a"></script>
     <script defer src="/assets/app-proxy-manager.js?v=20260713c"></script>
     <script defer src="/assets/app-auth-manager.js?v=20260926-usage-error-toast"></script>
-    <script defer src="/assets/app-codex-account-manager.js?v=20261020-devin-desktop"></script>
+    <script defer src="/assets/app-codearts-options.js?v=20261111-full-access"></script>
+    <script defer src="/assets/app-native-login-backup.js?v=20261115-qoder-native-login"></script>
+    <script defer src="/assets/app-codex-account-manager.js?v=20261113-dialog-clipboard-fix"></script>
     <script defer src="/assets/app-llm-account-editor-dialog.js?v=20260924-llm-editor-dialog"></script>
-    <script defer src="/assets/app-codebuddy-manager.js?v=20260923a"></script>
-    <script defer src="/assets/app-devin-manager.js?v=20261020-desktop"></script>
-    <script defer src="/assets/app-agy-manager.js?v=20261013-agy-action-menu"></script>
+    <script defer src="/assets/app-codebuddy-manager.js?v=20261113-dialog-clipboard-fix"></script>
+    <script defer src="/assets/app-devin-manager.js?v=20261031-account-refresh-time"></script>
+    <script defer src="/assets/app-agy-manager.js?v=20261112-gemini-argon-quota-v2"></script>
     <script defer src="/assets/app-api-manager.js?v=20260926-account-save-refresh"></script>
     <script defer src="/assets/app-sub2api-manager.js?v=20260921c"></script>
     <script defer src="/assets/app-claude-manager.js?v=20260924-claude-editor"></script>
     <script defer src="/assets/account-interchange-core.js?v=20261017b"></script>
-    <script defer src="/assets/account-interchange-dialog.js?v=20261017c"></script>
-    <script defer src="/assets/app-account-clipboard-manager.js?v=20261017a"></script>
+    <script defer src="/assets/account-interchange-dialog.js?v=20261113-dialog-clipboard-fix"></script>
+    <script defer src="/assets/app-account-clipboard-manager.js?v=20261113-dialog-clipboard-fix"></script>
     <script defer src="/assets/app-preset-sync-manager.js?v=20260821f"></script>
-    <script defer src="/assets/app-compile-status-manager.js?v=20261019-progress"></script>
+    <script defer src="/assets/app-compile-status-manager.js?v=20261114-cancelled"></script>
     <script defer src="/assets/app-system-panel-manager.js?v=20260816b"></script>
     <script defer src="/assets/app-settings-formatters.js?v=20260730a"></script>
     <script defer src="/assets/app-terminal-tools-settings.js?v=20260926-workflow-unification"></script>
@@ -78,7 +99,7 @@
     <script defer src="/assets/app-workspace-history-tooltip.js?v=20260707a"></script>
     <script defer src="/assets/app-workspace-history.js?v=20260919role2"></script>
     <script defer src="/assets/app-version-check.js?v=20260706a"></script>
-    <script defer src="/assets/app-datetime-format.js?v=20260707a"></script>
+    <script defer src="/assets/app-datetime-format.js?v=20261031-account-refresh-time"></script>
     <script defer src="/assets/app-preset-table.js?v=20260903a"></script>
     <script defer src="/assets/app-terminal-archives.js?v=20260829b"></script>
     <script defer src="/assets/app-path-utils.js?v=20260707a"></script>
@@ -99,9 +120,10 @@
     <script defer src="/assets/app-core-event-bindings.js?v=20260918-indexed-history1"></script>
     <script defer src="/assets/app-frp-proxy-event-bindings.js?v=20260707a"></script>
     <script defer src="/assets/app-preset-form-event-bindings.js?v=20260926-browser-oauth"></script>
-    <script defer src="/assets/app-settings-load-save.js?v=20261011-compact-agent-guard"></script>
-    <script defer src="/assets/app-settings-event-bindings.js?v=20261009-codebuddy-compact"></script>
-    <script defer src="/assets/app.js?v=20261009-codebuddy-compact"></script>
+    <script defer src="/assets/app-settings-load-save.js?v=20261114-terminal-task-timeout"></script>
+    <script defer src="/assets/app-settings-event-bindings.js?v=20261114-terminal-task-timeout"></script>
+    <script defer src="/assets/app.js?v=20261114-terminal-task-timeout"></script>
+    <script defer src="/assets/terminal-auto-compact-settings.js?v=20261115-model-thresholds"></script>
     <script defer src="/assets/app-model-catalog-policy.js?v=20260916a"></script>
   </head>
   <body class="app-shell">
@@ -128,9 +150,6 @@
           <button id="tab-settings" class="tab-button" data-tab="settings" role="tab" aria-selected="false">
             设置
           </button>
-          <a class="tab-button topbar-link-button" href="/agent" role="tab" aria-selected="false">
-            DeepSeek Agent
-          </a>
           <a class="tab-button topbar-link-button" href="/collaboration" role="tab" aria-selected="false">
             智能体协作
           </a>
@@ -416,7 +435,9 @@
               <p class="section-label">统一账号</p>
               <h2>LLM_API 账号</h2>
             </div>
-            <div class="toolbar">
+            <details class="llm-more-actions">
+              <summary>账号操作</summary>
+              <div class="toolbar">
               <button id="account-global-import" class="button secondary" type="button">全局导入</button>
               <button id="account-global-export" class="button secondary" type="button">全局导出</button>
               <button id="codex-account-export" class="button secondary" type="button" disabled data-account-kinds="oauth api claude devin codebuddy agy">导出账号…</button>
@@ -435,28 +456,46 @@
               <button id="agy-detect-current" class="button secondary" type="button" hidden>重新读取当前账号</button>
               <button id="agy-refresh" class="button secondary" type="button" hidden>刷新</button>
               <button id="codex-account-refresh" class="button secondary" type="button" title="刷新账号列表" aria-label="刷新账号列表">&#8635;</button>
-            </div>
+              </div>
+            </details>
           </div>
           <div class="tabs segmented-tabs account-type-tabs" role="tablist" aria-label="账号类型切换">
-            <button class="tab-button account-type-tab active" data-kind="oauth" role="tab" aria-selected="true">Codex_OAuth</button>
-            <button class="tab-button account-type-tab" data-kind="api" role="tab" aria-selected="false">Codex_API</button>
-            <button class="tab-button account-type-tab" data-kind="claude" role="tab" aria-selected="false">Claude_API</button>
+            <button class="tab-button account-type-tab active" data-kind="oauth" role="tab" aria-selected="true">Codex OAuth</button>
+            <button class="tab-button account-type-tab" data-kind="api" role="tab" aria-selected="false">Codex API</button>
+            <button class="tab-button account-type-tab" data-kind="claude" role="tab" aria-selected="false">Claude</button>
             <button class="tab-button account-type-tab" data-kind="codebuddy" role="tab" aria-selected="false">CodeBuddy</button>
             <button class="tab-button account-type-tab" data-kind="devin" role="tab" aria-selected="false">Devin</button>
             <button id="tab-agy-auth" class="tab-button account-type-tab" data-kind="agy" role="tab" aria-selected="false">AGY</button>
             <button id="tab-opencode" class="tab-button account-type-tab" data-kind="opencode" role="tab" aria-selected="false">OpenCode</button>
+            <button id="tab-codearts" class="tab-button account-type-tab" data-kind="codearts" role="tab" aria-selected="false">CodeArts</button>
+            <button id="tab-qoder" class="tab-button account-type-tab" data-kind="qoder" role="tab" aria-selected="false">Qoder</button>
+          </div>
+          <div id="native-login-backup" class="subtab-options-bar" aria-label="本机登录备份">
+            <div class="subtab-options-actions">
+              <button id="account-refresh-all-quotas" class="button primary" type="button" data-account-kinds="oauth api devin">刷新全部额度</button>
+              <button id="codebuddy-refresh-credits" class="button secondary" type="button" data-account-kinds="codebuddy" hidden>刷新全部积分</button>
+              <button id="agy-quota-all" class="button secondary" type="button" data-account-kinds="agy" hidden>刷新全部额度</button>
+              <button id="native-login-read" class="button secondary" type="button">读取本机登录</button>
+              <a id="native-login-codearts-auth" class="button secondary" target="_blank" rel="noopener noreferrer" data-account-kinds="codearts" title="打开官方 CLI 认证设置，按指引申请 AK/SK。当前 CLI 登录入口要求 AK/SK。" hidden>CLI 认证设置（AK/SK）</a>
+              <button id="native-login-download" class="button secondary" type="button">下载登录备份</button>
+            </div>
+            <details class="llm-login-details"><summary>本机登录状态</summary>
+            <p id="native-login-status" class="inline-status" role="status">选择智能体后可读取系统中该智能体的登录凭据。</p>
+            <p class="inline-status" data-account-kinds="codearts" hidden>当前 CLI 登录入口要求 AK/SK，尚未验证可用的 OAuth 登录流程。请打开官方认证设置，按指引申请并自行配置 CODEARTS_CLI_AK / CODEARTS_CLI_SK。现有读取与备份仅针对原生登录文件；备份不包含仅存在于环境变量中的 AK/SK。</p>
+            </details>
           </div>
           <div id="codebuddy-auto-bar" class="codebuddy-auto-bar subtab-options-bar" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
             <div class="subtab-options-actions">
               <button id="codebuddy-run-checkin" class="button secondary" type="button">立即全部签到</button>
               <button id="codebuddy-run-travel" class="button secondary" type="button">立即全部旅行</button>
-              <button id="codebuddy-refresh-credits" class="button secondary" type="button">刷新全部积分</button>
               <button id="codebuddy-export-file" class="button secondary" type="button">导出 JSON</button>
               <button id="codebuddy-export-clipboard" class="button secondary" type="button">导出到剪贴板</button>
               <button id="codebuddy-import-toolbar" class="button secondary" type="button" data-account-kinds="codebuddy">导入文件</button>
               <button id="codebuddy-import-clipboard" class="button secondary" type="button" data-account-kinds="codebuddy">从剪贴板导入</button>
               <input id="codebuddy-import-file-input" type="file" accept=".json,application/json" hidden />
             </div>
+            <details class="llm-permission-options"><summary>权限与自动化设置</summary>
             <div class="subtab-options-switches">
               <label class="codebuddy-auto-toggle subtab-options-toggle">
                 <input id="codebuddy-auto-checkin" type="checkbox" />
@@ -466,6 +505,10 @@
                 <input id="codebuddy-auto-travel" type="checkbox" />
                 <span>自动旅行</span>
               </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle" title="额度耗尽后自动换号时跳过国际版账号；取消勾选后允许参与自动换号。">
+                <input id="codebuddy-auto-block-international" type="checkbox" checked />
+                <span>禁止自动切换到国际版账号</span>
+              </label>
               <label class="codebuddy-auto-toggle subtab-options-toggle">
                 <input id="codebuddy-option-bypass" type="checkbox" />
                 <span>最高权限（bypassPermissions，不再询问）</span>
@@ -474,49 +517,78 @@
                 <input id="codebuddy-option-sandbox" type="checkbox" />
                 <span>危险也不问（真正 full pass，仅隔离环境）</span>
               </label>
+              <label class="codebuddy-auto-toggle subtab-options-toggle">
+                <input id="codebuddy-option-device-fingerprint" type="checkbox" checked />
+                <span>设备指纹隔离（切换账号自动轮换独立机器码与防检测头）</span>
+              </label>
             </div>
+            </details>
             <div class="subtab-options-meta">
               <span id="codebuddy-auto-note" class="inline-status" data-tone="muted" hidden></span>
             </div>
             <button id="codebuddy-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+                      </details>
           </div>
           <div id="devin-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
             <div class="subtab-options-actions">
               <button id="devin-import-current-toolbar" class="button secondary" type="button" data-account-kinds="devin">导入当前 CLI 配置</button>
               <button id="devin-import-desktop-toolbar" class="button secondary" type="button" data-account-kinds="devin">添加本机 Desktop</button>
               <button id="devin-detect-desktop" class="button secondary" type="button" data-account-kinds="devin">核验本机 Desktop</button>
             </div>
+            <details class="llm-permission-options"><summary>权限与自动化设置</summary>
             <div class="subtab-options-switches">
               <label class="codebuddy-auto-toggle subtab-options-toggle">
                 <input id="devin-option-bypass" type="checkbox" />
                 <span>全局 Bypass（自动批准所有权限，允许所有操作，禁止询问）</span>
               </label>
             </div>
+            </details>
             <div class="subtab-options-meta">
               <span id="devin-options-note" class="inline-status" data-tone="muted"></span>
             </div>
             <button id="devin-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+                      </details>
+          </div>
+          <div id="codearts-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" data-account-kinds="codearts" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
+              <details class="llm-permission-options"><summary>权限与自动化设置</summary>
+                <div class="subtab-options-switches">
+                  <label class="codebuddy-auto-toggle subtab-options-toggle">
+                    <input id="codearts-option-full-access" type="checkbox" checked disabled />
+                    <span>最高权限（自动批准命令与工具，不询问权限）</span>
+                  </label>
+                </div>
+                <p class="inline-status">默认开启。同步原生自动批准、工具权限、目录信任与敏感文件设置；关闭恢复开启前的配置。保存后重新启动原生 CodeArts 会话可完整生效。</p>
+              </details>
+              <span id="codearts-options-note" class="inline-status" role="status"></span>
+            </details>
           </div>
           <div id="opencode-options-bar" class="codebuddy-auto-bar devin-options-bar subtab-options-bar" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
+            <details class="llm-permission-options"><summary>权限与自动化设置</summary>
             <div class="subtab-options-switches">
               <label class="codebuddy-auto-toggle subtab-options-toggle">
                 <input id="opencode-option-all-permissions" type="checkbox" checked />
                 <span>启动开启所有权限（允许全部写入与工具操作）</span>
               </label>
             </div>
+            </details>
             <div class="subtab-options-meta">
               <span id="opencode-options-note" class="inline-status" data-tone="muted"></span>
             </div>
+                      </details>
           </div>
           <div id="agy-options-bar" class="codebuddy-auto-bar agy-options-bar subtab-options-bar" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
             <div class="subtab-options-actions">
-              <button id="agy-quota-all" class="button secondary" type="button">刷新所有额度</button>
               <button id="agy-test-all" class="button secondary" type="button">测试所有账号</button>
               <button id="agy-toggle-email-col" class="button secondary" type="button">显示邮箱</button>
               <button id="agy-export-file" class="button secondary" type="button">导出 JSON</button>
               <button id="agy-export-clipboard" class="button secondary" type="button">导出到剪贴板</button>
               <button id="agy-import-open" class="button secondary" type="button">导入账号</button>
             </div>
+            <details class="llm-permission-options"><summary>权限与自动化设置</summary>
             <div class="subtab-options-switches">
               <label class="codebuddy-auto-toggle subtab-options-toggle">
                 <input id="agy-option-dangerous" type="checkbox" />
@@ -527,11 +599,14 @@
                 <span>自动批准文件编辑（accept-edits，改文件不再确认）</span>
               </label>
             </div>
+            </details>
             <div class="subtab-options-meta">
               <span id="agy-options-note" class="inline-status" data-tone="muted"></span>
             </div>
+                      </details>
           </div>
           <div id="llm-global-options-bar" class="codebuddy-auto-bar llm-global-options-bar subtab-options-bar" hidden>
+            <details class="llm-tab-tools"><summary>账号工具与设置</summary>
             <div class="subtab-options-actions">
               <button id="codex-account-query-usage" class="button secondary" type="button" disabled data-account-kinds="oauth api">查询用量</button>
               <button id="codex-account-import" class="button secondary" type="button">从剪贴板导入</button>
@@ -539,25 +614,39 @@
               <input id="codex-account-import-file" class="sr-only" type="file" accept="application/json,.json" />
               <button id="codex-account-sub2api" class="button secondary" type="button" data-account-kinds="oauth api claude">sub2api</button>
             </div>
+            <details class="llm-permission-options"><summary>权限与自动化设置</summary>
             <div class="subtab-options-switches">
               <span class="llm-global-codex-options" data-account-kinds="oauth api">
-                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-approval-never" type="checkbox" /><span>不弹审批</span></label>
-                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-sandbox-full" type="checkbox" /><span>完全访问</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-approval-never" type="checkbox" checked /><span>不弹审批</span></label>
+                <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-sandbox-full" type="checkbox" checked /><span>完全访问</span></label>
                 <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-animations-disabled" type="checkbox" /><span>禁用字符动画</span></label>
                 <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-alt-screen-disabled" type="checkbox" /><span>内联模式</span></label>
                 <label class="codebuddy-auto-toggle subtab-options-toggle"><input id="llm-codex-daemon-disabled" type="checkbox" checked /><span>禁用后台守护进程</span></label>
               </span>
             </div>
+            </details>
             <div class="subtab-options-meta">
               <span id="llm-global-options-note" class="inline-status llm-global-options-note" data-tone="muted"></span>
               <button id="codex-global-settings-open" class="button secondary llm-global-settings-open" type="button" aria-haspopup="dialog">全局设置</button>
             </div>
-            <button id="codex-oauth-subtab-login" class="button primary" type="button" data-account-kinds="oauth" hidden>新登录</button>
-            <button id="codex-oauth-subtab-save-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>保存当前登录</button>
-            <button id="codex-oauth-subtab-refresh-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>刷新当前登录</button>
-            <button id="codex-oauth-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="oauth" hidden>重新读取当前账号</button>
-            <button id="codex-api-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="api" hidden>重新读取当前账号</button>
-            <button id="claude-subtab-detect-current" class="button secondary" type="button" disabled data-account-kinds="claude" hidden>重新读取当前账号</button>
+            <button id="codex-oauth-subtab-login" class="button primary" type="button" hidden>新登录</button>
+            <button id="codex-oauth-subtab-save-current" class="button secondary" type="button" disabled hidden>保存当前登录</button>
+            <button id="codex-oauth-subtab-refresh-current" class="button secondary" type="button" disabled hidden>刷新当前登录</button>
+            <button id="codex-oauth-subtab-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+            <button id="codex-api-subtab-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+            <button id="claude-subtab-detect-current" class="button secondary" type="button" disabled hidden>重新读取当前账号</button>
+                      </details>
+          </div>
+          <div id="llm-usage-window-bar" class="subtab-options-bar llm-usage-window-bar">
+            <label class="field-label" for="account-usage-window">「使用」统计窗口</label>
+            <select id="account-usage-window" class="text-input">
+              <option value="24h">最近 24 小时</option>
+              <option value="48h" selected>最近 48 小时</option>
+              <option value="7d">最近 7 天</option>
+              <option value="30d">最近 30 天</option>
+              <option value="all">全部（累计）</option>
+            </select>
+            <span class="field-help">对全部 Agent 统一生效，按所选窗口统计账号切换次数。</span>
           </div>
           <div class="table-wrap auth-table-wrap codex-account-desktop-wrap">
             <table class="entry-table auth-table codex-account-table">
@@ -571,6 +660,8 @@
                   <th>类型</th>
                   <th>名称</th>
                   <th>账号 / 凭据</th>
+                  <th id="devin-included-quota-column" hidden title="套餐内每日、每周剩余比例">套餐内剩余</th>
+                  <th id="devin-quota-column" hidden title="Devin 额外额度余额（overage_balance）">套餐外剩余</th>
                   <th class="usage-window-column">用量窗口</th>
                   <th class="codebuddy-credits-column">总积分</th>
                   <th class="codebuddy-credits-column">分类积分</th>
@@ -578,6 +669,8 @@
                   <th>模型</th>
                   <th>入口</th>
                   <th>使用</th>
+                  <th class="codex-account-refreshed-column">刷新时间</th>
+                  <th class="codex-account-last-switch-column">最近切换时间</th>
                 </tr>
               </thead>
               <tbody id="codex-account-list"></tbody>
@@ -596,6 +689,8 @@
                   <th class="agy-col-countdown">倒计时</th>
                   <th class="agy-col-quota-at">刷新额度时间</th>
                   <th class="agy-col-saved">保存时间</th>
+                  <th class="agy-col-last-switch">最近切换时间</th>
+                  <th class="agy-col-usage">使用</th>
                 </tr>
               </thead>
               <tbody id="agy-preset-list"></tbody>
@@ -604,6 +699,8 @@
           <div id="codex-account-status" class="inline-status" data-tone="muted" hidden></div>
         </section>
 
+        <details class="llm-advanced-oauth" data-account-kinds="oauth">
+          <summary>OAuth 高级管理</summary>
         <section class="auth-card auth-list-card codex-oauth-detail-card">
           <div class="panel-head wide">
             <div>
@@ -648,6 +745,7 @@
             </table>
           </div>
         </section>
+        </details>
 
         <div hidden>
           <p id="api-current-target"></p>
@@ -1522,6 +1620,18 @@
           </label>
 
           <label class="field">
+            <span class="field-label">新开对话框账号排序</span>
+            <select id="terminal-account-sort-input" class="text-input">
+              <option value="credits">按积分/额度从高到低</option>
+              <option value="recent_switch">按最近切换时间</option>
+              <option value="switch_count">按切换次数</option>
+              <option value="recent_use">按最近使用（本浏览器）</option>
+              <option value="name">按账号名称</option>
+            </select>
+            <span class="field-help">对 Codex、Claude、CodeBuddy、Devin、AGY 统一生效：当前正在使用的账号始终排在最前，其余账号按这里选择的方式排序。积分/额度取最近一次快照，Codex/Claude/Devin 没有积分数据时自动回落到最近切换时间。</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">终端改名预设</span>
             <textarea
               id="terminal-rename-presets-input"
@@ -1597,6 +1707,21 @@
           </label>
 
           <label class="field">
+            <span class="field-label">终端任务超时秒数（范围 10–120，默认 30）</span>
+            <input
+              id="terminal-task-timeout-secs-input"
+              class="text-input"
+              type="number"
+              min="10"
+              max="120"
+              step="1"
+              placeholder="30"
+              inputmode="numeric"
+            />
+            <span class="field-help">终端管理、会话列表、终端连接和 Codex 对话扫描等后台任务的最长等待；保存后新请求立即使用该值，超时不会取消已在后台运行的阻塞任务。</span>
+          </label>
+
+          <label class="field">
             <span class="field-label">自动继续最小间隔（秒）</span>
             <input
               id="terminal-auto-continue-interval-input"
@@ -1664,6 +1789,60 @@
               />
               <span class="toggle-note">固定保护：CodeBuddy、AGY 和 Cline 不接收 webClx 的自动压缩或 /compact 软键盘命令；上下文错误保持错误状态，旧开关不能解除禁令。</span>
             </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">自动压缩上下文阈值（%）</span>
+            <input
+              id="terminal-auto-compact-threshold-input"
+              type="number"
+              min="1"
+              max="100"
+              step="1"
+              value="50"
+              class="settings-input mono-text"
+            />
+            <span class="field-help">仅当终端底部显示已用上下文达到该百分比（如 “Context 51% used”）时才自动发送 /compact；默认 50%，读不到占用率时不压缩。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">按模型覆盖阈值</span>
+            <textarea
+              id="terminal-auto-compact-model-thresholds-input"
+              rows="4"
+              class="settings-input mono-text"
+              spellcheck="false"
+              placeholder="gpt-6.1-sol=60&#10;gpt-6-astra=40&#10;claude-opus=40&#10;claude-fable=40"
+            ></textarea>
+            <span class="field-help">每行“模型关键词=百分比”，命中页脚里的模型名时覆盖默认阈值；例如 gpt-6.1-sol=60、gpt-6-astra=40、claude-opus=40、claude-fable=40。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">终端消息默认排队时间（秒）</span>
+            <input
+              id="terminal-message-queue-seconds-input"
+              type="number"
+              min="1"
+              max="600"
+              step="1"
+              value="8"
+              class="settings-input mono-text"
+            />
+            <span class="field-help">智能体协作消息默认排队延时（默认 8 秒）。目标终端上一次接收消息间隔低于 3 分钟时，新消息自动延后排队 3 分钟。</span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">终端协作汇报合并防抖窗口（秒）</span>
+            <input
+              id="terminal-report-debounce-seconds-input"
+              type="number"
+              min="0"
+              max="600"
+              step="5"
+              value="120"
+              class="settings-input mono-text"
+            />
+            <span class="field-help">智能体协作汇报（kind=progress/completed）在此窗口期内（默认 120 秒 / 2 分钟）自动合并为单次批量投递，避免多个执行者密集汇报打断管理者；派单与紧急中断不受影响；设为 0 表示不合并立即投递。</span>
           </label>
 
           <label class="field">
@@ -2232,7 +2411,7 @@
                 id="terminal-slash-commands-input"
                 class="settings-textarea mono-text terminal-default-env-input"
                 rows="5"
-                placeholder="extract_resume | 屏幕提取id并恢复 | extract_resume | | Ctrl+Shift+R&#10;extract_current_session | 高级复制 | extract_current_session | |&#10;resume_current_session | 恢复会话 | resume_current_agent_session | |&#10;continue | 继续 | insert_text | 继续 |&#10;current_resume_id | session ID | copy_current_resume_id | |&#10;enter | Enter | send_sequence | enter |&#10;compact | /compact | send_slash_command | /compact |"
+                placeholder="extract_resume | 屏幕提取id并恢复 | extract_resume | | Ctrl+Shift+R&#10;extract_current_session | 高级复制 | extract_current_session | |&#10;resume_current_session | 恢复会话 | resume_current_agent_session | |&#10;continue | 继续 | insert_text | 继续 |&#10;current_resume_id | session ID | copy_current_resume_id | |&#10;enter | Enter | send_sequence | enter |&#10;model | /model | send_slash_command | /model |&#10;compact | /compact | send_slash_command | /compact |"
                 autocomplete="off"
                 spellcheck="false"
               ></textarea>
@@ -2247,7 +2426,7 @@
                 <h2>软键盘功能下拉框</h2>
                 <span class="card-desc" role="button" tabindex="0" aria-pressed="false">
                   <span class="card-desc-icon">?</span>
-                  <span class="card-desc-text">每行格式：键 | 名称 | 动作 | 命令 | 快捷键。动作可用 copy_terminal_view_in_new_window、send_slash_command、insert_text、send_sequence、extract_resume。系统键盘与触摸复制已移至全能命令菜单内的勾选框，无需在此配置。</span>
+                  <span class="card-desc-text">每行格式：键 | 名称 | 动作 | 命令 | 快捷键。动作可用 copy_terminal_view_in_new_window、open_paste_dialog、send_slash_command、insert_text、send_sequence、extract_resume。系统键盘与触摸复制已移至全能命令菜单内的勾选框，无需在此配置。</span>
                 </span>
               </div>
             </div>
@@ -2559,22 +2738,22 @@
           <div class="appearance-group">
             <div>
               <span class="field-label">终端分组角色图标</span>
-              <span class="field-help">颜色区分分组，图标区分管理者和执行者。</span>
+              <span class="field-help">颜色区分分组；图标区分群组超级管理员、普通管理员、执行者和复核者。皇冠仅表示超级管理员。</span>
             </div>
             <label class="field">
-              <span class="field-label">管理者 Emoji</span>
-              <input id="terminal-group-manager-emoji-input" class="text-input" type="text" maxlength="8" value="👑" autocomplete="off" />
+              <span class="field-label">群组普通管理员 Emoji</span>
+              <input id="terminal-group-manager-emoji-input" class="text-input" type="text" maxlength="8" value="🔱" autocomplete="off" />
             </label>
             <label class="field">
               <span class="field-label">执行者图标方案</span>
               <select id="terminal-group-executor-emoji-mode" class="text-input select-input">
-                <option value="random">按终端稳定随机</option>
                 <option value="fixed">使用指定 Emoji</option>
+                <option value="random">按终端稳定随机</option>
               </select>
             </label>
             <label class="field" id="terminal-group-executor-emoji-field">
               <span class="field-label">执行者 Emoji</span>
-              <input id="terminal-group-executor-emoji-input" class="text-input" type="text" maxlength="8" value="⚙️" autocomplete="off" />
+              <input id="terminal-group-executor-emoji-input" class="text-input" type="text" maxlength="8" value="🚀" autocomplete="off" />
             </label>
           </div>
 
@@ -3288,7 +3467,7 @@
                 class="text-input mono-text"
                 type="text"
                 list="preset-sync-remote-url-history"
-                placeholder="http://HOST:PORT"
+                placeholder="http://192.168.3.2:11111"
                 autocomplete="off"
                 spellcheck="false"
               />
@@ -3508,7 +3687,7 @@
                   id="proxy-server-input"
                   class="text-input mono-text"
                   type="text"
-                  placeholder="HOST:7890"
+                  placeholder="192.168.3.2:7890"
                   autocomplete="off"
                   spellcheck="false"
                 />
@@ -3907,7 +4086,7 @@
           </fieldset>
 
           <div id="terminal-specified-task-preset-field" class="terminal-specified-task-field terminal-specified-task-preset-field">
-            <span>Codex 账号</span>
+            <span>账号</span>
             <select id="terminal-specified-task-preset" class="text-input" required>
               <option value="">正在读取预设…</option>
             </select>
@@ -3915,6 +4094,11 @@
               <input id="terminal-specified-task-session-only" type="checkbox" name="terminal-specified-task-session-only" />
               <span>仅对此会话</span>
             </label>
+            <span
+              id="terminal-specified-task-preset-note"
+              class="terminal-specified-task-preset-note"
+              hidden
+            ></span>
           </div>
           <label id="terminal-specified-task-other-command-field" class="terminal-specified-task-field" hidden>
             <span>终端命令</span>
@@ -4260,7 +4444,7 @@
               id="remote-copy-url"
               class="text-input mono-text"
               type="text"
-              placeholder="http://192.168.1.100:PORT"
+              placeholder="http://192.168.1.100:11111"
               autocomplete="off"
               spellcheck="false"
             />
@@ -4442,7 +4626,6 @@
       hidden
     ></div>
     <div id=webclx-toast-container class=webclx-toast-container aria-live=polite></div>
-  
       <dialog id="sub2api-manager-dialog" class="auth-import-dialog">
         <form id="sub2api-manager-form" class="auth-import-form" method="dialog">
           <div class="panel-head wide">
@@ -4459,7 +4642,7 @@
 
           <div class="field">
             <label class="field-label" for="sub2api-base-url">服务器地址</label>
-            <input id="sub2api-base-url" class="text-input mono-text" type="url" placeholder="http://HOST:PORT" autocomplete="off" />
+            <input id="sub2api-base-url" class="text-input mono-text" type="url" placeholder="http://192.168.3.2:18381" autocomplete="off" />
           </div>
 
           <div class="field">
@@ -4532,8 +4715,8 @@
             <button id="codex-global-settings-close" class="button secondary" type="submit">关闭</button>
           </div>
           <div class="tabs global-settings-subtabs" role="tablist" aria-label="全局设置类型">
-            <button id="global-settings-tab-codex" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="codex-api-global-defaults" data-global-tab="codex">Codex_API</button>
-            <button id="global-settings-tab-claude" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="claude-api-global-defaults" data-global-tab="claude">Claude_API</button>
+            <button id="global-settings-tab-codex" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="codex-api-global-defaults" data-global-tab="codex">Codex API</button>
+            <button id="global-settings-tab-claude" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="claude-api-global-defaults" data-global-tab="claude">Claude</button>
           </div>
 
           <section id="codex-api-global-defaults" class="auth-card api-global-defaults-card" role="tabpanel" aria-labelledby="global-settings-tab-codex">
@@ -4556,14 +4739,14 @@
               </div>
               <div class="codex-common-config-options" role="group" aria-label="Codex 当前公共配置">
                 <label class="codex-common-config-option" for="codex-common-approval-never">
-                  <input id="codex-common-approval-never" type="checkbox" />
+                  <input id="codex-common-approval-never" type="checkbox" checked />
                   <span>
                     <strong>不弹审批</strong>
                     <code>approval_policy = "never"</code>
                   </span>
                 </label>
                 <label class="codex-common-config-option" for="codex-common-sandbox-full-access">
-                  <input id="codex-common-sandbox-full-access" type="checkbox" />
+                  <input id="codex-common-sandbox-full-access" type="checkbox" checked />
                   <span>
                     <strong>完全访问</strong>
                     <code>sandbox_mode = "danger-full-access"</code>

@@ -78,7 +78,6 @@ function syncAutoCompactCompletionStatuses() {
     if (
       previousStates.get(sessionId) === "compacting"
       && currentState !== "compacting"
-      && state.autoCompactLastSent.has(sessionId)
       // A terminal the user is already watching needs no "come look" badge.
       && sessionId !== state.activeSessionId
     ) {
@@ -100,36 +99,34 @@ function terminalOutputLineCount(sessionId) {
   return typeof length === "number" && Number.isFinite(length) ? length : null;
 }
 
-// AGY does not support /compact. Identify AGY terminals by their reported
-// activity agent or by the terminal name containing "agy" (case-insensitive).
+// 之前 AGY 终端禁止 compact，当前已正式支持。
+// 默认所有智能体均支持 /compact，除非明确指定的不可用智能体（如 Cline、CodeBuddy）。
 function isSessionAgyTerminal(session) {
   const agent = String(session?.activity_agent || "").toLowerCase();
-  if (agent.includes("agy")) return true;
+  if (agent.includes("agy") || agent.includes("antigravity")) return true;
   const name = String(session?.name || "").toLowerCase();
   return name === "agy" || name.startsWith("agy ") || name.startsWith("agy-");
 }
 
 function isSessionCompactCapableAgent(session) {
-  // These agents must not receive webClx-generated /compact, regardless of
-  // legacy settings or a previously enabled per-session compact toggle.
+  // 默认都支持，仅在明确指定的黑名单中排除
   const agent = String(session?.activity_agent || "").toLowerCase();
-  return !agent.includes("cline") && !agent.includes("agy")
-    && !agent.includes("antigravity") && !agent.includes("codebuddy")
-    && !isSessionAgyTerminal(session);
+  return !agent.includes("cline") && !agent.includes("codebuddy");
 }
 
 function terminalCompactCommandAllowed(command, sessionId) {
   if (String(command || "").trim().split(/\s+/)[0] !== "/compact") return true;
   const session = state.sessions?.find((item) => item?.id === sessionId);
   if (isSessionCompactCapableAgent(session)) return true;
-  updateStatus(`${session?.activity_agent || "AGY"} 终端禁止由 webClx 发送 /compact。`, "warn");
+  updateStatus(`${session?.activity_agent || "当前"} 终端禁止由 webClx 发送 /compact。`, "warn");
   return false;
 }
 
 function maybeAutoCompactCompletedSession(session) {
-  if (!session?.id || !state.autoCompactSessionIds.has(session.id)) return false;
+  // 自动压缩默认对所有终端开启，只有被显式关闭的终端才跳过。
+  if (!session?.id || state.autoCompactDisabledSessionIds?.has(session.id)) return false;
   // Check before scheduling and again at send time after agent detection.
-  if (!isSessionCompactCapableAgent(session) || isSessionAgyTerminal(session)) return false;
+  if (!isSessionCompactCapableAgent(session)) return false;
   // A terminal that is currently open is already being viewed. Its backend
   // activity can briefly lag behind the viewed acknowledgement, so never
   // inject /compact into the user's active terminal.
@@ -187,7 +184,7 @@ function maybeAutoCompactCompletedSession(session) {
     if (
       !latest
       || session.id === state.activeSessionId
-      || !state.autoCompactSessionIds.has(session.id)
+      || state.autoCompactDisabledSessionIds?.has(session.id)
       || !isSessionCompactCapableAgent(latest)
       || (sessionActivityState(latest) !== "completed" && sessionActivityLabel(latest) !== "待查看")
     ) {
@@ -215,7 +212,7 @@ function resolveAutoCompactAfterDelay(sessionId, sessionLabel) {
     .then(() => {
       const latest = state.sessions.find((item) => item?.id === sessionId);
       if (
-        !state.autoCompactSessionIds.has(sessionId)
+        state.autoCompactDisabledSessionIds?.has(sessionId)
         || sessionId === state.activeSessionId
         || !latest
         || (sessionActivityState(latest) !== "completed" && sessionActivityLabel(latest) !== "待查看")
@@ -225,7 +222,7 @@ function resolveAutoCompactAfterDelay(sessionId, sessionLabel) {
       }
       // Re-check the live agent type after the delay; a session can finish its
       // first turn only after the process detector has identified Cline.
-      if (!isSessionCompactCapableAgent(latest) || isSessionAgyTerminal(latest)) {
+      if (!isSessionCompactCapableAgent(latest)) {
         state.autoCompactHandledSessions.delete(sessionId);
         return null;
       }
@@ -274,13 +271,9 @@ function resolveAutoCompactAfterDelay(sessionId, sessionLabel) {
 
 function maybeAutoCompactCompletedSessions() {
   syncAutoCompactCompletionStatuses();
-  let sent = false;
-  state.sessions
-    .filter((session) => session?.id && state.autoCompactSessionIds.has(session.id))
-    .forEach((session) => {
-      sent = maybeAutoCompactCompletedSession(session) || sent;
-    });
-  return sent;
+  // 自动压缩的判定与发送已下沉到服务端（src/terminal/manager.rs），
+  // 前端只保留“已压缩”标记；这里直接返回，避免两端各发一次 /compact。
+  return false;
 }
 
 function autoContinueHandledKey(entry) {

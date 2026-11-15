@@ -322,7 +322,7 @@ mod tests {
             id: "proxy-https-test".to_string(),
             name: "HTTPS proxy".to_string(),
             proxy_type: ProxyType::Https,
-            server: "proxy.example.com:PORT".to_string(),
+            server: "us.fpsq.xyz:17891".to_string(),
             enabled: true,
             username: Some("proxy-user".to_string()),
             password: Some("proxy-secret".to_string()),
@@ -340,10 +340,7 @@ mod tests {
                 .all(|(_, value)| value.contains("webclx-https-proxy:proxy-https-test@"))
         );
         assert!(env.iter().all(|(_, value)| !value.contains("proxy-secret")));
-        assert!(
-            env.iter()
-                .all(|(_, value)| !value.contains("proxy.example.com"))
-        );
+        assert!(env.iter().all(|(_, value)| !value.contains("us.fpsq.xyz")));
     }
 
     #[test]

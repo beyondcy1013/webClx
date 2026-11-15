@@ -99,7 +99,7 @@ test("discussion contract assigns roles and makes convergence evidence-driven an
     assert.match(prompt, /事实与证据|可复现证据/);
     assert.match(prompt, /最终结论标准/);
     assert.match(prompt, /未决分歧/);
-    assert.match(prompt, /终端消息/);
+    assert.match(prompt, /\$webclx-terminal-message/);
   }
   assert.match(coordinatorPrompt, /你是协调终端/);
   assert.match(coordinatorPrompt, /形成最终结论/);

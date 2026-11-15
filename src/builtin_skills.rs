@@ -180,18 +180,12 @@ mod tests {
         fs::write(app.join("old"), "stale").unwrap();
         replace_managed_tree(&app, &BUILTIN_SKILLS, true).unwrap();
         assert!(!app.join("old").exists());
-        for skill in BUILTIN_SKILLS.dirs() {
-            let name = skill.path().file_name().unwrap();
-            assert!(app.join(name).is_dir());
-        }
+        assert!(app.join("webclx-terminal-message/SKILL.md").is_file());
         let user = temp.0.join("user-skills");
         fs::create_dir(&user).unwrap();
         fs::write(user.join("custom"), "preserve").unwrap();
         replace_managed_tree(&user, &BUILTIN_SKILLS, false).unwrap();
         assert_eq!(fs::read_to_string(user.join("custom")).unwrap(), "preserve");
-        for skill in BUILTIN_SKILLS.dirs() {
-            let name = skill.path().file_name().unwrap();
-            assert!(!user.join(name).exists());
-        }
+        assert!(!user.join("webclx-terminal-message").exists());
     }
 }

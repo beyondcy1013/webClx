@@ -70,8 +70,8 @@ fn terminal_profile_agent_type_defaults_to_codex_and_validates_supported_engines
 #[test]
 fn harness_url_prefers_config_and_safely_derives_request_host() {
     let mut headers = HeaderMap::new();
-    headers.insert(HOST, HeaderValue::from_static("example.invalid:11111"));
-    assert_eq!(deepseek_harness_url_from(None, &headers), "http://example.invalid:3080/");
+    headers.insert(HOST, HeaderValue::from_static("192.168.3.2:11111"));
+    assert_eq!(deepseek_harness_url_from(None, &headers), "http://192.168.3.2:3080/");
 
     headers.insert(HOST, HeaderValue::from_static("bad.example/path"));
     assert_eq!(deepseek_harness_url_from(None, &headers), "http://127.0.0.1:3080/");
@@ -116,8 +116,10 @@ fn blank_tool_paths_fall_back_to_the_native_session_cwd() {
 #[test]
 fn dollar_skill_references_create_explicit_read_skill_calls() {
     assert_eq!(
-        extract_explicit_skill_invocations("先用 $mihomo-proxy-ops 汇报；重复 $mihomo-proxy-ops。",),
-        vec!["mihomo-proxy-ops"],
+        extract_explicit_skill_invocations(
+            "先用 $mihomo-proxy-ops，再用 $terminal-message 汇报；重复 $mihomo-proxy-ops。",
+        ),
+        vec!["mihomo-proxy-ops", "terminal-message"],
     );
     assert!(
         extract_explicit_skill_invocations("价格 $100，变量price$skill，单独一个 $").is_empty()

@@ -11,8 +11,8 @@ Generate a secret-free plan and reviewable configuration bundle:
 scripts/hosted-trial-instance.sh \
   --customer-id demo-01 \
   --port 12101 \
-  --tls-cert /etc/letsencrypt/live/example.invalid/fullchain.pem \
-  --tls-key /etc/letsencrypt/live/example.invalid/privkey.pem \
+  --tls-cert /etc/letsencrypt/live/trial-demo-01.fpsq.xyz/fullchain.pem \
+  --tls-key /etc/letsencrypt/live/trial-demo-01.fpsq.xyz/privkey.pem \
   --render-dir /tmp/webclx-trial-demo-01
 ```
 

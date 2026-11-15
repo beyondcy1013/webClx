@@ -443,19 +443,60 @@ function isManagedTerminalSession(session) {
 
 function terminalSelectorGroupRoleKey(role) {
   const normalized = String(role || "").trim().toLowerCase();
-  if (["manager", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
+  if (["super_admin", "超级管理员"].includes(normalized)) return "super_admin";
+  if (["manager", "普通管理员", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
+  if (["executor", "执行者", "执行", "worker"].includes(normalized)) return "executor";
+  if (["reviewer", "复核者", "复核"].includes(normalized)) return "reviewer";
   return "";
 }
 
-// 下拉列表的管理者标记只认分组对话框显式指定的角色；没有人被指定时，按
-// 创建时间取稳定首位兜底。不能按 group_order 兜底——激活终端会把当前终端
-// 轮转到组首（“编组跟随终端”只是显示顺序），皇冠不能跟着这次轮转漂移。
+function terminalSelectorGroupRoleLabel(role) {
+  if (role === "super_admin") return "超级管理员";
+  if (role === "manager") return "普通管理员";
+  if (role === "reviewer") return "复核者";
+  if (role === "executor") return "执行者";
+  return "";
+}
+
+function terminalRoleFromSessionName(name) {
+  const normalized = String(name || "").toLocaleLowerCase("zh-Hans-CN");
+  if (/(超级管理员|super_admin)/.test(normalized)) return "super_admin";
+  if (/(普通管理员|管理者|管理|计划者|manager|planner)/.test(normalized)) return "manager";
+  if (/(复核者|复核|reviewer)/.test(normalized)) return "reviewer";
+  if (/(执行者|执行|executor|worker)/.test(normalized)) return "executor";
+  return "";
+}
+
+// 角色优先取成员自己持久化的 group_role，次选根据终端名称中带的角色后缀
+// （如 _普通管理员、_复核者、_执行者）推断；只有均无显式标记时才按管理员兜底。
+function terminalSelectorGroupMemberRole(member, managerId) {
+  const id = String(member?.id || "");
+  const persisted = terminalSelectorGroupRoleKey(member?.group_role);
+  if (persisted) return persisted;
+  const nameRole = terminalRoleFromSessionName(member?.name);
+  if (nameRole) return nameRole;
+  if (!managerId) return "";
+  return id === managerId ? "manager" : "executor";
+}
+
+// 下拉列表优先认持久化超级管理员、普通管理员，次选名称带管理员后缀的成员；
+// 没有人被指定时，按创建时间取稳定首位兜底。不能按 group_order 兜底——激活
+// 终端会把当前终端轮转到组首（“编组跟随终端”只是显示顺序），盾牌不能跟着漂移。
 function terminalSelectorGroupManagerId(members) {
   if (!Array.isArray(members) || members.length === 0) return "";
+  const highest = members.find((member) => terminalSelectorGroupRoleKey(member?.group_role) === "super_admin");
+  if (highest?.id) return String(highest.id);
   const designated = members.find(
     (member) => terminalSelectorGroupRoleKey(member?.group_role) === "manager",
   );
   if (designated?.id) return String(designated.id);
+  const highestByName = members.find((member) => !terminalSelectorGroupRoleKey(member?.group_role)
+    && terminalRoleFromSessionName(member?.name) === "super_admin");
+  if (highestByName?.id) return String(highestByName.id);
+  const byName = members.find(
+    (member) => terminalRoleFromSessionName(member?.name) === "manager",
+  );
+  if (byName?.id) return String(byName.id);
   const stable = [...members].sort((left, right) => {
     const leftTime = Number(left?.created_at ?? left?.createdAt ?? 0) || 0;
     const rightTime = Number(right?.created_at ?? right?.createdAt ?? 0) || 0;
@@ -545,6 +586,13 @@ function renderTerminalSessionSelector(
     const token = String(session?.group_token || "").trim();
     const members = groupedMembers.get(token) || [];
     const managerId = groupManagerIds.get(token) || "";
+    const memberRoles = new Map(
+      members.map((member) => [
+        String(member.id || ""),
+        terminalSelectorGroupMemberRole(member, managerId),
+      ]),
+    );
+    const role = memberRoles.get(String(session.id || "")) || "";
     desiredEntries.push({
       value: session.id,
       text: sessionOptionLabel(session),
@@ -555,12 +603,12 @@ function renderTerminalSessionSelector(
       grouped: groupedIds.has(session.id),
       groupColor: sharedTerminalGroupColor(session, sessions),
       groupName: String(session.group_name || session.groupName || "").trim(),
-      groupRole: managerId ? (session.id === managerId ? "manager" : "executor") : "",
-      groupRoleName: managerId ? (session.id === managerId ? "管理者" : "执行者") : "",
+      groupRole: role,
+      groupRoleName: terminalSelectorGroupRoleLabel(role),
       groupRoleMembers: members.map((member) => ({
         id: String(member.id || ""),
         name: String(member.name || member.id || ""),
-        role: member.id === managerId ? "manager" : "executor",
+        role: memberRoles.get(String(member.id || "")) || "",
       })),
     });
   }
@@ -640,5 +688,11 @@ function renderSessions() {
 }
 
 if (typeof module === "object" && module.exports) {
-  module.exports = { terminalSelectorGroupManagerId, terminalSelectorGroupRoleKey };
+  module.exports = {
+    terminalRoleFromSessionName,
+    terminalSelectorGroupManagerId,
+    terminalSelectorGroupRoleKey,
+    terminalSelectorGroupMemberRole,
+    terminalSelectorGroupRoleLabel,
+  };
 }

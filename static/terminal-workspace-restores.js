@@ -51,7 +51,7 @@ function terminalWorkspaceRestoreFormatTime(millis) {
   if (!Number.isFinite(value) || value <= 0) return "未知";
   const date = new Date(value);
   const pad = (part) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 function terminalWorkspaceRestoreDisabled(record) {

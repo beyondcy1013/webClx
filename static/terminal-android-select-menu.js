@@ -129,6 +129,10 @@
     }
     event.preventDefault();
     event.stopImmediatePropagation();
+    if (activeSelect === select && !menu.hidden) {
+      closeMenu({ restoreFocus: true });
+      return;
+    }
     openMenu(select);
   }, true);
 
@@ -137,6 +141,10 @@
     if (select && event.isTrusted) {
       event.preventDefault();
       event.stopImmediatePropagation();
+      if (activeSelect === select && !menu.hidden) {
+        closeMenu({ restoreFocus: true });
+        return;
+      }
       openMenu(select);
       return;
     }

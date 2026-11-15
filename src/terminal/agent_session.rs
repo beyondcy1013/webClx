@@ -14,6 +14,9 @@ use terminal_core::{
 
 use serde_json::Value;
 
+mod codearts_history;
+pub(super) use codearts_history::codearts_user_messages_for_terminal;
+
 use super::{
     sanitize_child_command,
     tmux::{capture_tmux_activity_pane_snapshot, isolated_tmux_command},
@@ -109,6 +112,19 @@ impl ResumeSessionDetector {
         if let Some(pane_pid) = tmux_pane_pid(session_id).ok().flatten() {
             let process_ids =
                 descendant_process_ids_from_children(pane_pid, &self.children_by_parent);
+            // AGY keeps the native conversation presence lock open even when
+            // its SQLite DB is closed between turns. Never infer its ID from
+            // the newest file or from another terminal's conversation.
+            let agy_candidates: Vec<_> = process_ids
+                .iter()
+                .filter_map(|pid| agy_presence_session_from_process(*pid))
+                .collect();
+            if !agy_candidates.is_empty() {
+                if agy_candidates.len() != 1 {
+                    return None;
+                }
+                return agy_candidates.into_iter().next();
+            }
             let mut candidates = Vec::new();
             for process_id in process_ids {
                 candidates.extend(agent_session_candidates_from_process(process_id));
@@ -313,13 +329,74 @@ fn parse_proc_stat_parent_pid(stat: &str) -> Option<u32> {
     fields.next()?.parse::<u32>().ok()
 }
 
+fn agy_presence_resume_info(home: &Path, targets: &[PathBuf]) -> Option<ResumeCommandInfo> {
+    let native = home.join(".gemini/antigravity-cli");
+    let mut ids = HashSet::new();
+    for target in targets {
+        if target.parent() != Some(native.join("presence").as_path())
+            || target.extension().and_then(|s| s.to_str()) != Some("lock")
+        {
+            continue;
+        }
+        let id = target.file_stem()?.to_str()?;
+        if id.len() != 36
+            || !id.bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            })
+        {
+            continue;
+        }
+        if native
+            .join("conversations")
+            .join(format!("{id}.db"))
+            .is_file()
+        {
+            ids.insert(id.to_owned());
+        }
+    }
+    if ids.len() != 1 {
+        return None;
+    }
+    let resume_id = ids.into_iter().next()?;
+    Some(ResumeCommandInfo {
+        command: resume_command_for_program("agy", &resume_id),
+        program: "agy".into(),
+        resume_id,
+    })
+}
+
+fn agy_presence_session_from_process(process_id: u32) -> Option<DetectedResumeSession> {
+    let comm = fs::read_to_string(format!("/proc/{process_id}/comm")).ok()?;
+    if !matches!(comm.trim(), "agy" | "antigravity") {
+        return None;
+    }
+    let home = process_home_dir(process_id)?;
+    let targets = fs::read_dir(format!("/proc/{process_id}/fd"))
+        .ok()?
+        .flatten()
+        .filter_map(|fd| fs::read_link(fd.path()).ok())
+        .collect::<Vec<_>>();
+    Some(DetectedResumeSession {
+        info: agy_presence_resume_info(&home, &targets)?,
+        source: "native_presence",
+    })
+}
+
 fn agent_session_candidates_from_process(process_id: u32) -> Vec<AgentSessionCandidate> {
+    // Use the same native CodeBuddy record owner as input history. Its JSONL
+    // is normally closed between writes, so FD-only detection misses resumes.
+    let mut candidates = codebuddy_rollout_path_for_process(process_id)
+        .and_then(|path| codebuddy_candidate_from_path(&path))
+        .into_iter()
+        .collect::<Vec<_>>();
     let fd_path = PathBuf::from(format!("/proc/{process_id}/fd"));
     let Ok(entries) = std::fs::read_dir(fd_path) else {
-        return Vec::new();
+        return candidates;
     };
-
-    let mut candidates = Vec::new();
     for entry in entries.flatten() {
         let Ok(target) = std::fs::read_link(entry.path()) else {
             continue;
@@ -938,13 +1015,30 @@ fn codebuddy_rollout_from_open_fds(process_id: u32) -> Option<PathBuf> {
     best.map(|(_, path)| path)
 }
 
+fn codebuddy_candidate_from_path(path: &Path) -> Option<AgentSessionCandidate> {
+    let resume_id = codebuddy_session_id_from_path(path)?;
+    let modified_at = fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(system_time_to_millis)?;
+    Some(AgentSessionCandidate {
+        info: ResumeCommandInfo {
+            command: resume_command_for_program("codebuddy", &resume_id),
+            program: "codebuddy".into(),
+            resume_id,
+        },
+        modified_at,
+        path: path.to_owned(),
+    })
+}
+
 fn codebuddy_rollout_path_for_process(process_id: u32) -> Option<PathBuf> {
-    if let Some(path) = codebuddy_rollout_from_open_fds(process_id) {
-        return Some(path);
-    }
     let args = process_cmdline_args(process_id);
     if !is_codebuddy_launch_args(&args) {
         return None;
+    }
+    if let Some(path) = codebuddy_rollout_from_open_fds(process_id) {
+        return Some(path);
     }
     let resume_id = codebuddy_resume_id_from_args(&args)?;
     let home = process_home_dir(process_id)?;
@@ -1127,6 +1221,12 @@ fn is_real_user_message(text: &str) -> bool {
         "<INSTRUCTIONS>",
         "<environment_context>",
         "<user_instructions>",
+        "<codex_internal_context",
+        "<skill",
+        "<skills",
+        "<context",
+        "<system",
+        "[系统消息]",
     ];
     for marker in injected_prefix_markers {
         if trimmed.starts_with(marker) {
@@ -1138,17 +1238,26 @@ fn is_real_user_message(text: &str) -> bool {
     // 后其余文本很短），视为系统注入。
     // 注意：用户可能在消息中引用系统标签文本（如"对话史里有 <turn_aborted>"），
     // 此时用户文本在标签之外，不能误杀。
-    let system_tags = ["turn_aborted", "turn_context", "world_state", "token_count"];
+    let system_tags = [
+        "turn_aborted",
+        "turn_context",
+        "world_state",
+        "token_count",
+        "codex_internal_context",
+        "skill",
+        "skills",
+        "context",
+        "system",
+    ];
     for tag in system_tags {
-        // 纯系统标签：整条消息以 <tag> 开头。
+        // 纯系统标签：整条消息以 <tag>、<tag 或 <tag\n 开头。
         // 用户真实输入不会以系统标签开头（即使引用标签文本，用户的文字也在前面）。
-        if trimmed.starts_with(&format!("<{tag}>")) {
+        if trimmed.starts_with(&format!("<{tag}>"))
+            || trimmed.starts_with(&format!("<{tag} "))
+            || trimmed.starts_with(&format!("<{tag}\n"))
+        {
             return false;
         }
-    }
-    // 过长的内容（>4000 字符）几乎一定是注入的系统上下文，而非用户输入
-    if trimmed.chars().count() > 4000 {
-        return false;
     }
     true
 }
@@ -1381,6 +1490,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_codex_long_user_message_from_rollout() {
+        let long_prompt = format!("分析整个过程，判断是否正确：\n{}", "内容分析".repeat(2000));
+        let serialized_text = serde_json::to_string(&long_prompt).unwrap();
+        let line = format!(
+            r#"{{"timestamp":"2026-11-12T23:36:50.000Z","type":"response_item","payload":{{"type":"message","role":"user","content":[{{"type":"input_text","text":{serialized_text}}}]}}}}"#
+        );
+        let lines = [
+            r#"{"type":"session_meta","payload":{"session_id":"test-long"}}"#,
+            &line,
+        ];
+
+        let (temp_root, codex_path) = write_temp_codex_rollout("rollout-long-user.jsonl", &lines);
+        let messages = parse_rollout_user_messages(&codex_path);
+        let _ = std::fs::remove_dir_all(temp_root);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].0, long_prompt);
+    }
+
+    #[test]
     fn parses_codex_user_messages_dedupes_response_item_and_event_msg() {
         // Codex 会在 rollout 里把同一条用户消息同时记成
         // `response_item.payload.message.user` 和 `event_msg.payload.user_message`。
@@ -1545,9 +1674,15 @@ mod tests {
         assert!(!is_real_user_message("# AGENTS.md instructions"));
         assert!(!is_real_user_message(""));
         assert!(is_real_user_message("hello"));
-        // very long content treated as injected
-        let long = "x".repeat(4001);
-        assert!(!is_real_user_message(&long));
+        // 长篇真实用户输入（如审查多处改进、大段日志或代码分析）应完整保留，绝不能因字符数过长被误杀
+        let long_user_msg = format!("分析整个过程，判断是否正确：\n{}", "x".repeat(20_000));
+        assert!(is_real_user_message(&long_user_msg));
+        // 系统注入标签与标记无论长短均应准确过滤
+        assert!(!is_real_user_message(
+            "<codex_internal_context source=\"goal\">internal</codex_internal_context>"
+        ));
+        assert!(!is_real_user_message("<skill>some skill</skill>"));
+        assert!(!is_real_user_message("[系统消息][群组更新:多改进] 成员已更新"));
     }
 
     #[test]
@@ -1577,5 +1712,87 @@ mod tests {
         assert!(!is_real_user_message("<turn_context>some context</turn_context>"));
         assert!(!is_real_user_message("<world_state>state</world_state>"));
         assert!(!is_real_user_message("<token_count>12345</token_count>"));
+    }
+}
+
+#[cfg(test)]
+mod agy_presence_tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn agy_presence_requires_unique_native_lock_and_matching_database() {
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "webclx-agy-presence-{}-{}",
+            std::process::id(),
+            super::super::current_timestamp_millis()
+        )));
+        let native = fixture.0.join(".gemini/antigravity-cli");
+        fs::create_dir_all(native.join("conversations")).unwrap();
+        let id = "1014b787-9874-4e1c-8b58-12b8535f086f";
+        let lock = native.join("presence").join(format!("{id}.lock"));
+        assert!(agy_presence_resume_info(&fixture.0, &[lock.clone()]).is_none());
+        fs::write(native.join("conversations").join(format!("{id}.db")), b"SQLite format 3")
+            .unwrap();
+        let info = agy_presence_resume_info(&fixture.0, &[lock.clone()]).unwrap();
+        assert_eq!(info.command, format!("agy --conversation={id}"));
+        assert!(
+            agy_presence_resume_info(&fixture.0, &[fixture.0.join(format!("presence/{id}.lock"))])
+                .is_none()
+        );
+        let other = "2014b787-9874-4e1c-8b58-12b8535f086f";
+        fs::write(native.join("conversations").join(format!("{other}.db")), b"SQLite format 3")
+            .unwrap();
+        assert!(
+            agy_presence_resume_info(
+                &fixture.0,
+                &[lock, native.join("presence").join(format!("{other}.lock"))]
+            )
+            .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod codebuddy_native_resume_tests {
+    use super::*;
+    struct Fixture(PathBuf);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn codebuddy_native_resume_without_open_jsonl_builds_correct_identity() {
+        let fixture = Fixture(std::env::temp_dir().join(format!(
+            "webclx-cb-resume-{}-{}",
+            std::process::id(),
+            super::super::current_timestamp_millis()
+        )));
+        let id = "01a15e5f-93d6-70c9-acba-b299d4566e53";
+        let args = vec![
+            "node".into(),
+            "/usr/local/bin/codebuddy".into(),
+            format!("--resume={id}"),
+        ];
+        assert!(is_codebuddy_launch_args(&args));
+        let resume_id = codebuddy_resume_id_from_args(&args).unwrap();
+        assert!(codebuddy_rollout_file(&fixture.0, &resume_id).is_none());
+        let directory = fixture
+            .0
+            .join(".codebuddy/projects/home-codes-lyyStock-stockScreener");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{id}.jsonl"));
+        fs::write(&path, b"{}\n").unwrap();
+        let found = codebuddy_rollout_file(&fixture.0, &resume_id).unwrap();
+        let candidate = codebuddy_candidate_from_path(&found).unwrap();
+        assert_eq!(candidate.info.program, "codebuddy");
+        assert_eq!(candidate.info.resume_id, id);
+        assert_eq!(candidate.info.command, format!("codebuddy --resume={id}"));
+        assert!(codebuddy_candidate_from_path(&fixture.0.join("missing.jsonl")).is_none());
     }
 }

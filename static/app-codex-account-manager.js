@@ -6,6 +6,8 @@
     oauth: "/codex_oauth", api: "/codex_api", claude: "/claude_api",
     codebuddy: "/codebuddy", devin: "/devin", agy: "/agy",
     opencode: "/codex_api/opencode",
+    codearts: "/codex_api/codearts",
+    qoder: "/codex_api/qoder",
   });
   function accountKindFromUrl() {
     const aliases = {
@@ -50,7 +52,234 @@
   function formatCreditsDate(timestamp) {
     const date = new Date(Number(timestamp));
     if (Number.isNaN(date.getTime())) return "";
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    return `${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  }
+
+  function parseTimestamp(value) {
+    if (!value) return null;
+    if (value instanceof Date) {
+      return Number.isNaN(value.getTime()) ? null : value.getTime();
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value) || value <= 0) return null;
+      return value < 1e11 ? value * 1000 : value;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      const num = Number(trimmed);
+      if (Number.isFinite(num) && num > 0) {
+        return num < 1e11 ? num * 1000 : num;
+      }
+      const parsed = Date.parse(trimmed);
+      return Number.isNaN(parsed) ? null : parsed;
+    }
+    return null;
+  }
+
+  function formatAccountRefreshedTime(value) {
+    const ms = parseTimestamp(value);
+    if (!ms) return "—";
+    const date = new Date(ms);
+    if (Number.isNaN(date.getTime()) || date.getTime() <= 0) return "—";
+
+    const diffMs = Math.max(0, Date.now() - date.getTime());
+    const totalSeconds = Math.floor(diffMs / 1000);
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    const totalHours = Math.floor(totalMinutes / 60);
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    const minutes = totalMinutes % 60;
+
+    let rel = "";
+    if (days > 0) {
+      if (hours > 0 && minutes > 0) {
+        rel = `${days}天${hours}小时${minutes}分钟前`;
+      } else if (hours > 0) {
+        rel = `${days}天${hours}小时前`;
+      } else if (minutes > 0) {
+        rel = `${days}天${minutes}分钟前`;
+      } else {
+        rel = `${days}天前`;
+      }
+    } else if (totalHours > 0) {
+      if (minutes > 0) {
+        rel = `${totalHours}小时${minutes}分钟前`;
+      } else {
+        rel = `${totalHours}小时前`;
+      }
+    } else if (totalMinutes > 0) {
+      rel = `${totalMinutes}分钟前`;
+    } else {
+      rel = "刚刚";
+    }
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const h = pad(date.getHours());
+    const m = pad(date.getMinutes());
+    const s = pad(date.getSeconds());
+    const absolute = `${month}-${day} ${h}:${m}:${s}`;
+
+    return `${rel} ${absolute}`;
+  }
+  window.formatAccountRefreshedTime = formatAccountRefreshedTime;
+
+  // 「使用」列的统计时间窗口：所有 Agent 共用一个下拉值，是纯前端渲染偏好，存 localStorage。
+  const ACCOUNT_USAGE_WINDOWS = {
+    "24h": { label: "最近 24 小时", ms: 24 * 60 * 60 * 1000 },
+    "48h": { label: "最近 48 小时", ms: 48 * 60 * 60 * 1000 },
+    "7d": { label: "最近 7 天", ms: 7 * 24 * 60 * 60 * 1000 },
+    "30d": { label: "最近 30 天", ms: 30 * 24 * 60 * 60 * 1000 },
+    all: { label: "全部（累计）", ms: Number.POSITIVE_INFINITY },
+  };
+  const ACCOUNT_USAGE_WINDOW_KEY = "webclx.account-usage-window";
+  const DEFAULT_ACCOUNT_USAGE_WINDOW = "48h";
+
+  function normalizeAccountUsageWindow(value) {
+    const key = String(value ?? "").trim();
+    return Object.hasOwn(ACCOUNT_USAGE_WINDOWS, key) ? key : DEFAULT_ACCOUNT_USAGE_WINDOW;
+  }
+
+  function accountUsageWindow() {
+    try {
+      return normalizeAccountUsageWindow(localStorage.getItem(ACCOUNT_USAGE_WINDOW_KEY));
+    } catch (_) {
+      return DEFAULT_ACCOUNT_USAGE_WINDOW;
+    }
+  }
+
+  function saveAccountUsageWindow(value) {
+    try {
+      localStorage.setItem(ACCOUNT_USAGE_WINDOW_KEY, normalizeAccountUsageWindow(value));
+    } catch (_) {}
+  }
+
+  function windowedUsageCount(account) {
+    const key = accountUsageWindow();
+    if (key === "all") return Number(account.switch_count || 0);
+    const cutoff = Date.now() - ACCOUNT_USAGE_WINDOWS[key].ms;
+    const history = Array.isArray(account.switch_history) ? account.switch_history : [];
+    const counted = history.filter((ts) => Number(ts) >= cutoff).length;
+    if (counted > 0 || history.length > 0) return counted;
+    // 兜底：接口尚未返回历史时，只用最近一次切换时间计 1。后端 effective_switch_history
+    // 已播种过的历史不会走到这里，因此不会重复计数。
+    const last = Number(account.last_switch_at ?? account.lastSwitchAt ?? 0) || 0;
+    return last > 0 && last >= cutoff ? 1 : 0;
+  }
+
+  function usageCountCell(account) {
+    const cell = textCell(String(windowedUsageCount(account)), "mono-text codex-account-usage-cell");
+    cell.title = `「使用」统计窗口：${ACCOUNT_USAGE_WINDOWS[accountUsageWindow()].label}`;
+    return cell;
+  }
+
+  window.getAccountUsageWindow = accountUsageWindow;
+  window.getAccountUsageWindowLabel = () => ACCOUNT_USAGE_WINDOWS[accountUsageWindow()].label;
+  window.windowedUsageCount = windowedUsageCount;
+
+  const accountRefreshedMap = new Map();
+
+  function recordAccountRefreshed(kind, id, timestamp = Date.now()) {
+    if (!id) return;
+    const key = `${kind || ""}:${id}`;
+    const ts = parseTimestamp(timestamp) || Date.now();
+    accountRefreshedMap.set(key, ts);
+    try {
+      const stored = JSON.parse(localStorage.getItem("webclx_account_refreshed_at") || "{}");
+      stored[key] = ts;
+      localStorage.setItem("webclx_account_refreshed_at", JSON.stringify(stored));
+    } catch (_) {}
+  }
+  window.recordAccountRefreshed = recordAccountRefreshed;
+
+  function getStoredAccountRefreshed(kind, id) {
+    if (!id) return null;
+    const key = `${kind || ""}:${id}`;
+    if (accountRefreshedMap.has(key)) {
+      return accountRefreshedMap.get(key);
+    }
+    try {
+      const stored = JSON.parse(localStorage.getItem("webclx_account_refreshed_at") || "{}");
+      if (stored && stored[key]) {
+        const ts = Number(stored[key]);
+        if (Number.isFinite(ts) && ts > 0) {
+          accountRefreshedMap.set(key, ts);
+          return ts;
+        }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function accountRefreshedTimestamp(account) {
+    let raw = null;
+    if (account.kind === "codebuddy") {
+      const creditsOk = account.credits && account.credits.ok === true;
+      const creditsTs = creditsOk && account.credits.updatedAt ? Number(account.credits.updatedAt) : 0;
+      const metaRefreshed = Number(account.refreshed_at || account.refreshedAt || 0);
+      raw = Math.max(creditsTs, metaRefreshed) || null;
+    } else if (account.kind === "oauth") {
+      raw = account.refreshed_at || account.last_refresh || account.quota?.last_refresh || null;
+    } else if (account.kind === "devin") {
+      const devinCached = typeof WebClxDevinManager?.getQuotaCache === "function"
+        ? WebClxDevinManager.getQuotaCache(account.id)
+        : null;
+      raw = devinCached?.queried_at || account.refreshed_at || null;
+    } else if (account.kind === "api") {
+      const cached = apiUsageResults.get(accountKey(account));
+      if (cached?.ok && cached?.updatedAt) {
+        raw = cached.updatedAt;
+      } else {
+        raw = account.refreshed_at || null;
+      }
+    } else {
+      raw = account.refreshed_at || null;
+    }
+
+    const currentMs = parseTimestamp(raw) || 0;
+    const stored = getStoredAccountRefreshed(account.kind, account.id);
+    const storedMs = parseTimestamp(stored) || 0;
+
+    const bestMs = Math.max(currentMs, storedMs);
+    return bestMs > 0 ? bestMs : null;
+  }
+
+  function lastSwitchCell(account) {
+    const ts = parseTimestamp(account.last_switch_at ?? account.lastSwitchAt) || 0;
+    const text = formatAccountRefreshedTime(ts);
+    const cell = textCell(text, "mono-text codex-account-last-switch-cell");
+    cell.title = ts ? `最近切换时间：${text}` : "切换时间未记录";
+    return cell;
+  }
+
+  function accountRefreshedCell(account) {
+    const ts = accountRefreshedTimestamp(account);
+    const text = formatAccountRefreshedTime(ts);
+    const cell = textCell(text, "mono-text codex-account-refreshed-cell");
+    if (ts) {
+      cell.dataset.refreshedAt = String(ts);
+    }
+    cell.title = ts ? `刷新时间：${text}\n单击刷新此账号` : "尚未刷新，单击刷新此账号";
+    cell.style.cursor = "pointer";
+    cell.addEventListener("click", async () => {
+      cell.textContent = "刷新中…";
+      try {
+        if (account.kind === "codebuddy") {
+          await WebClxCodeBuddyManager.creditsAccount(account);
+        } else if (account.kind === "oauth") {
+          await refreshAuthPresetQuota(account.id, account.name, document.getElementById("codex-account-status"));
+        } else if (account.kind === "devin") {
+          await WebClxDevinManager.queryQuota(account, true);
+          await loadAccountsForKind("devin");
+        } else if (account.kind === "api") {
+          await queryApiUsage(account);
+          renderAccounts(allAccounts);
+        }
+      } catch (_) {}
+    });
+    return cell;
   }
 
   function creditsOf(account) {
@@ -402,8 +631,8 @@
     if (exportFileButton) exportFileButton.disabled = visibleAccounts.length === 0;
     if (usageButton) usageButton.disabled = selectedAccountIds.size === 0 || bulkUsageQueryRunning;
 
-    // Enable/disable action buttons that require a checkbox selection
-    const hasSelection = selectedAccountIds.size > 0;
+    // Native current-login operations do not act on table selection. They must
+    // remain usable when the account library is empty.
     const actionButtonIds = [
       "codex-account-save-current",
       "codex-account-refresh-current",
@@ -422,7 +651,7 @@
     ];
     for (const id of actionButtonIds) {
       const btn = document.getElementById(id);
-      if (btn) btn.disabled = !hasSelection;
+      if (btn) btn.disabled = false;
     }
   }
 
@@ -430,9 +659,14 @@
     try {
       if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; }
     } catch { /* use the synchronous browser fallback */ }
+    const openDialogs = document.querySelectorAll("dialog[open]");
+    const container = openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : document.body;
     const area = document.createElement("textarea"); area.value = text;
-    area.style.cssText = "position:fixed;left:-9999px;top:0"; document.body.appendChild(area);
-    area.focus(); area.select();
+    area.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0;"; container.appendChild(area);
+    area.focus({ preventScroll: true }); area.select();
+    if (typeof area.setSelectionRange === "function") {
+      area.setSelectionRange(0, area.value.length);
+    }
     try { return Boolean(document.execCommand?.("copy")); } finally { area.remove(); }
   }
 
@@ -873,7 +1107,9 @@
     const key = accountKey(account);
     try {
       const result = await enqueueApiUsage(() => fetchApiUsage(account));
-      apiUsageResults.set(key, { ok: true, result });
+      const now = Date.now();
+      apiUsageResults.set(key, { ok: true, result, updatedAt: now });
+      recordAccountRefreshed("api", account.id, now);
       return result;
     } catch (error) {
       apiUsageResults.set(key, { ok: false, message: error?.message || String(error) });
@@ -1058,17 +1294,70 @@
     return cell;
   }
 
+  let codeartsNativeLogin = null;
+  window.updateNativeLoginAccounts = (kind, result) => {
+    if (kind === "agy") {
+      if (activeKind === "agy" && typeof window.agyManager?.load === "function") {
+        void window.agyManager.load();
+        if (result?.available && result?.account) {
+          const acc = result.account;
+          const label = acc.email || acc.name || acc.id || "当前账号";
+          const msg = acc.imported
+            ? `已读取本机 AGY 登录并备份到账号列表：${acc.name || label}（${label}）`
+            : `已读取本机 AGY 当前生效账号：${acc.name || label}（${label}）`;
+          window.agyManager.setStatus?.(msg, "success");
+        }
+      }
+      return;
+    }
+    if (kind !== "codearts") return;
+    codeartsNativeLogin = result ? { ...result, readAt: Date.now() } : null;
+    if (activeKind === "codearts") renderAccounts(allAccounts);
+  };
+
+  function renderCodeArtsNativeAccounts(list) {
+    if (!codeartsNativeLogin?.available || !Array.isArray(codeartsNativeLogin.accounts)
+      || !codeartsNativeLogin.accounts.length) return false;
+    for (const account of codeartsNativeLogin.accounts) {
+      const row = document.createElement("tr");
+      row.classList.add("current-row");
+      const actions = textCell("");
+      actions.textContent = "";
+      actions.appendChild(actionButton("下载登录备份", () => window.nativeLoginBackup?.download()));
+      row.append(
+        textCell("-"), actions, textCell("-"), textCell("本机当前"),
+        textCell("未在线核验"), textCell("CodeArts"),
+        textCell(`${account.provider} · ${account.auth_type === "oauth" ? "OAuth" : "API"}`),
+        textCell(account.account_id || "原生凭据未提供账号标识", "mono-text"),
+        textCell("-"), textCell("-"), textCell("-"), textCell("-"),
+        textCell("-"), textCell("本机 CLI"), textCell("-"),
+        textCell(new Date(codeartsNativeLogin.readAt).toLocaleString()), textCell("-"),
+      );
+      list.appendChild(row);
+    }
+    return true;
+  }
+
   function renderAccounts(accounts) {
     const list = document.getElementById("codex-account-list");
     if (!list) return;
     list.replaceChildren();
+    for (const id of ["devin-quota-column", "devin-included-quota-column"]) {
+      const header = document.getElementById(id);
+      if (header) header.hidden = activeKind !== "devin";
+    }
     const visibleAccounts = filteredAccounts(accounts);
     reconcileSelection(accounts);
     updateSelectionControls(visibleAccounts);
+    if (activeKind === "codearts" && renderCodeArtsNativeAccounts(list)) return;
     if (!visibleAccounts.length) {
       const row = document.createElement("tr");
-      const cell = textCell("当前类型下没有账号。");
-      cell.colSpan = 15;
+      const cell = textCell(activeKind === "codearts"
+        ? "CodeArts 使用本机 CLI 登录；请使用上方“读取本机登录”和“下载登录备份”保存当前账号凭据。"
+        : activeKind === "qoder"
+        ? "Qoder 使用本机 CLI 登录；请使用上方“读取本机登录”和“下载登录备份”保存当前账号凭据。"
+        : "当前类型下没有账号。");
+      cell.colSpan = activeKind === "devin" ? 19 : 17;
       row.appendChild(cell);
       list.appendChild(row);
       return;
@@ -1203,13 +1492,17 @@
         kind,
         textCell(account.name),
         textCell(account.account, "mono-text"),
+        WebClxDevinManager.quotaCell(account, true),
+        WebClxDevinManager.quotaCell(account),
         usageWindowCell(account),
         creditsTotalCell(account),
         creditsBreakdownCell(account),
-        creditsExpiryCell(account),
+        account.kind === "devin" ? WebClxDevinManager.subscriptionCell(account) : creditsExpiryCell(account),
         textCell(account.model, "mono-text"),
         textCell(account.endpoint, "mono-text"),
-        textCell(String(account.switch_count || 0), "mono-text"),
+        usageCountCell(account),
+        accountRefreshedCell(account),
+        lastSwitchCell(account),
       );
       list.appendChild(row);
     }
@@ -1252,6 +1545,8 @@
           active: Boolean(preset.active),
           saved_at: preset.saved_at,
           switch_count: preset.switch_count,
+          last_switch_at: preset.last_switch_at,
+          switch_history: preset.switch_history || [],
           account: preset.masked_auth_token || preset.provider_name,
           model: [preset.default_sonnet_model, preset.third_party_model, preset.default_opus_model]
             .filter(Boolean)
@@ -1265,6 +1560,10 @@
           const isAi = (meta.variant || "").toLowerCase() === "ai";
           const variantLabel = isAi ? "国际版" : "国内版";
           const endpoint = isAi ? "www.codebuddy.ai" : "www.codebuddy.cn";
+          const creditsOk = meta.credits && meta.credits.ok === true;
+          const creditsUpdatedAt = creditsOk && meta.credits.updatedAt ? Number(meta.credits.updatedAt) : 0;
+          const metaRefreshedAt = Number(meta.refreshedAt || 0);
+          const refreshedAt = Math.max(creditsUpdatedAt, metaRefreshedAt) || null;
           return {
             kind: "codebuddy",
             id: meta.id,
@@ -1272,6 +1571,8 @@
             active: Boolean(meta.active),
             saved_at: meta.createdAt || 0,
             switch_count: meta.switchCount || 0,
+            last_switch_at: meta.lastSwitchAt || 0,
+            switch_history: meta.switchHistory || [],
             account: meta.nickname || meta.uid || "-",
             model: variantLabel,
             endpoint,
@@ -1280,6 +1581,7 @@
             variant: meta.variant || "cn",
             supportsCheckin: meta.supportsCheckin !== false,
             supportsTravel: meta.supportsTravel !== false,
+            refreshed_at: refreshedAt,
           };
         });
       }
@@ -1288,14 +1590,18 @@
         devinAccounts = (await WebClxDevinManager.loadAccounts()).map((meta) => ({
           kind: "devin",
           clientType: meta.client_type || "cli",
+          subscription: meta.subscription || null,
           id: meta.id,
           name: meta.name || meta.email || meta.id,
           active: Boolean(meta.active),
           saved_at: meta.saved_at || 0,
-          switch_count: 0,
+          switch_count: meta.switch_count || 0,
+          last_switch_at: meta.last_switch_at || 0,
+          switch_history: meta.switch_history || [],
           account: meta.email || meta.user_id || (meta.token ? meta.token.slice(0, 10) + "..." : "-"),
           model: (meta.client_type || "cli") === "desktop" ? "Desktop 本机配置" : (meta.plan || "Devin CLI"),
           endpoint: (meta.client_type || "cli") === "desktop" ? "仅登录状态摘要" : (meta.org_id || "api.devin.ai"),
+          refreshed_at: meta.subscription?.updated_at || meta.queried_at || null,
         }));
       }
       // 用量窗口数据源：oauth 行取 auth 预设 details 里已采样的
@@ -1304,14 +1610,20 @@
       const authDetailsById = new Map(
         (authPresetResponse?.presets || []).map((preset) => [preset.id, preset.details || {}]),
       );
+      const authPresetsById = new Map(
+        (authPresetResponse?.presets || []).map((preset) => [preset.id, preset]),
+      );
       const apiPresetById = new Map(
         (apiPresetResponse?.presets || []).map((preset) => [preset.id, preset]),
       );
       const mergedCodexAccounts = orderCodexAccountsByPresetTables(codexResponse?.accounts, apiPresetResponse?.presets).map((account) => {
         if (account.kind === "oauth") {
           const details = authDetailsById.get(account.id) || {};
+          const preset = authPresetsById.get(account.id);
+          const lastRefresh = details.last_refresh || preset?.last_refresh || preset?.auth?.last_refresh || account.last_refresh || null;
           return {
             ...account,
+            refreshed_at: lastRefresh,
             quota: {
               hourly_percentage: details.hourly_percentage,
               hourly_reset_time: details.hourly_reset_time,
@@ -1359,11 +1671,17 @@
     const authDetailsById = new Map(
       (authPresetResponse?.presets || []).map((preset) => [preset.id, preset.details || {}]),
     );
+    const authPresetsById = new Map(
+      (authPresetResponse?.presets || []).map((preset) => [preset.id, preset]),
+    );
     const source = Array.isArray(codexResponse?.accounts) ? codexResponse.accounts : [];
     const accounts = source.filter((account) => account.kind === "oauth").map((account) => {
       const details = authDetailsById.get(account.id) || {};
+      const preset = authPresetsById.get(account.id);
+      const lastRefresh = details.last_refresh || preset?.last_refresh || preset?.auth?.last_refresh || account.last_refresh || null;
       return {
         ...account,
+        refreshed_at: lastRefresh,
         quota: {
           hourly_percentage: details.hourly_percentage,
           hourly_reset_time: details.hourly_reset_time,
@@ -1410,6 +1728,8 @@
         active: Boolean(preset.active),
         saved_at: preset.saved_at,
         switch_count: preset.switch_count,
+        last_switch_at: preset.last_switch_at,
+        switch_history: preset.switch_history || [],
         account: preset.masked_auth_token || preset.provider_name,
         model: [preset.default_sonnet_model, preset.third_party_model, preset.default_opus_model]
           .filter(Boolean)
@@ -1427,6 +1747,10 @@
         const isAi = (meta.variant || "").toLowerCase() === "ai";
         const variantLabel = isAi ? "国际版" : "国内版";
         const endpoint = isAi ? "www.codebuddy.ai" : "www.codebuddy.cn";
+        const creditsOk = meta.credits && meta.credits.ok === true;
+        const creditsUpdatedAt = creditsOk && meta.credits.updatedAt ? Number(meta.credits.updatedAt) : 0;
+        const metaRefreshedAt = Number(meta.refreshedAt || 0);
+        const refreshedAt = Math.max(creditsUpdatedAt, metaRefreshedAt) || null;
         return {
           kind: "codebuddy",
           id: meta.id,
@@ -1434,6 +1758,8 @@
           active: Boolean(meta.active),
           saved_at: meta.createdAt || 0,
           switch_count: meta.switchCount || 0,
+          last_switch_at: meta.lastSwitchAt || 0,
+          switch_history: meta.switchHistory || [],
           account: meta.nickname || meta.uid || "-",
           model: variantLabel,
           endpoint,
@@ -1442,26 +1768,31 @@
           variant: meta.variant || "cn",
           supportsCheckin: meta.supportsCheckin !== false,
           supportsTravel: meta.supportsTravel !== false,
+          refreshed_at: refreshedAt,
         };
       });
     }
     return { accounts };
   }
 
-  async function fetchDevinAccounts() {
+  async function fetchDevinAccounts(strict = false) {
     let accounts = [];
     if (typeof WebClxDevinManager === "object") {
-      accounts = (await WebClxDevinManager.loadAccounts()).map((meta) => ({
+      accounts = (await WebClxDevinManager.loadAccounts(strict)).map((meta) => ({
         kind: "devin",
         clientType: meta.client_type || "cli",
+        subscription: meta.subscription || null,
         id: meta.id,
         name: meta.name || meta.email || meta.id,
         active: Boolean(meta.active),
         saved_at: meta.saved_at || 0,
-        switch_count: 0,
+        switch_count: meta.switch_count || 0,
+        last_switch_at: meta.last_switch_at || 0,
+        switch_history: meta.switch_history || [],
         account: meta.email || meta.user_id || (meta.token ? meta.token.slice(0, 10) + "..." : "-"),
         model: (meta.client_type || "cli") === "desktop" ? "Desktop 本机配置" : (meta.plan || "Devin CLI"),
         endpoint: (meta.client_type || "cli") === "desktop" ? "仅登录状态摘要" : (meta.org_id || "api.devin.ai"),
+        refreshed_at: meta.subscription?.updated_at || meta.queried_at || null,
       }));
     }
     return { accounts };
@@ -1520,6 +1851,48 @@
     }
   }
 
+  async function refreshAllCurrentQuotas() {
+    const button = document.getElementById("account-refresh-all-quotas");
+    if (button.disabled) return;
+    const kind = activeKind;
+    if (!["oauth", "api", "devin"].includes(kind)) return;
+    button.disabled = true;
+    button.textContent = "刷新中…";
+    const report = (message, tone) => { if (activeKind === kind) showStatus(message, tone); };
+    try {
+      report("正在刷新当前页签全部可查询账号的额度…", "info");
+      const { accounts } = await (kind === "oauth" ? fetchOauthAccounts() : kind === "api" ? fetchApiAccounts() : fetchDevinAccounts(true));
+      const eligible = accounts.filter((account) => kind === "api"
+        ? detectUsagePlatform(account.quota_base_url || account.endpoint)
+        : kind !== "devin" || account.clientType !== "desktop");
+      let succeeded = 0;
+      const errors = [];
+      // Bound concurrent upstream queries and keep the original tab's scope if the user switches.
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(4, eligible.length) }, async () => {
+        while (next < eligible.length) {
+          const account = eligible[next++];
+          try {
+            const result = kind === "oauth"
+              ? await refreshAuthPresetQuota(account.id, account.name)
+              : kind === "api" ? await queryApiUsage(account)
+              : await WebClxDevinManager.queryQuota(account, true);
+            if (result?.ok === false) throw new Error(result.error || "查询失败");
+            succeeded++;
+          } catch (error) { errors.push(`${account.name || account.id}：${error.message}`); }
+        }
+      }));
+      await loadAccountsForKind(kind);
+      const skipped = accounts.length - eligible.length;
+      report(`额度刷新完成：成功 ${succeeded}，失败 ${errors.length}${skipped ? `，不支持查询 ${skipped}` : ""}。${errors.length ? errors.slice(0, 2).join("；") : ""}`, errors.length ? "warn" : "ok");
+    } catch (error) {
+      report(`额度刷新失败：${error.message}`, "warn");
+    } finally {
+      button.disabled = false;
+      button.textContent = "刷新全部额度";
+    }
+  }
+
   function updateRefreshButtonTitle() {
     const btn = document.getElementById("codex-account-refresh");
     if (!btn) return;
@@ -1531,6 +1904,8 @@
       devin: "刷新 Devin 账号",
       agy: "刷新 AGY 账号与额度",
       opencode: "刷新 OpenCode 配置",
+      codearts: "读取 CodeArts 本机登录",
+      qoder: "读取 Qoder 本机登录",
     };
     const title = labels[activeKind] || "刷新当前账号列表与额度";
     btn.title = title;
@@ -1544,6 +1919,10 @@
       btn.classList.add("loading");
     }
     try {
+      if (activeKind === "codearts" || activeKind === "qoder") {
+        window.nativeLoginBackup?.select(activeKind);
+        return;
+      }
       if (activeKind === "codebuddy") {
         showStatus("正在刷新 CodeBuddy 账号与积分…", "info");
         if (typeof WebClxCodeBuddyManager?.runAllCredits === "function") {
@@ -2010,6 +2389,7 @@
     }
     syncToolbarForKind();
     syncGlobalOptionsBarVisibility();
+    window.nativeLoginBackup?.select(activeKind);
     if (typeof updateRefreshButtonTitle === "function") {
       updateRefreshButtonTitle();
     }
@@ -2028,6 +2408,7 @@
       btn.addEventListener("click", () => setAccountKind(btn.dataset.kind, { push: true }));
     });
     document.getElementById("codex-account-refresh")?.addEventListener("click", refreshCurrentSubtabAccounts);
+    document.getElementById("account-refresh-all-quotas")?.addEventListener("click", refreshAllCurrentQuotas);
     document.getElementById("opencode-option-all-permissions")?.addEventListener("change", saveOpenCodeOptions);
     document.getElementById("codex-account-select-all")?.addEventListener("change", (event) => {
       for (const account of filteredAccounts(allAccounts)) {
@@ -2102,9 +2483,32 @@
     document.getElementById("codex-common-alt-screen-disabled")?.addEventListener("change", mirrorCodexDialogToBar);
     document.getElementById("codex-common-daemon-disabled")?.addEventListener("change", mirrorCodexDialogToBar);
     document.getElementById("codex-global-settings-dialog")?.addEventListener("close", mirrorCodexDialogToBar);
+    const usageWindowSelect = document.getElementById("account-usage-window");
+    if (usageWindowSelect) {
+      usageWindowSelect.value = accountUsageWindow();
+      usageWindowSelect.addEventListener("change", () => {
+        saveAccountUsageWindow(usageWindowSelect.value);
+        // 统一表按缓存重渲染即可；AGY 表用同一窗口值重画，均不发起网络请求。
+        renderAccounts(allAccounts);
+        if (typeof window.agyManager?.renderUsageWindow === "function") {
+          window.agyManager.renderUsageWindow();
+        }
+      });
+    }
     syncToolbarForKind();
     syncGlobalOptionsBarVisibility();
     syncDevinOptionsBarVisibility();
     loadCodexAccounts();
+
+    window.setInterval(() => {
+      document.querySelectorAll(".codex-account-refreshed-cell[data-refreshed-at]").forEach((cell) => {
+        const ts = Number(cell.dataset.refreshedAt);
+        if (ts > 0) {
+          const text = formatAccountRefreshedTime(ts);
+          cell.textContent = text;
+          cell.title = `刷新时间：${text}\n单击刷新此账号`;
+        }
+      });
+    }, 30000);
   });
 })();

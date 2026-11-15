@@ -21,7 +21,7 @@ function harness(agent = "", name = "fixture") {
     state: {
       activeSessionId: "viewed",
       sessions: [session],
-      autoCompactSessionIds: new Set([session.id]),
+      autoCompactDisabledSessionIds: new Set(),
       autoCompactHandledSessions: new Set(),
       autoCompactScheduledTimers: new Map(),
       autoCompactPreviousActivityStates: new Map(),
@@ -46,7 +46,7 @@ function harness(agent = "", name = "fixture") {
     updateStatus: (...args) => statuses.push(args),
     storeTerminalAutoCompactStatusSessionIds() {},
     storeTerminalAutoCompactLastSent() {},
-    storeTerminalAutoCompactSessionIds() {},
+    storeTerminalAutoCompactDisabledSessionIds() {},
     focusTerminalAfterSoftKeyboardInput() {},
     sendTerminalInput: (data) => { inputs.push({ id: sandbox.state.activeSessionId, data }); },
     sendTerminalInputToSession: (data, id) => { inputs.push({ id, data }); return true; },
@@ -76,7 +76,7 @@ function harness(agent = "", name = "fixture") {
   };
 }
 
-for (const agent of ["CodeBuddy", "codebuddy", "AGY", "agy", "Antigravity", "Cline", "Codex/CodeBuddy"]) {
+for (const agent of ["CodeBuddy", "codebuddy", "Cline", "Codex/CodeBuddy"]) {
   test(`${agent} cannot schedule, auto-type or soft-key /compact`, async () => {
     const h = harness(agent);
     const { sandbox: s } = h;
@@ -91,9 +91,8 @@ for (const agent of ["CodeBuddy", "codebuddy", "AGY", "agy", "Antigravity", "Cli
     s.syncAutoCompactToggleForActiveSession();
     assert.equal(s.sessionAutoCompactToggleEl.disabled, true);
     assert.equal(s.sessionAutoCompactToggleEl.checked, false);
-    s.state.autoCompactSessionIds.clear();
     s.setAutoCompactForActiveSession(true);
-    assert.equal(s.state.autoCompactSessionIds.size, 0);
+    assert.equal(s.state.autoCompactDisabledSessionIds.size, 0);
     // A sent /compact no longer fabricates a compacting state on its own.
     s.syncAutoCompactCompletionStatuses();
     assert.equal(s.state.autoCompactStatusSessionIds.size, 0);
@@ -103,15 +102,43 @@ for (const agent of ["CodeBuddy", "codebuddy", "AGY", "agy", "Antigravity", "Cli
   });
 }
 
-test("the existing AGY-name fallback still blocks compact before process discovery", () => {
+test("AGY terminals and names now support compact by default", () => {
   for (const name of ["AGY", "agy worker", "agy-test"]) {
     const h = harness("", name);
-    assert.equal(h.sandbox.isSessionCompactCapableAgent(h.session), false);
-    assert.equal(h.sandbox.maybeAutoCompactCompletedSession(h.session), false);
+    assert.equal(h.sandbox.isSessionCompactCapableAgent(h.session), true);
   }
 });
 
-for (const agent of ["CodeBuddy", "AGY"]) {
+test("auto compact defaults on for terminals not created through the UI", () => {
+  const h = harness("Codex");
+  const apiSession = {
+    id: "api-created",
+    activity_agent: "Codex",
+    name: "api",
+    activity_state: "completed",
+  };
+  h.sandbox.state.sessions.push(apiSession);
+  // 未出现在任何开启/关闭列表里也应直接参与自动压缩。
+  assert.equal(h.sandbox.state.autoCompactDisabledSessionIds.size, 0);
+  assert.equal(h.sandbox.maybeAutoCompactCompletedSession(apiSession), true);
+  assert.equal(h.timers.size, 1);
+});
+
+test("explicitly disabled terminal stays out of auto compact", () => {
+  const h = harness("Codex");
+  const offSession = {
+    id: "disabled-by-user",
+    activity_agent: "Codex",
+    name: "off",
+    activity_state: "completed",
+  };
+  h.sandbox.state.sessions.push(offSession);
+  h.sandbox.state.autoCompactDisabledSessionIds.add("disabled-by-user");
+  assert.equal(h.sandbox.maybeAutoCompactCompletedSession(offSession), false);
+  assert.equal(h.timers.size, 0);
+});
+
+for (const agent of ["CodeBuddy", "Cline"]) {
   for (const phase of ["pending", "countdown"]) {
     test(`${agent} discovered during ${phase} cancels automatic compact`, async () => {
       const h = harness();
@@ -133,7 +160,7 @@ for (const agent of ["CodeBuddy", "AGY"]) {
   });
 }
 
-for (const agent of ["Codex", "Claude"]) {
+for (const agent of ["Codex", "Claude", "AGY", "agy", "Antigravity"]) {
   test(`${agent} retains automatic compact support`, async () => {
     const h = harness(agent);
     assert.equal(h.sandbox.maybeAutoCompactCompletedSession(h.session), true);
@@ -192,3 +219,32 @@ test("backend automated send boundaries share a non-configurable compact guard",
   const html = source("static/index.html");
   assert.match(html, /id="terminal-auto-compact-skip-codebuddy-input"\s+type="checkbox"\s+checked\s+disabled/);
 });
+
+test("front-end no longer schedules /compact now that the server owns it", () => {
+  const h = harness("Codex");
+  assert.equal(h.sandbox.maybeAutoCompactCompletedSessions(), false);
+  assert.equal(h.timers.size, 0);
+  assert.deepEqual(h.inputs, []);
+});
+
+test("auto compact toggle persists to the server session endpoint", async () => {
+  const h = harness("Codex");
+  h.sandbox.state.activeSessionId = "target";
+  h.sandbox.setAutoCompactForActiveSession(false);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.requests[0].url, "/api/terminal/sessions/target/auto-compact");
+  assert.deepEqual(h.requests[0].body, { enabled: false });
+  assert.equal(h.sandbox.state.sessions[0].auto_compact_disabled, true);
+});
+
+test("auto compact toggle reflects the server-side disabled flag", () => {
+  const h = harness("Codex");
+  h.sandbox.state.activeSessionId = "target";
+  h.sandbox.syncAutoCompactToggleForActiveSession();
+  assert.equal(h.sandbox.sessionAutoCompactToggleEl.checked, true);
+  h.sandbox.state.sessions[0].auto_compact_disabled = true;
+  h.sandbox.syncAutoCompactToggleForActiveSession();
+  assert.equal(h.sandbox.sessionAutoCompactToggleEl.checked, false);
+});
+

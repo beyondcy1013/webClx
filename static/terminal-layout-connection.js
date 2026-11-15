@@ -1059,10 +1059,15 @@ function selectSession(sessionId, { connect = true, pushHistory = false } = {}) 
     renderSessions();
     return;
   }
-  if (activeTerminalContext?.sessionId === state.activeSessionId) {
-    saveTerminalScrollPositionForSession(state.activeSessionId);
+  const isSameSession = Boolean(
+    sessionId &&
+    sessionId === state.activeSessionId &&
+    activeTerminalContext?.sessionId === sessionId
+  );
+  if (!isSameSession && activeTerminalContext?.sessionId === state.activeSessionId) {
+    saveTerminalScrollPositionForSession(state.activeSessionId, { switchingSession: true });
   }
-  const pageScrollRestore = beginSessionPageScrollRestore(session.id);
+  const pageScrollRestore = isSameSession ? null : beginSessionPageScrollRestore(session.id);
 
   if (pendingNewSessionQuickStart && pendingNewSessionQuickStart.sessionId !== session.id) {
     cancelNewSessionQuickStart();
@@ -1083,7 +1088,9 @@ function selectSession(sessionId, { connect = true, pushHistory = false } = {}) 
   syncHistory({ push: pushHistory });
   renderSessions();
   tickTerminalPasteScheduledCountdown();
-  restoreSessionPageScrollIfActive(pageScrollRestore);
+  if (pageScrollRestore) {
+    restoreSessionPageScrollIfActive(pageScrollRestore);
+  }
 
   if (connect) {
     connectTerminal();

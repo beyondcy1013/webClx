@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use terminal_core::*;
 use time::{Date, Month, OffsetDateTime, Time};
 use tokio::sync::{Notify, broadcast};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     atomic_file, codex_launch::prepare_codex_history_command_for_user, filesystem, runtime_paths,
@@ -27,7 +27,6 @@ use crate::{
 };
 
 use super::{
-    MAX_TERMINAL_INPUT_HISTORY_ENTRIES, MAX_TERMINAL_INPUT_HISTORY_LINE_BYTES,
     SESSION_EVENT_CHANNEL_CAPACITY, ScheduledInputUpdate,
     StoredTerminalAutoContinueScheduleRegistry, StoredTerminalPendingBuildRegistry,
     StoredTerminalRegistry, StoredTerminalScheduledInputRegistry, StoredTerminalSession,
@@ -46,31 +45,36 @@ use super::{
         TerminalAgentActivity, TerminalAgentDetector, terminal_compact_command_blocked_agent,
     },
     agent_session::{
-        DetectedResumeSession, ResumeSessionDetector, current_resume_agent_process_ids,
-        detect_current_resume_session, detect_current_resume_session_complete,
-        detect_current_session_rollout_path, parse_rollout_user_messages, tmux_pane_current_path,
+        DetectedResumeSession, ResumeSessionDetector, codearts_user_messages_for_terminal,
+        current_resume_agent_process_ids, detect_current_resume_session,
+        detect_current_resume_session_complete, detect_current_session_rollout_path,
+        parse_rollout_user_messages, tmux_pane_current_path,
     },
-    default_terminal_user_name, load_terminal_shutdown_restore_registry,
-    persist_terminal_shutdown_restore_registry,
+    default_terminal_user_name, is_compile_notification, is_terminal_inter_agent_message,
+    load_terminal_shutdown_restore_registry, persist_terminal_shutdown_restore_registry,
     session::TerminalSession,
     sort_terminal_shutdown_restore_records,
     tmux::{
         TmuxSessionStatus, capture_tmux_activity_pane_snapshot, capture_tmux_recent_pane_snapshot,
-        capture_tmux_text_pane_snapshot, capture_tmux_visible_text_pane_snapshot,
-        create_fresh_tmux_session, destroy_tmux_session, detach_tmux_clients_for_sessions,
-        ensure_tmux_session, send_tmux_enter_key, send_tmux_input,
-        terminate_tmux_pane_process_tree, tmux_session_status, tmux_socket_name,
+        capture_tmux_text_pane_snapshot, capture_tmux_visible_styled_pane_snapshot,
+        capture_tmux_visible_text_pane_snapshot, create_fresh_tmux_session, destroy_tmux_session,
+        detach_tmux_clients_for_sessions, ensure_tmux_session, send_tmux_buffer,
+        send_tmux_enter_key, send_tmux_input, terminate_tmux_pane_process_tree,
+        tmux_session_status, tmux_socket_name,
     },
 };
 
+pub(in crate::terminal) mod account_rotation;
 pub(super) mod activity_probe;
 mod cleanup;
+mod composer_draft;
 use activity_probe::{
     PROBE_SNAPSHOT_MAX_AGE, ProbeSnapshotCache, ProbeSnapshotCacheEntry, map_activity_probes,
 };
 mod crontab;
 mod error_detection;
 mod output_fingerprint;
+use composer_draft::{ComposerAgent, ComposerScan, composer_clear_keystrokes};
 use output_fingerprint::terminal_output_fingerprint;
 pub(crate) mod message_ledger;
 use message_ledger::{DeliveryRecord, DeliveryState, TerminalMessageLedger};
@@ -84,8 +88,9 @@ use crontab::{
     sanitize_cron_file_component, set_executable_mode, shell_quote_cron,
 };
 
+pub(crate) use scheduled_input::deduplicate_consecutive_sender_tags;
 use scheduled_input::{
-    claim_and_persist_due_scheduled_input_tasks, load_terminal_scheduled_input_tasks,
+    DraftReceipt, claim_and_persist_due_scheduled_input_tasks, load_terminal_scheduled_input_tasks,
     normalize_scheduled_input_text, persist_terminal_scheduled_input_registry,
     prune_completed_scheduled_input_tasks, scheduled_input_task_info, scheduled_input_task_infos,
 };
@@ -106,15 +111,17 @@ struct RestoreShutdownResult {
 use error_detection::{
     TerminalErrorKeywordMatch, compact_terminal_search_line, count_non_overlapping_matches,
     terminal_cline_idle_prompt_from_snapshot, terminal_error_keyword_match,
-    terminal_error_keyword_match_from_snapshot,
 };
 
 pub(super) use error_detection::{
-    terminal_compacting_status_from_snapshot, terminal_worked_status_match_from_snapshot,
+    terminal_codex_turn_in_progress_from_snapshot, terminal_compacting_status_from_snapshot,
+    terminal_error_keyword_match_from_snapshot, terminal_snapshot_context_percent_used,
+    terminal_snapshot_has_compact_completion, terminal_worked_status_match_from_snapshot,
     terminal_working_status_match_from_snapshot,
 };
 
 pub(super) use error_detection::is_terminal_continue_line;
+pub(super) use error_detection::terminal_snapshot_compact_model_key;
 
 #[cfg(test)]
 pub(super) use error_detection::{
@@ -128,6 +135,33 @@ const TERMINAL_AUTO_CONTINUE_RESET_GRACE_MS: u64 = 60_000;
 
 const TERMINAL_AUTO_CONTINUE_CRON_FALLBACK_DELAY_MS: u64 = 5_000;
 const TERMINAL_ERROR_AUTO_CONTINUE_SCAN_MS: u64 = 5_000;
+/// 服务端自动压缩：待查看需要稳定多久才发送 `/compact`（8 秒倒计时）。
+const TERMINAL_AUTO_COMPACT_SETTLE_MS: u64 = 8_000;
+/// 服务端自动压缩：同一终端两次发送之间的最小间隔。
+const TERMINAL_AUTO_COMPACT_MIN_INTERVAL_MS: u64 = 60_000;
+
+/// 压缩完成后、用户查看该终端输出之前不再自动压缩，等价于前端的“已压缩”标记：
+/// 只要查看确认仍停在压缩完成那一刻或更早，就保持抑制。
+pub(super) fn idle_auto_compact_holds_after_compaction(
+    compact_completed_output_at: Option<u64>,
+    last_viewed_output_at: u64,
+) -> bool {
+    compact_completed_output_at.is_some_and(|completed_at| last_viewed_output_at <= completed_at)
+}
+
+/// 服务端自动压缩的发送判据：待查看已稳定、距上次发送足够久、且其后有新输出。
+pub(super) fn idle_auto_compact_due(
+    completed_since: u64,
+    last_sent_at: Option<u64>,
+    last_sent_output_at: u64,
+    last_output_at: u64,
+    now: u64,
+) -> bool {
+    now.saturating_sub(completed_since) >= TERMINAL_AUTO_COMPACT_SETTLE_MS
+        && last_sent_at
+            .is_none_or(|last| now.saturating_sub(last) >= TERMINAL_AUTO_COMPACT_MIN_INTERVAL_MS)
+        && last_output_at > last_sent_output_at
+}
 const TERMINAL_AUTO_CONTINUE_CRON_MARKER_PREFIX: &str = "webclx-auto-continue";
 const TERMINAL_AUTO_CONTINUE_HISTORY_FILE_NAME: &str = "terminal-auto-continue-history.json";
 const TERMINAL_CONTINUE_COMMAND: &str = "继续";
@@ -137,16 +171,25 @@ const TERMINAL_PRESET_STATUS_POLL: Duration = Duration::from_millis(120);
 const TERMINAL_FORCE_RESUME_EXIT_TIMEOUT: Duration = Duration::from_secs(4);
 const TERMINAL_FORCE_RESUME_EXIT_POLL: Duration = Duration::from_millis(100);
 const TERMINAL_FORCE_RESUME_SHELL_SETTLE: Duration = Duration::from_millis(250);
+/// 清空草稿后等待 TUI 重绘再回读的间隔。
+const COMPOSER_DRAFT_CLEAR_SETTLE: Duration = Duration::from_millis(120);
+/// 清空草稿的最大尝试次数。
+const COMPOSER_DRAFT_CLEAR_ATTEMPTS: usize = 1;
+/// 正文提交后等待输入框变空的最长时间，超时则不再还原草稿。
+const COMPOSER_DRAFT_RESTORE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const COMPOSER_DRAFT_RESTORE_POLL: Duration = Duration::from_millis(120);
+/// 无法自动还原时，草稿原文落在该 tmux 粘贴缓冲区里。
+const COMPOSER_DRAFT_RECOVERY_BUFFER: &str = "webclx-user-draft";
 const TERMINAL_ACTIVITY_PROBE_CACHE_TTL: Duration = Duration::from_secs(1);
 const TERMINAL_CHILD_REAPER_INTERVAL: Duration = Duration::from_secs(1);
 /// Slash command that compacts the conversation to free context-window room.
 const TERMINAL_COMPACT_COMMAND: &str = "/compact";
 /// Delay between typing a slash command and the first Enter, mirroring the
 /// frontend MOBILE_SLASH_COMMAND_ENTER_DELAY_MS so Codex registers the command.
-const TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS: u64 = 500;
+pub(crate) const TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS: u64 = 500;
 /// Delay between the first and second Enter for a slash command, mirroring the
 /// frontend MOBILE_SLASH_COMMAND_CONFIRM_DELAY_MS so Codex confirms the dialog.
-const TERMINAL_SLASH_COMMAND_CONFIRM_DELAY_MS: u64 = 120;
+pub(crate) const TERMINAL_SLASH_COMMAND_CONFIRM_DELAY_MS: u64 = 120;
 /// Pane rows scanned for a live compaction progress line. The TUI renders its
 /// input box and footer below that line, so the window is wider than the
 /// working-status window.
@@ -215,6 +258,10 @@ impl TerminalManager {
         let scheduled_input_tasks = load_terminal_scheduled_input_tasks(&scheduled_input_file);
         let auto_continue_schedules = load_terminal_auto_continue_tasks(&auto_continue_file);
         let pending_build_requests = load_terminal_pending_build_requests(&pending_build_file);
+        let auto_compact_settings_file =
+            state_file.with_file_name(super::TERMINAL_AUTO_COMPACT_SETTINGS_FILE_NAME);
+        let auto_compact_settings =
+            load_terminal_auto_compact_settings(&auto_compact_settings_file);
         let (event_sender, _) = broadcast::channel(SESSION_EVENT_CHANNEL_CAPACITY);
         let manager = Self {
             state: Arc::new(std::sync::RwLock::new(state)),
@@ -226,6 +273,8 @@ impl TerminalManager {
             scheduled_input_file: Arc::new(scheduled_input_file),
             auto_continue_file: Arc::new(auto_continue_file),
             pending_build_file: Arc::new(pending_build_file),
+            auto_compact_settings_file: Arc::new(auto_compact_settings_file),
+            auto_compact_settings: Arc::new(std::sync::RwLock::new(auto_compact_settings)),
             shutdown_restore_file: Arc::new(PathBuf::new()),
             workspace_restore_file: Arc::new(PathBuf::new()),
             env_snapshot: Arc::new(TerminalEnvironmentSnapshot {
@@ -257,6 +306,13 @@ impl TerminalManager {
             auto_continue_respect_manual_interrupt: Arc::new(std::sync::atomic::AtomicBool::new(
                 settings_core::DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
             )),
+            report_debounce_seconds: Arc::new(AtomicU64::new(u64::from(
+                settings_core::DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+            ))),
+            message_queue_seconds: Arc::new(AtomicU64::new(u64::from(
+                settings_core::DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
+            ))),
+            last_message_received_at: Arc::new(std::sync::Mutex::new(HashMap::new())),
             quota_reset_cache: crate::quota_reset_cache::QuotaResetCache::new(),
             api_preset_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
             scheduled_input_tasks: Arc::new(std::sync::Mutex::new(scheduled_input_tasks)),
@@ -267,6 +323,7 @@ impl TerminalManager {
             activity_probe_scan_lock: Arc::new(std::sync::Mutex::new(())),
             probe_snapshot_cache: Arc::new(std::sync::Mutex::new(ProbeSnapshotCache::new())),
             service_restart_pending: Arc::new(AtomicBool::new(false)),
+            initial_restore_done: Arc::new(AtomicBool::new(true)),
             // 测试构造路径不持久化投递账本。
             terminal_message_ledger: Arc::new(Mutex::new(TerminalMessageLedger::in_memory())),
         };
@@ -329,6 +386,10 @@ impl TerminalManager {
         let scheduled_input_tasks = load_terminal_scheduled_input_tasks(&scheduled_input_file);
         let auto_continue_schedules = load_terminal_auto_continue_tasks(&auto_continue_file);
         let pending_build_requests = load_terminal_pending_build_requests(&pending_build_file);
+        let auto_compact_settings_file =
+            state_file.with_file_name(super::TERMINAL_AUTO_COMPACT_SETTINGS_FILE_NAME);
+        let auto_compact_settings =
+            load_terminal_auto_compact_settings(&auto_compact_settings_file);
         let (event_sender, _) = broadcast::channel(SESSION_EVENT_CHANNEL_CAPACITY);
         let manager = Self {
             state: Arc::new(std::sync::RwLock::new(state)),
@@ -340,6 +401,8 @@ impl TerminalManager {
             scheduled_input_file: Arc::new(scheduled_input_file),
             auto_continue_file: Arc::new(auto_continue_file),
             pending_build_file: Arc::new(pending_build_file),
+            auto_compact_settings_file: Arc::new(auto_compact_settings_file),
+            auto_compact_settings: Arc::new(std::sync::RwLock::new(auto_compact_settings)),
             shutdown_restore_file: Arc::new(shutdown_restore_file),
             workspace_restore_file: Arc::new(workspace_restore_file),
             env_snapshot: Arc::new(env_snapshot),
@@ -363,6 +426,13 @@ impl TerminalManager {
             auto_continue_respect_manual_interrupt: Arc::new(std::sync::atomic::AtomicBool::new(
                 settings_core::DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
             )),
+            report_debounce_seconds: Arc::new(AtomicU64::new(u64::from(
+                settings_core::DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+            ))),
+            message_queue_seconds: Arc::new(AtomicU64::new(u64::from(
+                settings_core::DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
+            ))),
+            last_message_received_at: Arc::new(std::sync::Mutex::new(HashMap::new())),
             quota_reset_cache,
             api_preset_snapshot: Arc::new(std::sync::RwLock::new(Vec::new())),
             scheduled_input_tasks: Arc::new(std::sync::Mutex::new(scheduled_input_tasks)),
@@ -373,6 +443,7 @@ impl TerminalManager {
             activity_probe_scan_lock: Arc::new(std::sync::Mutex::new(())),
             probe_snapshot_cache: Arc::new(std::sync::Mutex::new(ProbeSnapshotCache::new())),
             service_restart_pending: Arc::new(AtomicBool::new(false)),
+            initial_restore_done: Arc::new(AtomicBool::new(!defer_restore)),
             terminal_message_ledger: Arc::new(Mutex::new(TerminalMessageLedger::load(Some(
                 message_ledger_file,
             )))),
@@ -467,8 +538,23 @@ impl TerminalManager {
                     "terminal initial restore task failed: {error}"
                 ),
             }
+            manager.initial_restore_done.store(true, Ordering::Release);
             manager.spawn_runtime_runners();
         });
+    }
+
+    /// 等待服务启动后的终端异步恢复完成，防止重启瞬间并发到达的消息/写入因 live_sessions 尚未挂载而误判 session inactive。
+    pub fn wait_for_initial_restore(&self, timeout: Duration) {
+        if self.initial_restore_done.load(Ordering::Acquire) {
+            return;
+        }
+        let start = Instant::now();
+        while !self.initial_restore_done.load(Ordering::Acquire) {
+            if start.elapsed() >= timeout {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     #[cfg(test)]
@@ -1129,6 +1215,41 @@ impl TerminalManager {
         Ok(session.info(base_dir, display_root, TerminalActivitySnapshot::idle(0), false))
     }
 
+    /// 切换某终端的自动压缩开关。默认开启，仅记录显式关闭的终端。
+    pub fn set_session_auto_compact_disabled(
+        &self,
+        base_dir: &Path,
+        display_root: &Path,
+        session_id: &str,
+        disabled: bool,
+    ) -> Result<TerminalSessionInfo> {
+        let session = {
+            let mut state = crate::lock_or_recover!(self.state.write());
+            let stored = state
+                .sessions_by_id
+                .get(session_id)
+                .cloned()
+                .with_context(|| format!("会话 `{session_id}` 不存在"))?;
+            let updated = StoredTerminalSession {
+                auto_compact_disabled: disabled,
+                ..stored
+            };
+            state
+                .sessions_by_id
+                .insert(session_id.to_string(), updated.clone());
+            drop(state);
+            self.persist_state();
+            updated
+        };
+        if let Some(entry) =
+            crate::lock_or_recover!(self.per_session_runtime.lock()).get_mut(session_id)
+        {
+            entry.auto_compact_completed_since = None;
+        }
+        self.notify_session_list_changed("auto_compact_updated", session.id.clone());
+        Ok(session.info(base_dir, display_root, TerminalActivitySnapshot::idle(0), false))
+    }
+
     pub fn update_session_group(
         &self,
         session_id: &str,
@@ -1342,6 +1463,7 @@ impl TerminalManager {
 
             state.sessions_by_id.remove(session_id);
             state.input_histories.remove(session_id);
+            state.input_history_cleared_at.remove(session_id);
             remove_session_from_path_locked(&mut state, &stored.path, session_id);
             drop(state);
             self.persist_state();
@@ -2093,6 +2215,9 @@ impl TerminalManager {
                 sessions: collect_stored_sessions(&state),
                 input_histories: collect_stored_input_histories(&state),
                 output_observations: collect_stored_output_observations(&state),
+                input_history_cleared_at: state.input_history_cleared_at.clone(),
+                terminal_messages_cleared_at: state.terminal_messages_cleared_at.clone(),
+                compile_notifications_cleared_at: state.compile_notifications_cleared_at.clone(),
             }
         };
         if let Err(error) = persist_terminal_registry(&self.state_file, &registry) {
@@ -2241,6 +2366,7 @@ impl TerminalManager {
             }
 
             let stored = StoredTerminalSession {
+                auto_compact_disabled: false,
                 id: record.session_id.clone(),
                 path: record.path.clone(),
                 user_name: record.user_name.clone(),
@@ -2321,6 +2447,27 @@ impl TerminalManager {
                         paste_active: false,
                     },
                 );
+                dirty = true;
+            }
+
+            if let Some(cleared_at) = record.input_history_cleared_at {
+                state
+                    .input_history_cleared_at
+                    .insert(stored.id.clone(), cleared_at);
+                dirty = true;
+            }
+
+            if let Some(cleared_at) = record.terminal_messages_cleared_at {
+                state
+                    .terminal_messages_cleared_at
+                    .insert(stored.id.clone(), cleared_at);
+                dirty = true;
+            }
+
+            if let Some(cleared_at) = record.compile_notifications_cleared_at {
+                state
+                    .compile_notifications_cleared_at
+                    .insert(stored.id.clone(), cleared_at);
                 dirty = true;
             }
 
@@ -2583,13 +2730,21 @@ impl TerminalManager {
                 continue;
             };
 
-            let input_history = {
+            let input_history = self.session_input_history(&stored.id).unwrap_or_default();
+            let (
+                input_history_cleared_at,
+                terminal_messages_cleared_at,
+                compile_notifications_cleared_at,
+            ) = {
                 let state = crate::lock_or_recover!(self.state.read());
-                state
-                    .input_histories
-                    .get(&stored.id)
-                    .map(|history| history.entries.clone())
-                    .unwrap_or_default()
+                (
+                    state.input_history_cleared_at.get(&stored.id).copied(),
+                    state.terminal_messages_cleared_at.get(&stored.id).copied(),
+                    state
+                        .compile_notifications_cleared_at
+                        .get(&stored.id)
+                        .copied(),
+                )
             };
             records.push(TerminalResumeRestoreRecord {
                 session_id: stored.id.clone(),
@@ -2612,6 +2767,9 @@ impl TerminalManager {
                 group_order: stored.group_order,
                 group_fixed_order: stored.group_fixed_order,
                 input_history,
+                input_history_cleared_at,
+                terminal_messages_cleared_at,
+                compile_notifications_cleared_at,
                 resume_id: detected.info.resume_id,
                 command: detected.info.command,
                 program: detected.info.program,
@@ -2655,19 +2813,16 @@ impl TerminalManager {
         scheduled_input_task_infos(&tasks)
     }
 
-    /// 迟到的原生用户记录可以把 pending/unknown 收成 confirmed。
+    /// 迟到的原生用户记录可以把 pending/unknown/blocked 收成 confirmed。
     /// 只读会话文件，不补发正文，也不把缺少记录当成仍占用输入框。
     fn reconcile_unconfirmed_scheduled_messages(&self) {
         let pending = {
             let tasks = crate::lock_or_recover!(self.scheduled_input_tasks.lock());
             tasks
                 .values()
-                .filter(|task| {
-                    task.task_type == "agent_message"
-                        && matches!(task.status.as_str(), "pending_confirmation" | "unknown")
-                })
+                .filter(|task| scheduled_input_reconcile_candidate(&task.task_type, &task.status))
                 .map(|task| {
-                    (task.session_id.clone(), task.id.clone(), format!("[scheduled:{}]", task.id))
+                    (task.session_id.clone(), task.id.clone(), format!("[delivery:{}]", task.id))
                 })
                 .collect::<Vec<_>>()
         };
@@ -2687,7 +2842,10 @@ impl TerminalManager {
                 continue;
             };
             for (task_id, marker) in items {
-                if terminal_message_delivery_count(&entries, &marker) > 0 {
+                let legacy_marker = format!("[scheduled:{task_id}]");
+                if terminal_message_delivery_count(&entries, &marker) > 0
+                    || terminal_message_delivery_count(&entries, &legacy_marker) > 0
+                {
                     confirmed_ids.push(task_id);
                 }
             }
@@ -2699,7 +2857,7 @@ impl TerminalManager {
         let mut changed = false;
         for task_id in confirmed_ids {
             if let Some(task) = tasks.get_mut(&task_id) {
-                if matches!(task.status.as_str(), "pending_confirmation" | "unknown") {
+                if scheduled_input_reconcile_candidate(&task.task_type, &task.status) {
                     task.status = "confirmed".into();
                     task.last_error.clear();
                     changed = true;
@@ -2719,13 +2877,15 @@ impl TerminalManager {
             .ok_or_else(|| anyhow::anyhow!("scheduled input task not found"))?;
         // Read-only reconciliation: late rollout persistence is not a reason
         // to inject another body or Enter.
-        if snapshot.task_type == "agent_message"
-            && matches!(snapshot.status.as_str(), "pending_confirmation" | "unknown")
-        {
-            let marker = format!("[scheduled:{}]", snapshot.id);
+        if scheduled_input_reconcile_candidate(&snapshot.task_type, &snapshot.status) {
+            let delivery_marker = format!("[delivery:{}]", snapshot.id);
+            let legacy_marker = format!("[scheduled:{}]", snapshot.id);
             if self
                 .session_agent_rollout_history(&snapshot.session_id)?
-                .is_some_and(|entries| terminal_message_delivery_count(&entries, &marker) > 0)
+                .is_some_and(|entries| {
+                    terminal_message_delivery_count(&entries, &delivery_marker) > 0
+                        || terminal_message_delivery_count(&entries, &legacy_marker) > 0
+                })
             {
                 let mut tasks = crate::lock_or_recover!(self.scheduled_input_tasks.lock());
                 if let Some(task) = tasks.get_mut(task_id) {
@@ -2740,6 +2900,37 @@ impl TerminalManager {
             .get(task_id)
             .map(scheduled_input_task_info)
             .ok_or_else(|| anyhow::anyhow!("scheduled input task not found"))
+    }
+
+    pub fn update_report_debounce_seconds(&self, seconds: u32) {
+        self.report_debounce_seconds
+            .store(u64::from(seconds), Ordering::Relaxed);
+    }
+
+    pub fn report_debounce_seconds(&self) -> u32 {
+        self.report_debounce_seconds.load(Ordering::Relaxed) as u32
+    }
+
+    pub fn update_message_queue_seconds(&self, seconds: u32) {
+        self.message_queue_seconds
+            .store(u64::from(seconds), Ordering::Relaxed);
+    }
+
+    pub fn message_queue_seconds(&self) -> u32 {
+        self.message_queue_seconds.load(Ordering::Relaxed) as u32
+    }
+
+    pub fn record_session_message_received(&self, session_id: &str, received_at: u64) {
+        if session_id.trim().is_empty() || received_at == 0 {
+            return;
+        }
+        let mut map = crate::lock_or_recover!(self.last_message_received_at.lock());
+        map.insert(session_id.trim().to_string(), received_at);
+    }
+
+    pub fn session_last_message_received_at(&self, session_id: &str) -> u64 {
+        let map = crate::lock_or_recover!(self.last_message_received_at.lock());
+        map.get(session_id.trim()).copied().unwrap_or(0)
     }
 
     pub fn create_scheduled_input(
@@ -2773,7 +2964,43 @@ impl TerminalManager {
             anyhow::bail!("scheduled input text is too large");
         }
         let now = current_timestamp_millis();
-        if due_at_millis <= now {
+        let queue_seconds = self.message_queue_seconds();
+        let last_received_at = self.session_last_message_received_at(session_id);
+        let debounce_seconds = self.report_debounce_seconds();
+        let is_report = debounce_seconds > 0
+            && scheduled_input::is_report_agent_message(
+                &task_type,
+                &normalized_text,
+                repeat_interval_millis,
+            );
+        // 排队中的普通消息合并进最早待发的同类任务，只投递一次；
+        // 指定时间/循环/重要消息/自唤醒保持独立。
+        let mergeable_queue_message = scheduled_input::is_mergeable_agent_message(
+            &task_type,
+            &normalized_text,
+            &label,
+            repeat_interval_millis,
+        );
+        let mut final_due_at_millis = due_at_millis;
+        if is_report {
+            let debounce_millis = u64::from(debounce_seconds) * 1000;
+            final_due_at_millis = final_due_at_millis.max(now.saturating_add(debounce_millis));
+        } else if due_at_millis <= now {
+            anyhow::bail!("scheduled input time must be in the future");
+        }
+
+        // 收到新消息比较间隔：低于 3 分钟则 queue 后者 3 分钟；
+        // 否则对于 agent_message 默认 queue 时间为配置的 queue_seconds（默认 8 秒）
+        let three_minutes_millis: u64 = 3 * 60 * 1000;
+        if last_received_at > 0 && now.saturating_sub(last_received_at) < three_minutes_millis {
+            let delayed_due = now.saturating_add(three_minutes_millis);
+            final_due_at_millis = final_due_at_millis.max(delayed_due);
+        } else if task_type == "agent_message" {
+            let default_queue_millis = u64::from(queue_seconds) * 1000;
+            final_due_at_millis = final_due_at_millis.max(now.saturating_add(default_queue_millis));
+        }
+
+        if final_due_at_millis <= now {
             anyhow::bail!("scheduled input time must be in the future");
         }
         let terminal_name = {
@@ -2784,25 +3011,74 @@ impl TerminalManager {
                 .map(|session| session.name.clone())
                 .ok_or_else(|| anyhow::anyhow!("terminal session not found"))?
         };
-        let task = TerminalScheduledInputTask {
-            status: String::new(),
-            last_error: String::new(),
-            id: format!("paste-{now}-{}", self.next_id.fetch_add(1, Ordering::SeqCst)),
-            session_id: session_id.to_string(),
-            terminal_name,
-            due_at_millis,
-            created_at_millis: now,
-            label: label.trim().to_string(),
-            text: normalized_text,
-            send_enter,
-            task_type,
-            working_dir: working_dir.trim().to_string(),
-            repeat_interval_millis,
-            parent_task_id: String::new(),
-        };
-        let info = scheduled_input_task_info(&task);
         {
             let mut tasks = crate::lock_or_recover!(self.scheduled_input_tasks.lock());
+            if mergeable_queue_message {
+                let merge_target_id = tasks
+                    .values()
+                    .filter(|t| {
+                        t.session_id == session_id
+                            && t.status.is_empty()
+                            && t.send_enter
+                            && scheduled_input::is_mergeable_agent_message(
+                                &t.task_type,
+                                &t.text,
+                                &t.label,
+                                t.repeat_interval_millis,
+                            )
+                    })
+                    .min_by_key(|t| t.due_at_millis)
+                    .map(|t| t.id.clone());
+                if let Some(merge_target_id) = merge_target_id {
+                    if let Some(existing_task) = tasks.get_mut(&merge_target_id) {
+                        // 换行连接，发送时间沿用第 1 条任务的到期时间。
+                        let combined_text = format!("{}\n{}", existing_task.text, normalized_text);
+                        if combined_text.len() <= super::MAX_TERMINAL_SCHEDULED_INPUT_BYTES {
+                            existing_task.text = combined_text;
+                            let trimmed_label = label.trim();
+                            if !trimmed_label.is_empty()
+                                && !existing_task.label.contains(trimmed_label)
+                            {
+                                if existing_task.label.is_empty() {
+                                    existing_task.label = trimmed_label.to_string();
+                                } else {
+                                    existing_task.label =
+                                        format!("{}, {}", existing_task.label, trimmed_label);
+                                }
+                            }
+                            let info = scheduled_input_task_info(existing_task);
+                            let pending = tasks.values().cloned().collect::<Vec<_>>();
+                            persist_terminal_scheduled_input_registry(
+                                &self.scheduled_input_file,
+                                &StoredTerminalScheduledInputRegistry { tasks: pending },
+                            )?;
+                            return Ok(info);
+                        }
+                    }
+                }
+            }
+
+            let task = TerminalScheduledInputTask {
+                status: String::new(),
+                last_error: String::new(),
+                id: if task_type == "agent_message" {
+                    format!("msg-{now}-{}", self.next_id.fetch_add(1, Ordering::SeqCst))
+                } else {
+                    format!("paste-{now}-{}", self.next_id.fetch_add(1, Ordering::SeqCst))
+                },
+                session_id: session_id.to_string(),
+                terminal_name,
+                due_at_millis: final_due_at_millis,
+                created_at_millis: now,
+                label: label.trim().to_string(),
+                text: normalized_text,
+                send_enter,
+                task_type,
+                working_dir: working_dir.trim().to_string(),
+                repeat_interval_millis,
+                parent_task_id: String::new(),
+            };
+            let info = scheduled_input_task_info(&task);
             let mut pending = tasks.values().cloned().collect::<Vec<_>>();
             pending.push(task.clone());
             persist_terminal_scheduled_input_registry(
@@ -2810,9 +3086,9 @@ impl TerminalManager {
                 &StoredTerminalScheduledInputRegistry { tasks: pending },
             )?;
             tasks.insert(task.id.clone(), task);
+            self.scheduled_input_notify.notify_one();
+            Ok(info)
         }
-        self.scheduled_input_notify.notify_one();
-        Ok(info)
     }
 
     pub fn cancel_scheduled_input(&self, task_id: &str) -> Result<bool> {
@@ -3124,65 +3400,28 @@ impl TerminalManager {
         // identical prompt cannot be mistaken for this submission.
         let agent_message = task.task_type == "agent_message";
         let text = if agent_message {
-            format!(
-                "[scheduled:{}] {}",
-                task.id,
-                task.text.split_whitespace().collect::<Vec<_>>().join(" ")
-            )
+            let collapsed = task.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!("{} [delivery:{}]", collapsed, task.id)
         } else {
             task.text.clone()
         };
-        let result = (|| -> Result<&str> {
-            if agent_message {
-                self.ensure_session_agent_active(&task.session_id)?;
-            }
-            let history = if task.send_enter && agent_message {
-                self.session_agent_rollout_history(&task.session_id)?
-            } else {
-                None
-            };
-            let evidence = if agent_message {
-                format!("[scheduled:{}]", task.id)
-            } else {
-                text.clone()
-            };
-            let baseline = history
-                .as_deref()
-                .map(|entries| terminal_message_delivery_count(entries, &evidence))
-                .unwrap_or(0);
-            let verify = task.send_enter && agent_message;
-            let body = if agent_message {
-                prepare_terminal_message_body(&text, true)
-            } else {
-                scheduled_input_body(task)
-            };
-            self.send_session_input(&task.session_id, body)?;
-            if !task.send_enter {
-                return Ok("written");
-            }
-            thread::sleep(terminal_message_paste_settle_delay(&text, true));
-            if !verify {
-                self.send_session_enter_key(&task.session_id)?;
-                return Ok("unverified");
-            }
-            submit_scheduled_message(
-                || self.session_message_input_queued(&task.session_id),
-                || {
-                    self.ensure_session_agent_active(&task.session_id)?;
-                    self.send_session_enter_key(&task.session_id)
-                },
-                || {
-                    let entries = self.session_agent_rollout_history(&task.session_id)?;
-                    Ok(terminal_message_delivery_confirmed(entries.as_deref(), &evidence, baseline))
-                },
-                || thread::sleep(Duration::from_millis(100)),
-            )
-        })();
-        let (status, error) = match &result {
-            Ok(status) => ((*status).to_string(), String::new()),
-            // A write can partially succeed: do not automatically resend on error.
-            Err(error) => ("unknown".into(), error.to_string()),
-        };
+        // 受控身份 + 统一 runner：生产 fire 与离线 fake 共用同一控制流。
+        // stage 记录失败发生的阶段，随任务持久化，人工恢复时可见；草稿原件
+        // 存档引用由 runner 写进 last_error。
+        let identity = ScheduledBodyIdentity::new(task, &text);
+        let stage = std::cell::Cell::new("isolate");
+        let io = ProductionScheduledIo { manager: self };
+        let outcome = run_scheduled_delivery(&io, task, &text, &identity, &stage);
+        let (status, error) = scheduled_outcome_to_status(&outcome);
+        if !matches!(outcome, ScheduledDeliveryOutcome::Blocked { .. }) {
+            self.record_session_message_received(&task.session_id, current_timestamp_millis());
+        }
+        if !matches!(outcome, ScheduledDeliveryOutcome::Status { .. }) {
+            warn!(
+                "scheduled input {} delivery ended without native receipt: status={} error={}",
+                task.id, status, error
+            );
+        }
         {
             let mut tasks = crate::lock_or_recover!(self.scheduled_input_tasks.lock());
             if let Some(stored) = tasks.get_mut(&task.id) {
@@ -3195,7 +3434,7 @@ impl TerminalManager {
             };
             persist_terminal_scheduled_input_registry(&self.scheduled_input_file, &registry)?;
         }
-        result.map(|_| ())
+        Ok(())
     }
 
     fn persist_scheduled_input_tasks_locked(
@@ -3274,6 +3513,9 @@ impl TerminalManager {
         session_id: &str,
         effective_interval_millis: u64,
     ) -> Result<TerminalAutoContinueSendOutcome> {
+        if account_rotation::recovering(session_id) {
+            return Ok(TerminalAutoContinueSendOutcome::NotEligible);
+        }
         let interval_millis = effective_interval_millis.max(1);
         let now = current_timestamp_millis();
         let send_lock = self.session_send_lock(session_id);
@@ -3316,7 +3558,10 @@ impl TerminalManager {
         ) else {
             return Ok(TerminalAutoContinueSendOutcome::NotEligible);
         };
-        if error_match.input_queued {
+        if error_match.input_queued
+            || account_rotation::exhaustion_keyword(&error_match.keyword)
+            || account_rotation::recovering(session_id)
+        {
             return Ok(TerminalAutoContinueSendOutcome::NotEligible);
         }
         // Look up the configured action for the matched keyword. Keywords
@@ -3412,6 +3657,7 @@ impl TerminalManager {
         bracketed_paste: bool,
         require_active_agent: bool,
     ) -> Result<(String, String, bool, String)> {
+        self.wait_for_initial_restore(Duration::from_secs(10));
         let target = target.trim();
         if target.is_empty() {
             anyhow::bail!("terminal target is empty");
@@ -3420,7 +3666,7 @@ impl TerminalManager {
         let (session_id, session_name) = self.resolve_session_target(target, path)?;
         let renamed_target = target != session_name && target != session_id;
         if require_active_agent {
-            self.ensure_session_agent_active(&session_id)?;
+            self.ensure_message_target_active(&session_id)?;
         }
 
         if submit_enters == 1 && terminal_continue_command_text(&data) {
@@ -3428,26 +3674,164 @@ impl TerminalManager {
             return Ok((session_id, session_name.clone(), renamed_target, session_name));
         }
 
-        if !data.is_empty() {
-            let body = prepare_terminal_message_body(&data, bracketed_paste);
-            self.send_session_input_direct_or_backend(&session_id, body)?;
-        }
-        if submit_enters > 0 {
-            thread::sleep(terminal_message_paste_settle_delay(&data, bracketed_paste));
-        }
-        for index in 0..submit_enters {
-            if require_active_agent {
-                self.ensure_session_agent_active(&session_id)?;
+        // 用户可能在同一个输入框里停着未提交草稿：先取出草稿再投递，避免正文
+        // 与草稿拼成一条并随这次 Enter 一起提交。
+        let draft_stash = if !data.is_empty() && submit_enters > 0 {
+            self.isolate_session_composer_draft(&session_id)
+        } else {
+            None
+        };
+        let delivered = (|| -> Result<()> {
+            if !data.is_empty() {
+                let body = prepare_terminal_message_body(&data, bracketed_paste);
+                self.send_session_input_direct_or_backend(&session_id, body)?;
             }
-            // Submit through the same semantic key path as the soft keyboard.
-            // A raw PTY CR can be absorbed by raw-mode TUIs as a composer newline.
-            self.send_session_enter_key(&session_id)?;
-            if index + 1 < submit_enters {
-                thread::sleep(Duration::from_millis(120));
+            if submit_enters > 0 {
+                thread::sleep(terminal_message_paste_settle_delay(&data, bracketed_paste));
             }
+            for index in 0..submit_enters {
+                if require_active_agent {
+                    self.ensure_message_target_active(&session_id)?;
+                }
+                // Submit through the same semantic key path as the soft keyboard.
+                // A raw PTY CR can be absorbed by raw-mode TUIs as a composer newline.
+                self.send_session_enter_key(&session_id)?;
+                if index + 1 < submit_enters {
+                    thread::sleep(Duration::from_millis(120));
+                }
+            }
+            Ok(())
+        })();
+        if let Some(stash) = draft_stash.as_ref() {
+            self.restore_session_composer_draft(stash);
         }
+        delivered?;
+        self.record_session_message_received(&session_id, current_timestamp_millis());
         self.persist_workspace_restores(&[session_id.clone()]);
         Ok((session_id, session_name.clone(), renamed_target, session_name))
+    }
+
+    /// 目标终端当前是否跑着可识别输入框样式的 Agent TUI。
+    fn session_composer_agent(&self, session_id: &str) -> Option<ComposerAgent> {
+        ComposerAgent::from_activity(&TerminalAgentDetector::new().detect(session_id))
+    }
+
+    pub fn session_message_uses_single_submission(&self, _session_id: &str) -> bool {
+        true
+    }
+
+    fn scan_session_composer(
+        &self,
+        session_id: &str,
+        agent: ComposerAgent,
+    ) -> Result<ComposerScan> {
+        let snapshot = capture_tmux_visible_styled_pane_snapshot(session_id)?;
+        Ok(composer_draft::scan_composer_draft(agent, &String::from_utf8_lossy(&snapshot)))
+    }
+
+    /// 尝试清空输入框草稿，返回输入框是否回读为空。
+    ///
+    /// 读写以闭包注入，便于在不依赖真实 tmux 的情况下回归清空失败场景。
+    fn try_clear_composer_draft(
+        line_count: usize,
+        mut write_clear: impl FnMut(&str) -> Result<()>,
+        mut scan: impl FnMut() -> Result<ComposerScan>,
+    ) -> Result<bool> {
+        let clear = composer_clear_keystrokes(line_count);
+        for _ in 0..COMPOSER_DRAFT_CLEAR_ATTEMPTS {
+            write_clear(&clear)?;
+            thread::sleep(COMPOSER_DRAFT_CLEAR_SETTLE);
+            if scan()? == ComposerScan::Empty {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// 尽力隔离草稿；失败仅影响草稿恢复，不影响调用方首次投递。
+    fn isolate_session_composer_draft_strict(
+        &self,
+        session_id: &str,
+    ) -> Result<ComposerDraftIsolation> {
+        let Some(agent) = self.session_composer_agent(session_id) else {
+            return Ok(ComposerDraftIsolation::Unrecognized);
+        };
+        let lines = match self.scan_session_composer(session_id, agent)? {
+            ComposerScan::Draft(lines) => lines,
+            ComposerScan::Empty => return Ok(ComposerDraftIsolation::Clear),
+            ComposerScan::Unrecognized => return Ok(ComposerDraftIsolation::Unrecognized),
+        };
+
+        // Archive before any destructive keys, including partial clear failures.
+        self.park_composer_draft(session_id, &lines)?;
+        let cleared = Self::try_clear_composer_draft(
+            lines.len(),
+            |clear| self.write_session_input_inner(session_id, clear.to_string(), false),
+            || self.scan_session_composer(session_id, agent),
+        )?;
+        if cleared {
+            return Ok(ComposerDraftIsolation::Stashed(ComposerDraftStash {
+                session_id: session_id.to_string(),
+                agent,
+                lines,
+            }));
+        }
+
+        Ok(ComposerDraftIsolation::ClearFailed)
+    }
+
+    /// 把用户未提交的输入框草稿取出来并清空输入框。
+    ///
+    /// 草稿提取、存档、清空或回读失败只记诊断，调用方继续写正文和首次 Enter。
+    fn isolate_session_composer_draft(&self, session_id: &str) -> Option<ComposerDraftStash> {
+        best_effort_composer_draft(|| self.isolate_session_composer_draft_strict(session_id))
+    }
+
+    /// 正文提交后再把草稿放回输入框；只在不带回车的前提下写入。
+    ///
+    /// 还原前置条件是输入框真的空了，否则草稿会和还没被接受的正文拼在一起。
+    /// 超时未满足时同样转入 tmux 粘贴缓冲区，由用户手工恢复。
+    fn restore_session_composer_draft(&self, stash: &ComposerDraftStash) -> bool {
+        let deadline = Instant::now() + COMPOSER_DRAFT_RESTORE_TIMEOUT;
+        loop {
+            match self.scan_session_composer(&stash.session_id, stash.agent) {
+                Ok(ComposerScan::Empty) => {
+                    let body = prepare_terminal_message_body(&stash.lines.join("\n"), true);
+                    match self.write_session_input_inner(&stash.session_id, body, false) {
+                        Ok(()) => return true,
+                        Err(error) => {
+                            warn!(
+                                "restore composer draft for {} failed: {error}",
+                                stash.session_id
+                            );
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(
+                        "scan composer before restoring draft for {} failed: {error}",
+                        stash.session_id
+                    );
+                }
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            thread::sleep(COMPOSER_DRAFT_RESTORE_POLL);
+        }
+        if let Err(error) = self.park_composer_draft(&stash.session_id, &stash.lines) {
+            warn!("park composer draft for {} failed: {error}", stash.session_id);
+        }
+        false
+    }
+
+    /// 兼容互动消息路径的 tmux 恢复缓冲区写入；不再吞掉保存失败。
+    /// 定时投递的破坏性清空前存档走 ScheduledDeliveryIo::save_draft，
+    /// 其错误会转成可见的 blocked/unknown，不经由此函数。
+    fn park_composer_draft(&self, session_id: &str, lines: &[String]) -> Result<()> {
+        send_tmux_buffer(session_id, COMPOSER_DRAFT_RECOVERY_BUFFER, &lines.join("\n"))
     }
 
     fn terminal_message_delivery_digest(data: &str) -> String {
@@ -3516,6 +3900,7 @@ impl TerminalManager {
         delivery_id: &str,
         data: &str,
     ) -> Result<bool> {
+        self.wait_for_initial_restore(Duration::from_secs(10));
         let delivery_id = delivery_id.trim();
         if delivery_id.is_empty() {
             return Ok(true);
@@ -3643,6 +4028,24 @@ impl TerminalManager {
     }
 
     pub fn ensure_session_agent_active(&self, session_id: &str) -> Result<()> {
+        self.ensure_message_terminal_live(session_id)?;
+        if !TerminalAgentDetector::new().detect(session_id).is_active() {
+            anyhow::bail!("agent process is not active");
+        }
+        Ok(())
+    }
+
+    fn ensure_message_target_active(&self, session_id: &str) -> Result<()> {
+        if !self.session_message_uses_single_submission(session_id) {
+            self.ensure_session_agent_active(session_id)
+        } else {
+            // Unknown/native TUIs need only a live terminal, not a provider allowlist.
+            self.ensure_message_terminal_live(session_id)
+        }
+    }
+
+    fn ensure_message_terminal_live(&self, session_id: &str) -> Result<()> {
+        self.wait_for_initial_restore(Duration::from_secs(10));
         let state = crate::lock_or_recover!(self.state.read());
         let terminal_is_live = state
             .live_sessions
@@ -3653,9 +4056,6 @@ impl TerminalManager {
         }
         drop(state);
 
-        if !TerminalAgentDetector::new().detect(session_id).is_active() {
-            anyhow::bail!("agent process is not active");
-        }
         Ok(())
     }
 
@@ -3772,13 +4172,45 @@ impl TerminalManager {
     /// for Codex to register it, press Enter, wait for the confirmation dialog,
     /// then press Enter again to confirm. A plain `command + Enter` would leave
     /// Codex's slash-menu dialog open without executing.
-    fn send_terminal_slash_command(&self, session_id: &str, command: &str) -> Result<()> {
+    pub fn send_terminal_slash_command(&self, session_id: &str, command: &str) -> Result<()> {
         self.ensure_session_compact_allowed(session_id, command)?;
-        self.send_session_input_direct_or_backend(session_id, command.to_string())?;
-        thread::sleep(Duration::from_millis(TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS));
-        self.send_session_input_direct_or_backend(session_id, "\r".to_string())?;
-        thread::sleep(Duration::from_millis(TERMINAL_SLASH_COMMAND_CONFIRM_DELAY_MS));
-        self.send_session_input_direct_or_backend(session_id, "\r".to_string())
+        self.send_terminal_slash_command_with_delay(
+            session_id,
+            command,
+            TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS,
+        )
+    }
+
+    pub fn send_terminal_slash_command_with_delay(
+        &self,
+        session_id: &str,
+        command: &str,
+        enter_delay_ms: u64,
+    ) -> Result<()> {
+        self.ensure_session_compact_allowed(session_id, command)?;
+        let draft_stash = self.isolate_session_composer_draft(session_id);
+        let delivered = (|| -> Result<()> {
+            self.send_session_input_direct_or_backend(session_id, command.to_string())?;
+            let delay_ms = enter_delay_ms.max(TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS);
+            thread::sleep(Duration::from_millis(delay_ms));
+            self.send_session_enter_key_or_direct(session_id)?;
+            thread::sleep(Duration::from_millis(TERMINAL_SLASH_COMMAND_CONFIRM_DELAY_MS));
+            self.send_session_enter_key_or_direct(session_id)
+        })();
+        if let Some(stash) = draft_stash.as_ref() {
+            self.restore_session_composer_draft(stash);
+        }
+        delivered?;
+        self.record_session_message_received(session_id, current_timestamp_millis());
+        Ok(())
+    }
+
+    fn send_session_enter_key_or_direct(&self, session_id: &str) -> Result<()> {
+        if self.send_session_enter_key(session_id).is_ok() {
+            Ok(())
+        } else {
+            self.send_session_input_direct_or_backend(session_id, "\r".to_string())
+        }
     }
 
     /// Compact is itself the recovery action for context exhaustion. It uses
@@ -4002,6 +4434,7 @@ impl TerminalManager {
         data: String,
         record_history: bool,
     ) -> Result<()> {
+        self.wait_for_initial_restore(Duration::from_secs(10));
         let state = crate::lock_or_recover!(self.state.read());
         if !state.sessions_by_id.contains_key(session_id) {
             anyhow::bail!("terminal session not found");
@@ -4032,27 +4465,129 @@ impl TerminalManager {
         &self,
         session_id: &str,
     ) -> Result<Vec<TerminalInputHistoryEntry>> {
-        let state = crate::lock_or_recover!(self.state.read());
-        if !state.sessions_by_id.contains_key(session_id) {
-            anyhow::bail!("terminal session not found");
-        }
-        drop(state);
+        let (cleared_at, terminal_messages_cleared_at, compile_notifications_cleared_at) = {
+            let state = crate::lock_or_recover!(self.state.read());
+            if !state.sessions_by_id.contains_key(session_id) {
+                anyhow::bail!("terminal session not found");
+            }
+            (
+                state.input_history_cleared_at.get(session_id).copied(),
+                state.terminal_messages_cleared_at.get(session_id).copied(),
+                state
+                    .compile_notifications_cleared_at
+                    .get(session_id)
+                    .copied(),
+            )
+        };
+
+        let filter_terminal_messages = |entries: &mut Vec<TerminalInputHistoryEntry>| {
+            if let Some(msg_cleared_at) = terminal_messages_cleared_at {
+                entries.retain(|entry| {
+                    if is_terminal_inter_agent_message(&entry.text) {
+                        entry.created_at > msg_cleared_at
+                    } else {
+                        true
+                    }
+                });
+            }
+        };
+
+        let filter_compile_notifications = |entries: &mut Vec<TerminalInputHistoryEntry>| {
+            if let Some(compile_cleared_at) = compile_notifications_cleared_at {
+                entries.retain(|entry| {
+                    if is_compile_notification(&entry.text) {
+                        entry.created_at > compile_cleared_at
+                    } else {
+                        true
+                    }
+                });
+            }
+        };
 
         // 对 Codex/Claude agent 会话，优先读取真实 rollout 文件作为对话历史来源。
         // 按键重建法看不到 Tab 补全/历史回调/agent TUI 输入，会丢命令；rollout 文件
         // 里是用户真实输入的完整文本，是权威来源。
-        if let Some(entries) = self.session_agent_rollout_history(session_id)? {
+        if let Some(mut entries) = self.session_agent_rollout_history(session_id)? {
+            if let Some(cleared_at) = cleared_at {
+                entries.retain(|entry| entry.created_at > cleared_at);
+            }
+            filter_terminal_messages(&mut entries);
+            filter_compile_notifications(&mut entries);
             return Ok(filter_terminal_input_history_entries(entries));
         }
 
         // 普通 shell 终端没有 rollout 文件，回退到按键重建历史。
         let state = crate::lock_or_recover!(self.state.read());
-        let entries = state
+        let mut entries = state
             .input_histories
             .get(session_id)
             .map(|history| history.entries.clone())
             .unwrap_or_default();
+        if let Some(cleared_at) = cleared_at {
+            entries.retain(|entry| entry.created_at > cleared_at);
+        }
+        filter_terminal_messages(&mut entries);
+        filter_compile_notifications(&mut entries);
         Ok(filter_terminal_input_history_entries(entries))
+    }
+
+    pub fn clear_session_input_history(&self, session_id: &str) -> Result<()> {
+        let mut state = crate::lock_or_recover!(self.state.write());
+        if !state.sessions_by_id.contains_key(session_id) {
+            anyhow::bail!("terminal session not found");
+        }
+        let now = current_timestamp_millis();
+        state.input_histories.remove(session_id);
+        state
+            .input_history_cleared_at
+            .insert(session_id.to_string(), now);
+        drop(state);
+        self.persist_state();
+        Ok(())
+    }
+
+    pub fn clear_session_terminal_messages(&self, session_id: &str) -> Result<usize> {
+        let mut state = crate::lock_or_recover!(self.state.write());
+        if !state.sessions_by_id.contains_key(session_id) {
+            anyhow::bail!("terminal session not found");
+        }
+        let now = current_timestamp_millis();
+        let mut removed = 0;
+        if let Some(history) = state.input_histories.get_mut(session_id) {
+            let before = history.entries.len();
+            history
+                .entries
+                .retain(|entry| !is_terminal_inter_agent_message(&entry.text));
+            removed = before - history.entries.len();
+        }
+        state
+            .terminal_messages_cleared_at
+            .insert(session_id.to_string(), now);
+        drop(state);
+        self.persist_state();
+        Ok(removed)
+    }
+
+    pub fn clear_session_compile_notifications(&self, session_id: &str) -> Result<usize> {
+        let mut state = crate::lock_or_recover!(self.state.write());
+        if !state.sessions_by_id.contains_key(session_id) {
+            anyhow::bail!("terminal session not found");
+        }
+        let now = current_timestamp_millis();
+        let mut removed = 0;
+        if let Some(history) = state.input_histories.get_mut(session_id) {
+            let before = history.entries.len();
+            history
+                .entries
+                .retain(|entry| !is_compile_notification(&entry.text));
+            removed = before - history.entries.len();
+        }
+        state
+            .compile_notifications_cleared_at
+            .insert(session_id.to_string(), now);
+        drop(state);
+        self.persist_state();
+        Ok(removed)
     }
 
     pub fn session_agent_rollout_history(
@@ -4064,6 +4599,14 @@ impl TerminalManager {
             anyhow::bail!("terminal session not found");
         }
         drop(state);
+        if let Some(messages) = codearts_user_messages_for_terminal(session_id)? {
+            return Ok(Some(clamp_input_history_entries(
+                messages
+                    .into_iter()
+                    .map(|(text, created_at)| TerminalInputHistoryEntry { text, created_at })
+                    .collect(),
+            )));
+        }
         Ok(rollout_history_entries(session_id))
     }
 
@@ -4322,6 +4865,9 @@ impl TerminalManager {
                 group_order: record.group_order,
                 group_fixed_order: record.group_fixed_order,
                 input_history: record.input_history.clone(),
+                input_history_cleared_at: None,
+                terminal_messages_cleared_at: None,
+                compile_notifications_cleared_at: None,
                 resume_id: record.resume_id.clone(),
                 command: record.command.clone(),
                 program: record.program.clone(),
@@ -4886,11 +5432,13 @@ impl TerminalManager {
         &self,
         settings: SettingsManager,
         auth_manager: auth_core::AuthPresetManager,
+        codebuddy: crate::codebuddy::CodeBuddyManager,
+        agy: crate::agy::Manager,
     ) {
         let manager = self.clone();
         tokio::spawn(async move {
             manager
-                .run_error_auto_continue_loop(settings, auth_manager)
+                .run_error_auto_continue_loop(settings, auth_manager, codebuddy, agy)
                 .await;
         });
     }
@@ -4899,13 +5447,182 @@ impl TerminalManager {
         self,
         settings: SettingsManager,
         auth_manager: auth_core::AuthPresetManager,
+        codebuddy: crate::codebuddy::CodeBuddyManager,
+        agy: crate::agy::Manager,
     ) {
         loop {
             let api_presets = auth_manager.api_presets_snapshot();
             self.update_api_preset_snapshot(api_presets.clone());
-            self.scan_error_auto_continue_sessions(&settings, &api_presets)
+            self.scan_error_auto_continue_sessions(&settings, &api_presets, &codebuddy, &agy)
                 .await;
             tokio::time::sleep(Duration::from_millis(TERMINAL_ERROR_AUTO_CONTINUE_SCAN_MS)).await;
+        }
+    }
+
+    /// 服务端自动压缩：`completed`（待查看）稳定 5 秒后发送 `/compact`。
+    ///
+    /// 这条路径不依赖浏览器是否打开：状态、查看确认与输出时间戳都由后端
+    /// 探针维护。用户打开终端会推高 `last_viewed_output_at`，会话随即离开
+    /// `completed`，因此“正在查看的终端不压缩”由查看确认天然保证。
+    fn scan_completed_auto_compact_sessions(&self, sessions: &[TerminalSessionInfo], now: u64) {
+        // 查看确认在 state 里，必须先在 runtime 锁外取好，保持 state → runtime 的锁序。
+        let last_viewed: HashMap<String, u64> = {
+            let state = crate::lock_or_recover!(self.state.read());
+            sessions
+                .iter()
+                .map(|session| {
+                    let viewed = state
+                        .output_observations
+                        .get(&session.id)
+                        .map(|observation| observation.last_viewed_output_at)
+                        .unwrap_or(0);
+                    (session.id.clone(), viewed)
+                })
+                .collect()
+        };
+        let mut pending: Vec<(String, u64)> = Vec::new();
+        {
+            let mut runtime = crate::lock_or_recover!(self.per_session_runtime.lock());
+            for session in sessions {
+                let entry = runtime.entry(session.id.clone()).or_default();
+                if session.auto_compact_disabled
+                    || !session.alive
+                    || session.busy
+                    || session.activity_state != "completed"
+                    || self.session_agent_blocks_compact(session)
+                {
+                    entry.auto_compact_completed_since = None;
+                    continue;
+                }
+                // 已压缩但用户还没查看：保持抑制，直到查看确认越过压缩完成点。
+                if idle_auto_compact_holds_after_compaction(
+                    entry.auto_compact_completed_output_at,
+                    last_viewed.get(&session.id).copied().unwrap_or(0),
+                ) {
+                    entry.auto_compact_completed_since = None;
+                    continue;
+                }
+                let since = *entry.auto_compact_completed_since.get_or_insert(now);
+                // 满足稳定时长、冷却与“其后有新输出”三条才发送。
+                if !idle_auto_compact_due(
+                    since,
+                    entry.auto_compact_last_sent_at,
+                    entry.auto_compact_last_sent_output_at,
+                    session.last_output_at,
+                    now,
+                ) {
+                    continue;
+                }
+                pending.push((session.id.clone(), session.last_output_at));
+            }
+        }
+
+        for (session_id, last_output_at) in pending {
+            let snapshot = capture_tmux_text_pane_snapshot(&session_id).ok();
+            let recently_compacted = snapshot
+                .as_deref()
+                .is_some_and(|snapshot| terminal_snapshot_has_compact_completion(snapshot, 20));
+            if recently_compacted {
+                // 最近 20 行已有 "Context compacted" 等完成标记：说明刚压过，
+                // 只推进输出水位，等出现新输出后再重新计时。
+                if let Some(entry) =
+                    crate::lock_or_recover!(self.per_session_runtime.lock()).get_mut(&session_id)
+                {
+                    entry.auto_compact_last_sent_output_at = last_output_at;
+                    entry.auto_compact_completed_output_at = Some(last_output_at);
+                    entry.auto_compact_completed_since = None;
+                }
+                continue;
+            }
+            // 只有读到上下文占用、且达到阈值才压缩；读不到占用率时不猜。
+            let context_percent = snapshot
+                .as_deref()
+                .and_then(|snapshot| terminal_snapshot_context_percent_used(snapshot, 20));
+            let Some(context_percent) = context_percent else {
+                debug!(session_id, "auto compact skipped: context usage unavailable");
+                continue;
+            };
+            let model_key = snapshot
+                .as_deref()
+                .and_then(|snapshot| terminal_snapshot_compact_model_key(snapshot, 20));
+            let threshold_percent = self.auto_compact_threshold_for_model_key(model_key.as_deref());
+            if context_percent < threshold_percent {
+                continue;
+            }
+            if !self.send_session_idle_auto_compact(&session_id) {
+                if let Some(entry) =
+                    crate::lock_or_recover!(self.per_session_runtime.lock()).get_mut(&session_id)
+                {
+                    entry.auto_compact_completed_since = None;
+                }
+                continue;
+            }
+            if let Some(entry) =
+                crate::lock_or_recover!(self.per_session_runtime.lock()).get_mut(&session_id)
+            {
+                entry.auto_compact_last_sent_at = Some(now);
+                entry.auto_compact_last_sent_output_at = last_output_at;
+                entry.auto_compact_completed_since = None;
+            }
+        }
+    }
+
+    fn session_agent_blocks_compact(&self, session: &TerminalSessionInfo) -> bool {
+        session.activity_agent.as_deref().is_some_and(|agents| {
+            agents.split('/').any(|agent| {
+                agent.eq_ignore_ascii_case("codebuddy") || agent.eq_ignore_ascii_case("cline")
+            })
+        })
+    }
+
+    /// 当前自动压缩的默认阈值（百分比，默认 50）。
+    pub fn auto_compact_context_threshold_percent(&self) -> u32 {
+        crate::lock_or_recover!(self.auto_compact_settings.read()).context_threshold_percent
+    }
+
+    /// 解析某终端应使用的阈值：命中模型关键词用覆盖值，否则用默认值。
+    pub fn auto_compact_threshold_for_model_key(&self, model_key: Option<&str>) -> u32 {
+        crate::lock_or_recover!(self.auto_compact_settings.read()).threshold_for_model(model_key)
+    }
+
+    pub fn auto_compact_settings_snapshot(&self) -> super::TerminalAutoCompactSettings {
+        crate::lock_or_recover!(self.auto_compact_settings.read()).clone()
+    }
+
+    /// 更新并持久化自动压缩设置（默认阈值 + 按模型覆盖），返回生效值。
+    pub fn update_auto_compact_settings(
+        &self,
+        context_threshold_percent: Option<u32>,
+        model_thresholds: Option<std::collections::BTreeMap<String, u32>>,
+    ) -> Result<super::TerminalAutoCompactSettings> {
+        let mut next = self.auto_compact_settings_snapshot();
+        if let Some(percent) = context_threshold_percent {
+            next.context_threshold_percent = percent;
+        }
+        if let Some(model_thresholds) = model_thresholds {
+            next.model_thresholds = model_thresholds;
+        }
+        let settings = next.normalized();
+        persist_terminal_auto_compact_settings(&self.auto_compact_settings_file, &settings)?;
+        {
+            let mut guard = crate::lock_or_recover!(self.auto_compact_settings.write());
+            *guard = settings.clone();
+        }
+        Ok(settings)
+    }
+
+    fn send_session_idle_auto_compact(&self, session_id: &str) -> bool {
+        let send_lock = self.session_send_lock(session_id);
+        let _guard = crate::lock_or_recover!(send_lock.lock());
+        match self.send_terminal_slash_command(session_id, TERMINAL_COMPACT_COMMAND) {
+            Ok(()) => {
+                info!(session_id, "terminal auto compact sent for completed session");
+                true
+            }
+            Err(error) => {
+                warn!(session_id, %error, "terminal auto compact send failed");
+                false
+            }
         }
     }
 
@@ -4913,6 +5630,8 @@ impl TerminalManager {
         &self,
         settings: &SettingsManager,
         api_presets: &[auth_core::StoredApiPreset],
+        codebuddy: &crate::codebuddy::CodeBuddyManager,
+        agy: &crate::agy::Manager,
     ) {
         // Unattended-window gate: when an active window is configured, only run
         // immediate retries while the current local time falls inside that
@@ -4960,7 +5679,18 @@ impl TerminalManager {
         let quota_preflight_blocked = self
             .backfill_glm_model_quota_reset_times(&mut sessions, api_presets)
             .await;
-        let auto_continue_schedules = collect_terminal_auto_continue_schedules(&sessions, now);
+        if immediate_auto_continue_enabled && active_window_allows_immediate {
+            account_rotation::schedule(self, codebuddy, agy, &sessions);
+        }
+        // Quota rotations own these errors; neither reset tasks nor ordinary
+        // retries may compete with the switch/resume operation.
+        let rotating_ids: HashSet<_> = sessions
+            .iter()
+            .filter(|s| account_rotation::owns_error(s))
+            .map(|s| s.id.as_str())
+            .collect();
+        let mut auto_continue_schedules = collect_terminal_auto_continue_schedules(&sessions, now);
+        auto_continue_schedules.retain(|(id, _)| !rotating_ids.contains(id.as_str()));
         let active_error_signatures = self.active_session_error_signatures(&sessions);
         // 取消标记只在该会话的同一错误签名仍可见时保留；顺手清掉业务字段
         // 已空且锁无外部持有的条目。
@@ -5004,6 +5734,7 @@ impl TerminalManager {
         );
         self.prune_error_auto_continue_records(&sessions);
         self.prune_auto_continue_last_sent_at(&sessions);
+        self.scan_completed_auto_compact_sessions(&sessions, now);
 
         if !immediate_auto_continue_enabled || !active_window_allows_immediate {
             let mut runtime = crate::lock_or_recover!(self.per_session_runtime.lock());
@@ -5032,7 +5763,9 @@ impl TerminalManager {
             .iter()
             .filter(|session| terminal_quota_retry_needs_glm_plan(session))
             .filter_map(|session| {
-                if session.model_family.eq_ignore_ascii_case("glm") {
+                if session.model_family.eq_ignore_ascii_case("glm")
+                    || session.model_family.to_ascii_lowercase().contains("glm")
+                {
                     return Some(session.id.clone());
                 }
                 let output = capture_tmux_recent_pane_snapshot(&session.id).ok()?;
@@ -5205,7 +5938,15 @@ impl TerminalManager {
         now: u64,
         keyword_actions: &[TerminalErrorKeywordAction],
     ) {
-        if !terminal_session_is_error_state(session) || session.activity_error_input_queued {
+        if account_rotation::owns_error(session)
+            || account_rotation::recovering(&session.id)
+            || session
+                .activity_error_keyword
+                .as_deref()
+                .is_some_and(account_rotation::exhaustion_keyword)
+            || !terminal_session_is_error_state(session)
+            || session.activity_error_input_queued
+        {
             return;
         }
         let Some(error_key) = terminal_session_error_continue_key(session) else {
@@ -5607,8 +6348,27 @@ pub(super) fn split_codex_model_provider(provider: &str) -> (String, String) {
     (provider.to_string(), String::new())
 }
 
+/// 已从目标输入框取出、等投递完成后按原文放回的用户草稿。
+struct ComposerDraftStash {
+    session_id: String,
+    agent: ComposerAgent,
+    lines: Vec<String>,
+}
+
+/// 草稿隔离的显式结果：让调用方能区分“没有草稿”、“认不出界面”与“清空失败”。
+enum ComposerDraftIsolation {
+    /// 输入框为空，没有需要处理的草稿。
+    Clear,
+    /// 草稿已暂存并清空，正文提交后需要还原。
+    Stashed(ComposerDraftStash),
+    /// 认不出 Agent 或输入框，无法证明操作安全。
+    Unrecognized,
+    /// 草稿清空失败，原文已放入 tmux 恢复缓冲区。
+    ClearFailed,
+}
+
 pub(super) fn prepare_terminal_message_body(data: &str, bracketed_paste: bool) -> String {
-    if !bracketed_paste {
+    if !bracketed_paste || data.trim_start().starts_with('/') {
         return data.to_string();
     }
     let prepared = data.replace("\r\n", "\r").replace('\n', "\r");
@@ -5616,6 +6376,9 @@ pub(super) fn prepare_terminal_message_body(data: &str, bracketed_paste: bool) -
 }
 
 pub(super) fn terminal_message_paste_settle_delay(data: &str, bracketed_paste: bool) -> Duration {
+    if data.trim_start().starts_with('/') {
+        return Duration::from_millis(TERMINAL_SLASH_COMMAND_ENTER_DELAY_MS);
+    }
     if !bracketed_paste || data.is_empty() {
         return Duration::from_millis(120);
     }
@@ -5705,6 +6468,40 @@ pub(in crate::terminal) fn terminal_pending_build_request_is_current(
         && (now_millis < request.queued_at_millis
             || now_millis.saturating_sub(request.queued_at_millis)
                 <= TERMINAL_PENDING_BUILD_MAX_AGE_MS)
+}
+
+fn load_terminal_auto_compact_settings(path: &Path) -> super::TerminalAutoCompactSettings {
+    if !path.exists() {
+        return super::TerminalAutoCompactSettings::default();
+    }
+    match fs::read(path)
+        .with_context(|| format!("cannot read {}", path.display()))
+        .and_then(|content| {
+            serde_json::from_slice::<super::TerminalAutoCompactSettings>(&content)
+                .with_context(|| format!("cannot parse {}", path.display()))
+        }) {
+        Ok(settings) => settings.normalized(),
+        Err(error) => {
+            warn!(
+                "load terminal auto compact settings failed {}, fallback to default: {error}",
+                path.display()
+            );
+            super::TerminalAutoCompactSettings::default()
+        }
+    }
+}
+
+fn persist_terminal_auto_compact_settings(
+    path: &Path,
+    settings: &super::TerminalAutoCompactSettings,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_vec_pretty(settings)
+        .context("cannot encode terminal auto compact settings")?;
+    fs::write(path, content).with_context(|| format!("cannot write {}", path.display()))?;
+    Ok(())
 }
 
 pub(in crate::terminal) fn load_terminal_pending_build_requests(
@@ -5872,27 +6669,1034 @@ pub(super) fn submit_message_enter_unless_queued(
 /// frontend, and the submit CR is emitted after the bracket end marker.
 /// Submission is separate from body delivery: retries can never paste twice.
 /// Native queue acceptance or rollout evidence confirms delivery, never a draft.
+///
+/// 父版本兼容提交路径：仅既有调用方/回归测试使用；生产 fire 走
+/// run_scheduled_delivery 的同一 runner。
+///
+/// 边界：此路径把任意队列横幅当已收，是父版本 76171a46 继承语义，不是本
+/// 任务新增，也不作为本任务原生收条证据。不新增测试固化该行为；runner 用
+/// QueueAcceptanceSemantics::StopRetriesOnly，两者分列。
 pub(super) fn submit_scheduled_message(
+    queued: impl FnMut() -> Result<bool>,
+    enter: impl FnMut() -> Result<()>,
+    confirmed: impl FnMut() -> Result<bool>,
+    wait: impl FnMut(),
+) -> Result<&'static str> {
+    match submit_scheduled_message_loop(
+        QueueAcceptanceSemantics::LegacyAsReceipt,
+        // legacy 兼容路径不做归属判定：父版本继承语义，单列、不扩生产。
+        || Ok(ScheduledEnterDecision::Proceed),
+        queued,
+        enter,
+        confirmed,
+        wait,
+    )? {
+        ScheduledSubmitOutcome::Confirmed | ScheduledSubmitOutcome::QueuedAwaitingReceipt => {
+            Ok("confirmed")
+        }
+        ScheduledSubmitOutcome::Pending => Ok("pending_confirmation"),
+        ScheduledSubmitOutcome::Blocked { .. } => {
+            unreachable!("an always-proceed decision never blocks a legacy submit")
+        }
+    }
+}
+
+/// 队列横幅语义：与原生 marker 收条分列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum QueueAcceptanceSemantics {
+    /// 父版本继承：任意队列横幅即视为已收。仅用于兼容旧调用/测试，不作为
+    /// 本任务关联证据，也不新增测试固化。
+    LegacyAsReceipt,
+    /// 本任务：队列横幅只停止多余 Enter，保留 pending；无本任务 marker
+    /// 关联证据时绝不冒充原生 receipt（confirmed）。
+    StopRetriesOnly,
+}
+
+/// 迟到 marker 只读核对的候选状态：仍保留的 agent_message 且状态未定，或
+/// 被界面预检阻断（正文可能已写入、人工代提交）。历史定位失败绝不解释成
+/// 「未投递」，只是本次不产生确认证据。
+pub(super) fn scheduled_input_reconcile_candidate(task_type: &str, status: &str) -> bool {
+    task_type == "agent_message"
+        && matches!(
+            status,
+            "pending_confirmation" | "unknown" | "blocked_manual_action" | "unverified"
+        )
+}
+
+/// 定时投递预检结果：Empty 与 OwnedBody 是不同状态，不能都叫「Clear」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScheduledDeliveryPreflight {
+    /// 输入框为空（占位符/空白/ghost suggestion），无文本。正文写入前要求此态。
+    Empty,
+    /// 输入框文本与本次实际发送正文的受控身份完整一致（软换行/样式可解释）。
+    /// 仅在正文写入之后允许，用于 Enter 前确认「本任务刚写入的正文」。
+    OwnedBody,
+    /// 画面里出现 AskUserQuestion/审批等选择框。
+    SelectionDialog,
+    /// 画面无法识别为已知 Agent 输入框，或 agent 身份与周期建立时不一致。
+    Unrecognized,
+    /// 输入框含非本任务文本（同 marker 前缀/后缀/中插、其它任务 marker、
+    /// 外来夹字均归此类）。
+    ForeignDraft,
+    /// 无法证明完整归属：可见内容被截断/仅见尾部、比对不确定、或期望态失配
+    /// （人工或其它自动写入介入）。一律停且可恢复。
+    Uncertain,
+}
+
+impl ScheduledDeliveryPreflight {
+    pub(super) fn reason(self) -> &'static str {
+        match self {
+            Self::Empty => "composer empty",
+            Self::OwnedBody => "composer holds this task's exact body",
+            Self::SelectionDialog => "selection dialog or approval prompt visible",
+            Self::Unrecognized => "composer UI not recognizable or agent identity changed",
+            Self::ForeignDraft => "composer holds text not written by this task",
+            Self::Uncertain => {
+                "composer ownership unproven (truncated, ambiguous, or cycle invalidated)"
+            }
+        }
+    }
+}
+
+/// 带界面预检的提交结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScheduledSubmitOutcome {
+    /// 原生 marker 计数超过基线：本任务关联证据。
+    Confirmed,
+    /// 队列横幅出现：只停止多余 Enter，保留 pending，不冒充原生收条。
+    QueuedAwaitingReceipt,
+    /// 有界 Enter 用尽仍无原生证据。
+    Pending,
+    /// 某次 Enter 前预检失败，后续 Enter 已停止。
+    Blocked {
+        preflight: ScheduledDeliveryPreflight,
+    },
+}
+
+/// 一次投递周期的受控身份：不靠 contains(marker) 判断拥有，而是携带全文、
+/// 唯一 marker 与 sha256，供可解释的完整内容比对。
+#[derive(Debug, Clone)]
+pub(super) struct ScheduledBodyIdentity {
+    text: String,
+    marker: String,
+    digest: String,
+}
+
+impl ScheduledBodyIdentity {
+    pub(super) fn new(task: &TerminalScheduledInputTask, text: &str) -> Self {
+        let marker = if text.contains(&format!("[delivery:{}]", task.id)) {
+            format!("[delivery:{}]", task.id)
+        } else {
+            format!("[scheduled:{}]", task.id)
+        };
+        Self {
+            text: text.to_string(),
+            marker,
+            digest: hex::encode(Sha256::digest(text.as_bytes())),
+        }
+    }
+    pub(super) fn text(&self) -> &str {
+        &self.text
+    }
+    pub(super) fn marker(&self) -> &str {
+        &self.marker
+    }
+    pub(super) fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// 正文归属比对结果：解释为什么归/不归本任务。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum BodyOwnership {
+    /// 完整内容一致（含软换行解释）。
+    Owned,
+    /// 只可见正文尾部/被截断：明确策略 = 不拥有、停止、可恢复。
+    Truncated,
+    /// 含外来文本或语义差异（前缀/后缀/中插、其它任务 marker、空白差异）。
+    Foreign,
+}
+
+/// 软换行感知的完整内容比对。
+///
+/// 终端软换行不引入字符，但行尾/行首空白会被渲染裁剪（scan_composer_draft
+/// 已剥离 SGR/ghost 样式并把续行收成纯文本行）。因此只允许行边界处
+/// expected 中的单个空白字符被跳过；其余字符必须逐字相同，且 expected
+/// 必须被完全消费。前缀/后缀/中插其它文字、其它任务 marker、多余空白都会
+/// 导致不匹配。刻意不删除任何非边界空白，避免把语义不同的文本视为相同。
+pub(super) fn soft_wrap_full_match(rows: &[String], expected: &str) -> bool {
+    let expected_chars: Vec<char> = expected.chars().collect();
+    let mut index = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        for ch in row.chars() {
+            if index >= expected_chars.len() || expected_chars[index] != ch {
+                return false;
+            }
+            index += 1;
+        }
+        if row_index + 1 < rows.len() {
+            // 行边界：最多跳过 expected 中的 1 个空白（软换行裁剪）。
+            if index < expected_chars.len() && expected_chars[index].is_whitespace() {
+                index += 1;
+                if index < expected_chars.len() && expected_chars[index].is_whitespace() {
+                    return false;
+                }
+            }
+        }
+    }
+    index == expected_chars.len()
+}
+
+/// 把 composer 草稿行与本次正文受控身份比对；不靠删空白、不靠 contains。
+pub(super) fn classify_body_ownership(
+    lines: &[String],
+    identity: &ScheduledBodyIdentity,
+) -> BodyOwnership {
+    if soft_wrap_full_match(lines, identity.text()) {
+        return BodyOwnership::Owned;
+    }
+    // 长消息只可见尾部时，明确判定为「无法证明完整归属」，不默认拥有。
+    let visible = lines.concat();
+    let visible_trimmed = visible.trim();
+    let expected_trimmed = identity.text().trim();
+    if !visible_trimmed.is_empty()
+        && visible_trimmed.chars().count() < expected_trimmed.chars().count()
+        && expected_trimmed.ends_with(visible_trimmed)
+    {
+        return BodyOwnership::Truncated;
+    }
+    BodyOwnership::Foreign
+}
+
+/// fire_scheduled_input_task 的内部结果：既有状态字符串、可见阻断或未知。
+pub(super) enum ScheduledDeliveryOutcome {
+    /// 正常终态；note 记录非收条语义（如队列横幅只停重试）或存档引用。
+    Status { status: &'static str, note: String },
+    /// 界面/归属预检阻断：任务保留、可见、可恢复。
+    Blocked {
+        stage: &'static str,
+        reason: String,
+        parked: Option<DraftReceipt>,
+    },
+    /// 副作用错误（部分写入可能已发生）：不自动重发，保留 parked 证据。
+    Unknown {
+        stage: &'static str,
+        reason: String,
+        parked: Option<DraftReceipt>,
+    },
+}
+
+/// 去掉 CSI（含 SGR）转义序列，供选择框结构识别使用；输入框归属判定仍用
+/// 带样式的原始画面（ghost suggestion 只能靠样式区分）。
+fn strip_csi_sequences(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// 文本是否以编号选项开头（"1." / "2:" / "3)"），编号限 1-2 位数字。
+fn line_starts_with_numbered_option(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let digit_len = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_len == 0 || digit_len > 2 {
+        return false;
+    }
+    let rest = &trimmed[digit_len..];
+    matches!(rest.chars().next(), Some('.') | Some(':') | Some(')'))
+}
+
+/// 单行里 `\d{1,2}:` 后随空白符的选项 token 数；CodeBuddy 的评分/提问框
+/// 把多个选项渲染在同一行（"1: Bad    2: Fine   3: Good   0: Dismiss"）。
+fn colon_option_token_count(line: &str) -> usize {
+    let chars: Vec<char> = line.chars().collect();
+    let mut count = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_ascii_digit() {
+            let start = index;
+            while index < chars.len() && chars[index].is_ascii_digit() {
+                index += 1;
+            }
+            if index - start <= 2
+                && index + 1 < chars.len()
+                && chars[index] == ':'
+                && chars[index + 1].is_whitespace()
+            {
+                count += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    count
+}
+
+/// AskUserQuestion/审批选择框的结构化识别，只用于让自动投递“停”。
+///
+/// 覆盖三类真实渲染：
+/// - 锚点短语（Claude Code/AGY 权限框、各 TUI 的选择提示）；
+/// - 单行横向编号菜单（CodeBuddy 评分框："1: Bad  2: Fine  3: Good"）；
+/// - 纵向编号菜单：带 ❯/> 光标的编号选中行 + 至少另一行编号选项。
+///
+/// 选择框可以叠加在看似正常的空输入框上方（真实事件即如此），所以本检查
+/// 必须先于输入框归属判定执行。误判方向只能是“停”：宁可把罕见的编号
+/// 列表草稿误判为选择框（任务可见、可人工恢复），也不能漏判后误 Enter。
+/// "esc to cancel" 之类的忙碌提示不能作为锚点，否则正常忙碌期投递会被卡死。
+pub(super) fn pane_has_selection_dialog(pane: &str, marker: &str) -> bool {
+    const ANCHORS: &[&str] = &[
+        "Do you want to proceed?",
+        "Yes, and don't ask again",
+        "Enter to select",
+        "enter to select",
+    ];
+    let plain = strip_csi_sequences(pane);
+    // 本任务刚写入的正文行不参与菜单结构判定：正文里的编号内容是数据，
+    // 不是待用户选择的选项。选择框行不含 marker，依旧能被识别。
+    let menu_lines: Vec<&str> = plain
+        .lines()
+        .filter(|line| !line.contains(marker))
+        .collect();
+    if menu_lines
+        .iter()
+        .any(|line| ANCHORS.iter().any(|anchor| line.contains(anchor)))
+    {
+        return true;
+    }
+    if menu_lines
+        .iter()
+        .any(|line| colon_option_token_count(line) >= 2)
+    {
+        return true;
+    }
+    let has_cursor_option = menu_lines.iter().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed
+            .strip_prefix('❯')
+            .or_else(|| trimmed.strip_prefix('>'))
+            .is_some_and(line_starts_with_numbered_option)
+    });
+    has_cursor_option
+        && menu_lines
+            .iter()
+            .any(|line| line_starts_with_numbered_option(line))
+}
+
+/// 预检分类（纯函数，便于离线验收）：先看选择框，再看输入框归属。
+/// 预检分类（纯函数，便于离线验收）：先看选择框，再看输入框归属。
+/// 归属用受控身份的完整内容比对，不再用 squashed.contains(marker)。
+pub(super) fn classify_scheduled_delivery_preflight(
+    agent: Option<ComposerAgent>,
+    pane: &str,
+    identity: &ScheduledBodyIdentity,
+) -> ScheduledDeliveryPreflight {
+    if pane_has_selection_dialog(pane, identity.marker()) {
+        return ScheduledDeliveryPreflight::SelectionDialog;
+    }
+    let Some(agent) = agent else {
+        return ScheduledDeliveryPreflight::Unrecognized;
+    };
+    match composer_draft::scan_composer_draft(agent, pane) {
+        ComposerScan::Empty => ScheduledDeliveryPreflight::Empty,
+        ComposerScan::Unrecognized => ScheduledDeliveryPreflight::Unrecognized,
+        ComposerScan::Draft(lines) => match classify_body_ownership(&lines, identity) {
+            BodyOwnership::Owned => ScheduledDeliveryPreflight::OwnedBody,
+            BodyOwnership::Truncated => ScheduledDeliveryPreflight::Uncertain,
+            BodyOwnership::Foreign => ScheduledDeliveryPreflight::ForeignDraft,
+        },
+    }
+}
+
+/// Enter 前判定：只有完整 OwnedBody 可作为发送本次 Enter 的依据。
+/// Empty 不是所有权证明——正文可能被消费但收条未落盘、被用户清掉或粘贴
+/// 未呈现；此时只能只读查原生收条/queue，无收条即停止后续 Enter。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ScheduledEnterDecision {
+    /// 完整 OwnedBody（生产）或 legacy 无条件兼容：允许本次 Enter。
+    Proceed,
+    /// 只读发现本任务原生收条：结束，不再 Enter。
+    Confirmed,
+    /// 通用 queue 横幅：只停止多余 Enter，保留 pending。
+    QueuedAwaitingReceipt,
+    /// 归属/界面不成立或无收条的 Empty：停止后续 Enter。
+    Blocked {
+        preflight: ScheduledDeliveryPreflight,
+    },
+}
+
+/// 有界提交循环（legacy 兼容路径与生产 runner 共用）。
+/// 每次 Enter 前重新判定；队列横幅按 semantics 分列，不冒充原生收条。
+pub(super) fn submit_scheduled_message_loop(
+    semantics: QueueAcceptanceSemantics,
+    mut decide: impl FnMut() -> Result<ScheduledEnterDecision>,
     mut queued: impl FnMut() -> Result<bool>,
     mut enter: impl FnMut() -> Result<()>,
     mut confirmed: impl FnMut() -> Result<bool>,
     mut wait: impl FnMut(),
-) -> Result<&'static str> {
+) -> Result<ScheduledSubmitOutcome> {
     for attempt in 0..3 {
-        // The body was just pasted. An older queued message cannot prove this
-        // new body was submitted; only retries may be suppressed by its banner.
-        if confirmed()? || (attempt > 0 && queued()?) {
-            return Ok("confirmed");
+        if confirmed()? {
+            return Ok(ScheduledSubmitOutcome::Confirmed);
+        }
+        match decide()? {
+            ScheduledEnterDecision::Proceed => {}
+            ScheduledEnterDecision::Confirmed => return Ok(ScheduledSubmitOutcome::Confirmed),
+            ScheduledEnterDecision::QueuedAwaitingReceipt => {
+                return Ok(queue_acceptance_outcome(semantics));
+            }
+            ScheduledEnterDecision::Blocked { preflight } => {
+                return Ok(ScheduledSubmitOutcome::Blocked { preflight });
+            }
+        }
+        // An older queued message cannot prove this new body was submitted;
+        // only retries may be suppressed by its banner.
+        if attempt > 0 && queued()? {
+            return Ok(queue_acceptance_outcome(semantics));
         }
         enter()?;
         for _ in 0..20 {
             wait();
-            if queued()? || confirmed()? {
-                return Ok("confirmed");
+            if queued()? {
+                return Ok(queue_acceptance_outcome(semantics));
+            }
+            if confirmed()? {
+                return Ok(ScheduledSubmitOutcome::Confirmed);
             }
         }
     }
-    Ok("pending_confirmation")
+    Ok(ScheduledSubmitOutcome::Pending)
+}
+
+fn queue_acceptance_outcome(semantics: QueueAcceptanceSemantics) -> ScheduledSubmitOutcome {
+    match semantics {
+        QueueAcceptanceSemantics::LegacyAsReceipt => ScheduledSubmitOutcome::Confirmed,
+        QueueAcceptanceSemantics::StopRetriesOnly => ScheduledSubmitOutcome::QueuedAwaitingReceipt,
+    }
+}
+
+/// 迟到 marker 只读核对：只查询历史，不写正文/Enter/清空。
+/// 历史定位失败返回 Err，绝不解释成「未投递」。
+pub(super) fn reconcile_late_marker(
+    io: &dyn ScheduledDeliveryIo,
+    session_id: &str,
+    marker: &str,
+    baseline: usize,
+) -> Result<bool> {
+    Ok(io.delivery_count(session_id, marker)? > baseline)
+}
+
+fn best_effort_composer_draft(
+    isolate: impl FnOnce() -> Result<ComposerDraftIsolation>,
+) -> Option<ComposerDraftStash> {
+    match isolate() {
+        Ok(ComposerDraftIsolation::Stashed(stash)) => Some(stash),
+        Ok(ComposerDraftIsolation::Clear | ComposerDraftIsolation::Unrecognized) => None,
+        Ok(ComposerDraftIsolation::ClearFailed) => {
+            warn!("composer draft extraction incomplete; sending message once without restore");
+            None
+        }
+        Err(error) => {
+            warn!("composer draft extraction failed; sending message once: {error}");
+            None
+        }
+    }
+}
+
+// ===================== 内部 I/O 适配：生产 / 离线唯一 runner =====================
+
+/// 把 fire 路径上所有会触碰终端/历史/草稿的操作收敛到一处。生产
+/// `ProductionScheduledIo` 与离线 fake 共用 `run_scheduled_delivery`；
+/// 不复制状态机、不新增对外 API、不改鉴权/前端/历史数据。
+pub(super) trait ScheduledDeliveryIo {
+    /// 带样式可见 pane（composer 归属与选择框识别）。
+    fn styled_snapshot(&self, session: &str) -> Result<String>;
+    /// 纯文本可见 pane（队列横幅识别）。
+    fn text_snapshot(&self, session: &str) -> Result<String>;
+    /// 当前会话的 composer agent 身份。
+    fn detect_agent(&self, session: &str) -> Option<ComposerAgent>;
+    /// rollout 中该 marker 出现次数；定位失败必须 Err，不得当 0 解释成未投递。
+    fn delivery_count(&self, session: &str, marker: &str) -> Result<usize>;
+    /// 写正文（一次）。
+    fn write_body(&self, session: &str, data: String) -> Result<()>;
+    /// 语义 Enter（一次）。
+    fn write_enter(&self, session: &str) -> Result<()>;
+    /// 破坏性清空按键。
+    fn write_clear(&self, session: &str, keys: &str) -> Result<()>;
+    /// 破坏性清空前的原子存档（写入 + 回读核验）。失败必须零清空。
+    fn save_draft(&self, receipt: &DraftReceipt, text: &str) -> Result<()>;
+    /// 回读存档，用于恢复与核验。
+    fn read_draft(&self, receipt: &DraftReceipt) -> Result<Option<String>>;
+    /// 确认安全写回后移除存档；blocked/unknown 不调用以保留证据。
+    fn remove_draft(&self, receipt: &DraftReceipt) -> Result<()>;
+    /// 把草稿写回输入框，绝不带 Enter。
+    fn restore_draft(&self, session: &str, text: &str) -> Result<()>;
+    /// 等待（离线 fake 可 no-op）。
+    fn sleep(&self, duration: Duration);
+}
+
+/// 生产实现：直接复用 TerminalManager 既有 I/O，不新增终端能力。
+/// body/clear/Enter/restore 四种写入统一在 session_send_lock 内执行，
+/// 但互斥只覆盖实际获取同一把锁的调用方（如 continue/自动续发命令）：
+/// send_session_input 等部分 TerminalManager 入口自身不加该锁，未持锁
+/// 的 manager 写入不在互斥范围；用户直接打字、外部 tmux send-keys 更
+/// 不在锁内。preflight 快照在获锁前取得，同锁等待期间观测同样可能陈旧。
+/// 不作绝对原子保证——见 DeliveryCycle 注释。
+struct ProductionScheduledIo<'a> {
+    manager: &'a TerminalManager,
+}
+
+impl ProductionScheduledIo<'_> {
+    /// 在会话发送锁内执行一次管理通道写入。
+    fn under_send_lock<T>(&self, session: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        let send_lock = self.manager.session_send_lock(session);
+        let _send_guard = crate::lock_or_recover!(send_lock.lock());
+        f()
+    }
+}
+
+impl ScheduledDeliveryIo for ProductionScheduledIo<'_> {
+    fn styled_snapshot(&self, session: &str) -> Result<String> {
+        Ok(String::from_utf8_lossy(&capture_tmux_visible_styled_pane_snapshot(session)?)
+            .into_owned())
+    }
+    fn text_snapshot(&self, session: &str) -> Result<String> {
+        Ok(
+            String::from_utf8_lossy(&capture_tmux_visible_text_pane_snapshot(session)?)
+                .into_owned(),
+        )
+    }
+    fn detect_agent(&self, session: &str) -> Option<ComposerAgent> {
+        self.manager.session_composer_agent(session)
+    }
+    fn delivery_count(&self, session: &str, marker: &str) -> Result<usize> {
+        let entries = self.manager.session_agent_rollout_history(session)?;
+        Ok(entries
+            .as_deref()
+            .map(|entries| terminal_message_delivery_count(entries, marker))
+            .unwrap_or(0))
+    }
+    fn write_body(&self, session: &str, data: String) -> Result<()> {
+        self.under_send_lock(session, || self.manager.send_session_input(session, data))
+    }
+    fn write_enter(&self, session: &str) -> Result<()> {
+        self.under_send_lock(session, || self.manager.send_session_enter_key(session))
+    }
+    fn write_clear(&self, session: &str, keys: &str) -> Result<()> {
+        self.under_send_lock(session, || {
+            self.manager
+                .write_session_input_inner(session, keys.to_string(), false)
+        })
+    }
+    fn save_draft(&self, receipt: &DraftReceipt, text: &str) -> Result<()> {
+        let path = scheduled_input::scheduled_drafts_path(&self.manager.scheduled_input_file);
+        scheduled_input::save_scheduled_draft(&path, receipt, text)?;
+        // 同时保留用户可手工粘贴的 tmux buffer（task/session 隔离名）；
+        // 错误不吞，失败即视为存档失败、调用方零清空。
+        send_tmux_buffer(receipt.session_id(), receipt.buffer(), text)
+            .with_context(|| format!("park draft into tmux buffer {} failed", receipt.buffer()))?;
+        Ok(())
+    }
+    fn read_draft(&self, receipt: &DraftReceipt) -> Result<Option<String>> {
+        let path = scheduled_input::scheduled_drafts_path(&self.manager.scheduled_input_file);
+        scheduled_input::load_scheduled_draft(&path, receipt)
+    }
+    fn remove_draft(&self, receipt: &DraftReceipt) -> Result<()> {
+        let path = scheduled_input::scheduled_drafts_path(&self.manager.scheduled_input_file);
+        scheduled_input::remove_scheduled_draft(&path, receipt)
+    }
+    fn restore_draft(&self, session: &str, text: &str) -> Result<()> {
+        self.under_send_lock(session, || {
+            let body = prepare_terminal_message_body(text, true);
+            self.manager.write_session_input_inner(session, body, false)
+        })
+    }
+    fn sleep(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
+}
+
+/// 本周期输入操作的期望态序列（Initial/ClearedEmpty/OwnedBody）。这不是
+/// 外部输入代际或序列号：只有外部写入导致下一次实时预检观测与期望失配
+/// 时本周期才失效；与期望态一致的外部写入无法被该机制识别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpectedComposer {
+    Initial,
+    ClearedEmpty,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreflightPhase {
+    BeforeIsolate,
+    BeforeRestore,
+}
+
+/// 一次投递周期：受控身份 + agent 类别（ComposerAgent）比对 + 期望态序列
+/// + parked 证据。agent 比对只识别类别变化，不识别同类别下的进程重启或
+/// 会话代际切换。
+struct DeliveryCycle<'a> {
+    io: &'a dyn ScheduledDeliveryIo,
+    session_id: &'a str,
+    task_id: &'a str,
+    identity: &'a ScheduledBodyIdentity,
+    stage: &'a std::cell::Cell<&'static str>,
+    agent: std::cell::Cell<Option<ComposerAgent>>,
+    expected: std::cell::Cell<ExpectedComposer>,
+    parked: std::cell::RefCell<Option<DraftReceipt>>,
+}
+
+impl<'a> DeliveryCycle<'a> {
+    /// Native/unknown TUIs use ordinary terminal input. Composer parsing and
+    /// receipt availability must not gate their first submission.
+    fn run_generic(&self, text: &str) -> Result<ScheduledDeliveryOutcome> {
+        let baseline = self
+            .io
+            .delivery_count(self.session_id, self.identity.marker());
+        self.stage.set("body");
+        self.io
+            .write_body(self.session_id, prepare_terminal_message_body(text, true))?;
+        self.io
+            .sleep(terminal_message_paste_settle_delay(text, true));
+        if let Ok(baseline) = &baseline {
+            if matches!(
+                reconcile_late_marker(self.io, self.session_id, self.identity.marker(), *baseline),
+                Ok(true)
+            ) {
+                return Ok(ScheduledDeliveryOutcome::Status {
+                    status: "confirmed",
+                    note: String::new(),
+                });
+            }
+        }
+        self.stage.set("enter");
+        self.io.write_enter(self.session_id)?;
+        self.stage.set("confirm");
+        let mut note =
+            "generic terminal delivery: body and Enter written once; native receipt not observed"
+                .to_string();
+        match baseline {
+            Ok(baseline) => {
+                for _ in 0..5 {
+                    self.io.sleep(Duration::from_millis(100));
+                    match reconcile_late_marker(
+                        self.io,
+                        self.session_id,
+                        self.identity.marker(),
+                        baseline,
+                    ) {
+                        Ok(true) => {
+                            return Ok(ScheduledDeliveryOutcome::Status {
+                                status: "confirmed",
+                                note: String::new(),
+                            });
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            note.push_str(&format!("; receipt lookup failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(error) => note.push_str(&format!("; receipt baseline unavailable: {error}")),
+        }
+        let status = if self.queue_banner().unwrap_or(false) {
+            note.push_str("; queue banner observed; native receipt NOT confirmed");
+            "pending_confirmation"
+        } else {
+            "unverified"
+        };
+        Ok(ScheduledDeliveryOutcome::Status { status, note })
+    }
+
+    fn blocked(&self, stage: &'static str, reason: impl Into<String>) -> ScheduledDeliveryOutcome {
+        ScheduledDeliveryOutcome::Blocked {
+            stage,
+            reason: format!("body_sha256={}; {}", &self.identity.digest()[..16], reason.into()),
+            parked: self.parked.borrow().clone(),
+        }
+    }
+
+    fn unknown(&self, reason: String) -> ScheduledDeliveryOutcome {
+        ScheduledDeliveryOutcome::Unknown {
+            stage: self.stage.get(),
+            reason,
+            parked: self.parked.borrow().clone(),
+        }
+    }
+
+    /// 实时预检：核同一 session/agent 类别 + 界面 + 归属 + 期望态。
+    /// 快照检查不声称消灭所有竞争：快照在获 session_send_lock 之前取得，
+    /// 等待同锁期间状态同样可能变化；除已消除的准备步骤后无检查窗口外，
+    /// 快照与实际写入之间的竞争窗口始终存在。
+    fn preflight(&self, phase: PreflightPhase) -> Result<ScheduledDeliveryPreflight> {
+        let pane = self.io.styled_snapshot(self.session_id)?;
+        let agent = self.io.detect_agent(self.session_id);
+        match self.agent.get() {
+            None => self.agent.set(agent),
+            Some(locked) if agent != Some(locked) => {
+                return Ok(ScheduledDeliveryPreflight::Unrecognized);
+            }
+            Some(_) => {}
+        }
+        let classified = classify_scheduled_delivery_preflight(agent, &pane, self.identity);
+        let ok = match phase {
+            PreflightPhase::BeforeIsolate => matches!(
+                classified,
+                ScheduledDeliveryPreflight::Empty | ScheduledDeliveryPreflight::ForeignDraft
+            ),
+            PreflightPhase::BeforeRestore => classified == ScheduledDeliveryPreflight::Empty,
+        };
+        if ok {
+            Ok(classified)
+        } else {
+            // 期望态失配：可能是正文写入后外部介入，或正文写入前的意外状态。
+            Ok(ScheduledDeliveryPreflight::Uncertain)
+        }
+    }
+
+    fn queue_banner(&self) -> Result<bool> {
+        let pane = self.io.text_snapshot(self.session_id)?;
+        Ok(pane
+            .lines()
+            .any(error_detection::is_terminal_queued_input_line))
+    }
+
+    /// 破坏性清空前先安全存档；保存失败零清空；清空/scan 任何错误保留
+    /// parked 证据与可见状态。成功清空后把期望态推进到 ClearedEmpty。
+    ///
+    /// 归属核验：存档 A 之后、每次破坏性清空之前，必须核同一 agent、无弹窗、
+    /// composer 可识别，且待删字节与已持久核验的原件逐字节一致；内容已变化
+    /// 或无法证明即停，保留 A、0 clear。只做单次清空：清空后非 Empty（无论
+    /// 残余还是新稿 B）一律停止，不二次清空未知内容。
+    fn isolate_draft(&self) -> Result<Option<ScheduledDeliveryOutcome>> {
+        let pane = self.io.styled_snapshot(self.session_id)?;
+        let Some(agent) = self
+            .agent
+            .get()
+            .or_else(|| self.io.detect_agent(self.session_id))
+        else {
+            return Ok(Some(
+                self.blocked(
+                    "isolate",
+                    "cannot identify composer agent for draft archive; 0 clear",
+                ),
+            ));
+        };
+        let lines = match composer_draft::scan_composer_draft(agent, &pane) {
+            ComposerScan::Draft(lines) => lines,
+            _ => {
+                return Ok(Some(
+                    self.blocked("isolate", "draft disappeared before archive; 0 clear"),
+                ));
+            }
+        };
+        let text = lines.join("\n");
+        let receipt = DraftReceipt::new(self.session_id, self.task_id, &text);
+        if let Err(error) = self.io.save_draft(&receipt, &text) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                format!("draft archive save failed; 0 clear / 0 body / 0 Enter: {error}"),
+            )));
+        }
+        *self.parked.borrow_mut() = Some(receipt);
+
+        // 破坏性清空前最终核验：存档后到清空之间界面可能已变（用户改稿、
+        // 弹窗、agent 切换），待删字节必须与已存档原件一致才允许清空。
+        let check = self.io.styled_snapshot(self.session_id)?;
+        if self.io.detect_agent(self.session_id) != Some(agent) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                "agent identity changed before draft clear; original archived, 0 clear",
+            )));
+        }
+        if pane_has_selection_dialog(&check, self.identity.marker()) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                "selection dialog appeared before draft clear; original archived, 0 clear",
+            )));
+        }
+        match composer_draft::scan_composer_draft(agent, &check) {
+            ComposerScan::Empty => {
+                // 草稿已消失：无需破坏性清空。
+                self.expected.set(ExpectedComposer::ClearedEmpty);
+                return Ok(None);
+            }
+            ComposerScan::Draft(current) if current.join("\n") == text => {}
+            _ => {
+                return Ok(Some(self.blocked(
+                    "isolate",
+                    "composer content changed or unrecognized after archive; original archived, 0 clear / 0 body / 0 Enter",
+                )));
+            }
+        }
+
+        // 单次破坏性清空；清空后非 Empty 即停（残余或新稿都不二次清空）。
+        let keys = composer_clear_keystrokes(lines.len());
+        if let Err(error) = self.io.write_clear(self.session_id, &keys) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                format!("draft clear write failed; original archived: {error}"),
+            )));
+        }
+        self.io.sleep(COMPOSER_DRAFT_CLEAR_SETTLE);
+        // scan 错误（含 snapshot Err）保留 parked 证据并交周期兜底成 Unknown。
+        let scanned = self.io.styled_snapshot(self.session_id)?;
+        if self.io.detect_agent(self.session_id) != Some(agent) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                "agent identity changed during draft clear; original archived, no further clear",
+            )));
+        }
+        if pane_has_selection_dialog(&scanned, self.identity.marker()) {
+            return Ok(Some(self.blocked(
+                "isolate",
+                "selection dialog appeared after draft clear; original archived, no further clear / 0 body / 0 Enter",
+            )));
+        }
+        match composer_draft::scan_composer_draft(agent, &scanned) {
+            ComposerScan::Empty => {
+                self.expected.set(ExpectedComposer::ClearedEmpty);
+                Ok(None)
+            }
+            _ => Ok(Some(self.blocked(
+                "isolate",
+                "composer not empty after single clear; original archived, no further clear / 0 body / 0 Enter",
+            ))),
+        }
+    }
+
+    /// 恢复阶段：仅安全清晰的普通空框、无上方弹窗、同一身份才写回；
+    /// blocked/unknown 不自动还原、保留 parked 证据；无自动 Enter。
+    ///
+    /// 顺序：先读并验证原件（重算正文 hash，与凭据一致才可恢复），紧邻写回
+    /// 前再核 agent/界面/Empty（读取期间界面可能已变）。写回返回 Ok 不单独
+    /// 触发删除：仅当可识别界面完整呈现所存原文且身份一致才移除持久原件；
+    /// 截断/未知/写回未呈现/注入新稿均保留 parked 引用。
+    /// 返回 Some(error) 表示尝试恢复但未完成（原件仍在存档）。
+    fn maybe_restore(&self, normal: bool) -> Option<String> {
+        let receipt = self.parked.borrow().clone()?;
+        if !normal {
+            return None; // blocked/unknown：保留证据，不写回
+        }
+        self.stage.set("restore");
+        // 先读并验证原件；读取失败/缺失/正文 hash 与凭据不符都保留证据。
+        let text = match self.io.read_draft(&receipt) {
+            Ok(Some(text)) => text,
+            Ok(None) => return Some("restore: archived draft missing; not written back".into()),
+            Err(error) => return Some(format!("restore: draft read/verify failed: {error}")),
+        };
+        if hex::encode(Sha256::digest(text.as_bytes())) != receipt.digest() {
+            return Some(
+                "restore: archived draft hash mismatch with receipt; not written back".into(),
+            );
+        }
+        // 紧邻写回再核 agent/界面/Empty。
+        let pane = match self.io.styled_snapshot(self.session_id) {
+            Ok(pane) => pane,
+            Err(error) => return Some(format!("restore preflight snapshot failed: {error}")),
+        };
+        let agent = self.io.detect_agent(self.session_id);
+        if let Some(locked) = self.agent.get() {
+            if agent != Some(locked) {
+                return Some("restore preflight: agent identity changed".into());
+            }
+        }
+        // 显式核对上方 selection dialog（除 ComposerScan::Empty 之外）。
+        if pane_has_selection_dialog(&pane, self.identity.marker()) {
+            return Some(
+                "restore preflight: selection dialog visible; draft not written back".into(),
+            );
+        }
+        if self.preflight(PreflightPhase::BeforeRestore).ok()
+            != Some(ScheduledDeliveryPreflight::Empty)
+        {
+            return Some(
+                "restore preflight: composer not safely empty; draft not written back".into(),
+            );
+        }
+        if let Err(error) = self.io.restore_draft(self.session_id, &text) {
+            return Some(format!("restore: draft write-back failed: {error}"));
+        }
+        // 写回 Ok 不单独触发删除：复核界面完整呈现所存原文且身份一致。
+        let presented = match self.io.styled_snapshot(self.session_id) {
+            Ok(after) => {
+                let current_agent = self.io.detect_agent(self.session_id);
+                current_agent == agent
+                    && current_agent.is_some_and(|a| {
+                        match composer_draft::scan_composer_draft(a, &after) {
+                            ComposerScan::Draft(lines) => soft_wrap_full_match(&lines, &text),
+                            _ => false,
+                        }
+                    })
+            }
+            Err(_) => false,
+        };
+        if !presented {
+            return Some(
+                "restore verify: archived draft not fully presented or identity changed; archive retained"
+                    .into(),
+            );
+        }
+        match self.io.remove_draft(&receipt) {
+            Ok(()) => {
+                *self.parked.borrow_mut() = None;
+                None
+            }
+            Err(error) => {
+                Some(format!("restore: draft written back but archive cleanup failed: {error}"))
+            }
+        }
+    }
+
+    /// 周期主流程；返回 Err 时由 run_scheduled_delivery 兜底成 Unknown。
+    fn run(
+        &self,
+        task: &TerminalScheduledInputTask,
+        text: &str,
+    ) -> Result<ScheduledDeliveryOutcome> {
+        let guarded = task.task_type == "agent_message" && task.send_enter;
+        if !guarded {
+            // 非 agent_message / 不按 Enter：保持父版本行为，无预检、无隔离。
+            self.stage.set("body");
+            let body = if task.task_type == "agent_message" {
+                prepare_terminal_message_body(text, true)
+            } else {
+                scheduled_input_body(task)
+            };
+            self.io.write_body(self.session_id, body)?;
+            if !task.send_enter {
+                return Ok(ScheduledDeliveryOutcome::Status {
+                    status: "written",
+                    note: String::new(),
+                });
+            }
+            self.io
+                .sleep(terminal_message_paste_settle_delay(text, true));
+            self.stage.set("enter");
+            self.io.write_enter(self.session_id)?;
+            return Ok(ScheduledDeliveryOutcome::Status {
+                status: "unverified",
+                note: String::new(),
+            });
+        }
+
+        // Draft isolation is advisory for every Agent, including Codex ghost
+        // suggestions and unknown TUIs. Keep extraction diagnostics, but never
+        // withhold the first body / Enter because parsing or clearing failed.
+        self.stage.set("isolate");
+        let extraction = match self.preflight(PreflightPhase::BeforeIsolate) {
+            Ok(ScheduledDeliveryPreflight::Empty) => None,
+            Ok(ScheduledDeliveryPreflight::ForeignDraft) => match self.isolate_draft() {
+                Ok(None) => None,
+                Ok(Some(outcome)) => {
+                    let diagnostic = scheduled_outcome_to_status(&outcome)
+                        .1
+                        .replace(" / 0 body / 0 Enter", "");
+                    Some(format!(
+                        "draft extraction incomplete; continuing submission: {diagnostic}"
+                    ))
+                }
+                Err(error) => Some(format!("draft extraction failed; continuing: {error}")),
+            },
+            Ok(other) => Some(format!("draft extraction skipped; continuing: {}", other.reason())),
+            Err(error) => Some(format!("draft extraction unavailable; continuing: {error}")),
+        };
+        let extracted = self.expected.get() == ExpectedComposer::ClearedEmpty;
+        let mut outcome = self.run_generic(text)?;
+        if let ScheduledDeliveryOutcome::Status { note, .. } = &mut outcome {
+            if let Some(diagnostic) = extraction {
+                if !note.is_empty() {
+                    note.push_str("; ");
+                }
+                note.push_str(&diagnostic);
+            }
+        }
+
+        // 5) 恢复阶段（同一 runner 内，fake 可观测）。
+        let normal = matches!(outcome, ScheduledDeliveryOutcome::Status { .. });
+        let restore_error = self.maybe_restore(normal && extracted);
+        if let ScheduledDeliveryOutcome::Status { note, .. } = &mut outcome {
+            if let Some(error) = restore_error {
+                if !note.is_empty() {
+                    note.push_str("; ");
+                }
+                note.push_str(&error);
+            }
+            if let Some(receipt) = self.parked.borrow().as_ref() {
+                if !note.is_empty() {
+                    note.push_str("; ");
+                }
+                note.push_str(&receipt.reference());
+            }
+        }
+        Ok(outcome)
+    }
+}
+
+/// 生产 fire 与离线 fake 共用的唯一 runner。副作用错误统一兜底成 Unknown，
+/// 保留 stage 与 parked 证据，不自动重发正文/Enter。
+pub(super) fn run_scheduled_delivery(
+    io: &dyn ScheduledDeliveryIo,
+    task: &TerminalScheduledInputTask,
+    text: &str,
+    identity: &ScheduledBodyIdentity,
+    stage: &std::cell::Cell<&'static str>,
+) -> ScheduledDeliveryOutcome {
+    let cycle = DeliveryCycle {
+        io,
+        session_id: &task.session_id,
+        task_id: &task.id,
+        identity,
+        stage,
+        agent: std::cell::Cell::new(None),
+        expected: std::cell::Cell::new(ExpectedComposer::Initial),
+        parked: std::cell::RefCell::new(None),
+    };
+    match cycle.run(task, text) {
+        Ok(outcome) => outcome,
+        Err(error) => cycle.unknown(error.to_string()),
+    }
+}
+
+fn parked_suffix(parked: &Option<DraftReceipt>) -> String {
+    parked
+        .as_ref()
+        .map(|receipt| format!("; {}", receipt.reference()))
+        .unwrap_or_default()
+}
+
+/// 把 runner 结果映射成已有 status/last_error 字段契约，不改既有字段语义。
+pub(super) fn scheduled_outcome_to_status(outcome: &ScheduledDeliveryOutcome) -> (String, String) {
+    match outcome {
+        ScheduledDeliveryOutcome::Status { status, note } => ((*status).to_string(), note.clone()),
+        ScheduledDeliveryOutcome::Blocked {
+            stage,
+            reason,
+            parked,
+        } => (
+            "blocked_manual_action".to_string(),
+            format!("stage={stage}: {reason}{}", parked_suffix(parked)),
+        ),
+        ScheduledDeliveryOutcome::Unknown {
+            stage,
+            reason,
+            parked,
+        } => (
+            "unknown".to_string(),
+            format!("stage={stage}: {reason}{}", parked_suffix(parked)),
+        ),
+    }
 }
 
 pub(super) fn scheduled_input_body(task: &TerminalScheduledInputTask) -> String {
@@ -5907,7 +7711,7 @@ pub(super) fn scheduled_input_body(task: &TerminalScheduledInputTask) -> String 
     }
 }
 
-fn load_terminal_state(
+pub(super) fn load_terminal_state(
     state_file: &Path,
     protected_session_ids: &HashSet<String>,
 ) -> (TerminalState, u64, bool) {
@@ -5938,6 +7742,9 @@ fn load_terminal_state(
         })
         .collect();
     state.output_observations = registry.output_observations;
+    state.input_history_cleared_at = registry.input_history_cleared_at;
+    state.terminal_messages_cleared_at = registry.terminal_messages_cleared_at;
+    state.compile_notifications_cleared_at = registry.compile_notifications_cleared_at;
     let mut next_ordinal = registry.next_ordinal.max(default_next_ordinal());
     let mut dirty = false;
 
@@ -6021,6 +7828,62 @@ fn load_terminal_state(
         dirty = true;
     }
 
+    // Deduplicate group colors within the same project. If multiple groups in the
+    // same project share the exact same group_color (e.g. default #4f8cff),
+    // assign subsequent groups distinct colors.
+    let mut project_groups: std::collections::HashMap<std::path::PathBuf, Vec<(String, String)>> =
+        std::collections::HashMap::new();
+    let mut seen_tokens = std::collections::HashSet::new();
+    let mut all_used_colors: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let mut sorted_sessions: Vec<&StoredTerminalSession> = state.sessions_by_id.values().collect();
+    sorted_sessions.sort_by(|a, b| {
+        a.group_token
+            .cmp(&b.group_token)
+            .then_with(|| a.created_at.cmp(&b.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    for session in &sorted_sessions {
+        if session.group_token.is_empty() {
+            continue;
+        }
+        if !session.group_color.is_empty() {
+            all_used_colors.insert(session.group_color.to_lowercase());
+        }
+        if seen_tokens.insert(session.group_token.clone()) {
+            project_groups
+                .entry(session.path.clone())
+                .or_default()
+                .push((session.group_token.clone(), session.group_color.clone()));
+        }
+    }
+
+    let mut reassign_tokens: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for (_path, groups) in project_groups {
+        let mut used_in_project = std::collections::HashSet::new();
+        for (token, color) in groups {
+            let color_lower = color.to_lowercase();
+            if !color_lower.is_empty() && used_in_project.contains(&color_lower) {
+                let new_color = default_terminal_group_color_avoiding(&token, &all_used_colors);
+                all_used_colors.insert(new_color.to_lowercase());
+                used_in_project.insert(new_color.to_lowercase());
+                reassign_tokens.insert(token, new_color);
+            } else if !color_lower.is_empty() {
+                used_in_project.insert(color_lower);
+            }
+        }
+    }
+    if !reassign_tokens.is_empty() {
+        for session in state.sessions_by_id.values_mut() {
+            if let Some(new_color) = reassign_tokens.get(&session.group_token) {
+                session.group_color = new_color.clone();
+            }
+        }
+        dirty = true;
+    }
+
     let before_history_count = state.input_histories.len();
     state
         .input_histories
@@ -6089,11 +7952,9 @@ fn collect_stored_output_observations(
 }
 
 pub(super) fn clamp_input_history_entries(
-    mut entries: Vec<TerminalInputHistoryEntry>,
+    entries: Vec<TerminalInputHistoryEntry>,
 ) -> Vec<TerminalInputHistoryEntry> {
-    if entries.len() > MAX_TERMINAL_INPUT_HISTORY_ENTRIES {
-        entries.drain(0..entries.len() - MAX_TERMINAL_INPUT_HISTORY_ENTRIES);
-    }
+    // 对话史长度不设限额，完整保留全部历史条目
     entries
 }
 
@@ -6250,23 +8111,13 @@ fn commit_terminal_input_history_line(history: &mut TerminalInputHistoryCapture)
             text: text.to_string(),
             created_at: current_timestamp_millis(),
         });
-        if history.entries.len() > MAX_TERMINAL_INPUT_HISTORY_ENTRIES {
-            let excess = history.entries.len() - MAX_TERMINAL_INPUT_HISTORY_ENTRIES;
-            history.entries.drain(0..excess);
-        }
     }
     history.buffer.clear();
     committed
 }
 
-fn trim_terminal_input_buffer(history: &mut TerminalInputHistoryCapture) {
-    if history.buffer.len() > MAX_TERMINAL_INPUT_HISTORY_LINE_BYTES {
-        let mut drop_bytes = history.buffer.len() - MAX_TERMINAL_INPUT_HISTORY_LINE_BYTES;
-        while drop_bytes < history.buffer.len() && !history.buffer.is_char_boundary(drop_bytes) {
-            drop_bytes += 1;
-        }
-        history.buffer.drain(..drop_bytes);
-    }
+fn trim_terminal_input_buffer(_history: &mut TerminalInputHistoryCapture) {
+    // 对话史长度与输入缓冲区不设限额，输入完整保留不截断
 }
 
 fn refresh_auto_session_names_locked(state: &mut TerminalState) -> bool {
@@ -6498,11 +8349,35 @@ pub(super) fn collect_session_activity_probes(
             live_session.as_ref(),
             error_line_limit,
         );
-        let model_family = terminal_model_family_from_snapshot(snapshot.as_deref());
+        let mut model_family = terminal_model_family_from_snapshot(snapshot.as_deref());
+        if model_family.is_empty() {
+            if let Some(session) = live_session.as_ref() {
+                let name_lower = session.name().to_ascii_lowercase();
+                if name_lower.contains("kimi") || name_lower.contains("moonshot") {
+                    model_family = "kimi".to_string();
+                } else if name_lower.contains("claude") || name_lower.contains("sonnet") || name_lower.contains("opus") || name_lower.contains("haiku") {
+                    model_family = "claude".to_string();
+                } else if name_lower.contains("deepseek") {
+                    model_family = "deepseek".to_string();
+                } else if name_lower.contains("gpt") || name_lower.contains("openai") || name_lower.contains("astra") || name_lower.contains("sol") {
+                    model_family = "gpt".to_string();
+                } else if name_lower.contains("glm") || name_lower.contains("zhipu") {
+                    model_family = "glm".to_string();
+                } else if name_lower.contains("gemini") {
+                    model_family = "gemini".to_string();
+                } else if name_lower.contains("qwen") {
+                    model_family = "qwen".to_string();
+                }
+            }
+        }
         // Agent liveness must still be probed every cycle even when the pane
         // snapshot is reused: a process exiting without producing output is a
         // real transition the PTY output stamp cannot observe.
         let agent_activity = agent_detector.detect(&session_id);
+        let codex_agent_detected = agent_activity
+            .agents
+            .iter()
+            .any(|agent| agent.eq_ignore_ascii_case("codex"));
         let working_status = snapshot
             .as_deref()
             .is_some_and(|snapshot| terminal_working_status_match_from_snapshot(snapshot, 10));
@@ -6524,6 +8399,18 @@ pub(super) fn collect_session_activity_probes(
                 )
             })
             .flatten();
+        // Codex 预设：部分 provider（如 GLM-5.3）在整个 turn 内都不渲染
+        // `Working (… • esc to interrupt)` 行，画面只剩流式消息与 composer，
+        // 长工具调用期间会被误判为空闲。这里以“缺少 `Worked for …` 完成行”
+        // 判定工作中；错误匹配与压缩态优先，已识别到错误时不改写工作态。
+        let working_status = apply_codex_turn_preset(
+            working_status,
+            compacting_status,
+            error_match.is_some(),
+            snapshot.as_deref().is_some_and(|snapshot| {
+                terminal_codex_turn_in_progress_from_snapshot(snapshot, 10, codex_agent_detected)
+            }),
+        );
         let worked_status = !working_status
             && error_match.is_none()
             && snapshot
@@ -6681,6 +8568,17 @@ pub(super) fn collect_session_infos_from_probes_locked(
     (sessions, dirty)
 }
 
+/// Codex 预设只在没有压缩态、且没有识别到错误时生效：
+/// 报错面板必须继续走错误/重试状态，不能被“缺少 Worked for 完成行”改写为工作中。
+pub(super) fn apply_codex_turn_preset(
+    working_status: bool,
+    compacting_status: bool,
+    error_detected: bool,
+    preset_match: bool,
+) -> bool {
+    working_status || (preset_match && !compacting_status && !error_detected)
+}
+
 fn terminal_activity_snapshot_from_probe_locked(
     state: &mut TerminalState,
     probe: &TerminalActivityProbe,
@@ -6695,17 +8593,34 @@ fn terminal_activity_snapshot_from_probe_locked(
     let activity_agent = probe
         .agent_activity
         .is_active()
-        .then(|| probe.agent_activity.agents.join("/"));
+        .then(|| probe.agent_activity.agents.join("/"))
+        .or_else(|| {
+            let kw = probe.error_match.as_ref().map(|m| m.keyword.as_str())?;
+            if kw.contains("Individual quota reached")
+                || kw.contains("exhausted your quota on this model")
+                || kw.contains("increase your limits")
+            {
+                Some("AGY".to_string())
+            } else if kw.contains("您的使用量已超出频率限制") {
+                Some("CodeBuddy".to_string())
+            } else {
+                None
+            }
+        });
 
     // Compaction outranks the generic working state: Claude renders its
     // compaction progress with the same spinner family it uses for a turn, and
     // the selector should report "压缩中" for as long as the pane shows it.
     if probe.compacting_status {
-        return TerminalActivitySnapshot::compacting(last_output_at).with_agent(activity_agent);
+        return TerminalActivitySnapshot::compacting(last_output_at)
+            .with_agent(activity_agent)
+            .with_model_family(probe.model_family.clone());
     }
 
     if probe.working_status {
-        return TerminalActivitySnapshot::working(last_output_at).with_agent(activity_agent);
+        return TerminalActivitySnapshot::working(last_output_at)
+            .with_agent(activity_agent)
+            .with_model_family(probe.model_family.clone());
     }
 
     if probe.cline_idle_prompt {
@@ -6715,7 +8630,8 @@ fn terminal_activity_snapshot_from_probe_locked(
             probe.snapshot_fingerprint,
             probe.snapshot_probe_sequence,
         );
-        return TerminalActivitySnapshot::agent(activity_agent, last_output_at);
+        return TerminalActivitySnapshot::agent(activity_agent, last_output_at)
+            .with_model_family(probe.model_family.clone());
     }
 
     if let Some(error_match) = probe.error_match.as_ref() {
@@ -6741,40 +8657,45 @@ fn terminal_activity_snapshot_from_probe_locked(
         .with_model_family(probe.model_family.clone());
     }
 
-    if probe.pending_build {
-        return TerminalActivitySnapshot::building(last_output_at).with_agent(activity_agent);
-    }
-
     let last_viewed_output_at = state
         .output_observations
         .get(&probe.session_id)
         .map(|observation| observation.last_viewed_output_at)
         .unwrap_or(0);
-    if probe.worked_status && last_output_at > last_viewed_output_at {
-        return TerminalActivitySnapshot::completed(last_output_at).with_agent(activity_agent);
-    }
-
     let now = current_timestamp_millis();
-    if last_output_at > last_viewed_output_at
+
+    let snapshot = if probe.pending_build {
+        TerminalActivitySnapshot::building(last_output_at).with_agent(activity_agent)
+    } else if probe.worked_status && last_output_at > last_viewed_output_at {
+        TerminalActivitySnapshot::completed(last_output_at).with_agent(activity_agent)
+    } else if last_output_at > last_viewed_output_at
         && now >= last_output_at
         && now.saturating_sub(last_output_at) <= TERMINAL_RECENT_OUTPUT_ACTIVE_MS
     {
-        return TerminalActivitySnapshot::recent_output(last_output_at).with_agent(activity_agent);
-    }
+        TerminalActivitySnapshot::recent_output(last_output_at).with_agent(activity_agent)
+    } else if last_output_at > last_viewed_output_at {
+        let is_codex = activity_agent
+            .as_deref()
+            .is_some_and(|agent| agent.eq_ignore_ascii_case("codex"))
+            || probe
+                .agent_activity
+                .agents
+                .iter()
+                .any(|agent| agent.eq_ignore_ascii_case("codex"));
+        if is_codex && !probe.worked_status {
+            TerminalActivitySnapshot::working(last_output_at).with_agent(activity_agent)
+        } else {
+            TerminalActivitySnapshot::completed(last_output_at).with_agent(activity_agent)
+        }
+    } else if probe.agent_activity.has_orphaned_agents() {
+        TerminalActivitySnapshot::orphaned_agent(activity_agent, last_output_at)
+    } else if probe.agent_activity.is_active() {
+        TerminalActivitySnapshot::agent(activity_agent, last_output_at)
+    } else {
+        TerminalActivitySnapshot::idle(last_output_at)
+    };
 
-    if last_output_at > last_viewed_output_at {
-        return TerminalActivitySnapshot::completed(last_output_at).with_agent(activity_agent);
-    }
-
-    if probe.agent_activity.has_orphaned_agents() {
-        return TerminalActivitySnapshot::orphaned_agent(activity_agent, last_output_at);
-    }
-
-    if probe.agent_activity.is_active() {
-        return TerminalActivitySnapshot::agent(activity_agent, last_output_at);
-    }
-
-    TerminalActivitySnapshot::idle(last_output_at).with_model_family(probe.model_family.clone())
+    snapshot.with_model_family(probe.model_family.clone())
 }
 
 pub(super) fn collect_terminal_auto_continue_schedules(
@@ -6920,13 +8841,193 @@ pub(super) fn terminal_model_family_from_snapshot(snapshot: Option<&[u8]>) -> St
         return String::new();
     };
     let output = String::from_utf8_lossy(snapshot);
+    if let Some(model) = terminal_model_name_from_screen_layout(&output) {
+        return model;
+    }
     if terminal_recent_output_uses_deepseek_model(&output) {
         "deepseek".to_string()
     } else if terminal_recent_output_uses_glm_model(&output) {
         "glm".to_string()
+    } else if terminal_recent_output_uses_model_family(&output, "claude")
+        || terminal_recent_output_uses_model_family(&output, "sonnet")
+        || terminal_recent_output_uses_model_family(&output, "opus")
+        || terminal_recent_output_uses_model_family(&output, "haiku")
+    {
+        "claude".to_string()
+    } else if terminal_recent_output_uses_model_family(&output, "gpt")
+        || terminal_recent_output_uses_model_family(&output, "o1")
+        || terminal_recent_output_uses_model_family(&output, "o3")
+    {
+        "gpt".to_string()
+    } else if terminal_recent_output_uses_model_family(&output, "gemini") {
+        "gemini".to_string()
+    } else if terminal_recent_output_uses_model_family(&output, "qwen") {
+        "qwen".to_string()
+    } else if terminal_recent_output_uses_model_family(&output, "kimi")
+        || terminal_recent_output_uses_model_family(&output, "moonshot")
+    {
+        "kimi".to_string()
     } else {
         String::new()
     }
+}
+
+pub(super) fn terminal_model_name_from_screen_layout(output: &str) -> Option<String> {
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    let search_window = lines.iter().rev().take(25);
+
+    // 1. Codex status line (bottom left):
+    // e.g. "  GPT-6-Astra high · Context 41% used · Standard · Main [default]"
+    // e.g. "  GLM-5.3 xhigh · Context 4% used · Fast off"
+    // e.g. "  GPT-6.1-Sol low · Context 3% used · Fast off"
+    for &line in search_window.clone() {
+        if line.contains("· Context") || (line.contains("Context") && line.contains("% used")) {
+            let left = if let Some((before, _)) = line.split_once("· Context") {
+                before
+            } else if let Some((before, _)) = line.split_once("Context") {
+                before
+            } else {
+                continue;
+            };
+            let trimmed = left.trim();
+            let mut words: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(last) = words.last() {
+                if matches!(last.to_ascii_lowercase().as_str(), "low" | "medium" | "high" | "xhigh") && words.len() > 1 {
+                    words.pop();
+                }
+            }
+            let candidate = words.join(" ");
+            let lower = candidate.to_ascii_lowercase();
+            if !candidate.is_empty()
+                && !lower.contains("ask codex")
+                && !lower.contains("warning")
+                && !lower.contains("worked for")
+                && !lower.contains("context")
+                && candidate != "·"
+            {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 2. AGY bottom prompt line (bottom right):
+    // e.g. "? for shortcuts                                                  auto · Gemini 3.8 Flash · high"
+    // e.g. "esc to cancel                                                    auto · Gemini 3.8 Flash · high"
+    // Note: Do NOT match Codex help line: "← for agents · ? for shortcuts    ⚠ 2 warnings · f2 to view"
+    for &line in search_window.clone() {
+        if (line.contains("? for shortcuts") || line.contains("esc to cancel"))
+            && !line.contains("← for agents")
+        {
+            let right = if let Some((_, after)) = line.split_once("? for shortcuts") {
+                after
+            } else if let Some((_, after)) = line.split_once("esc to cancel") {
+                after
+            } else {
+                continue;
+            };
+            let right_lower = right.to_ascii_lowercase();
+            if right_lower.contains("warning") || right_lower.contains("f2 to view") {
+                continue;
+            }
+            let segments: Vec<&str> = right
+                .split('·')
+                .map(str::trim)
+                .filter(|s| {
+                    let s_lower = s.to_ascii_lowercase();
+                    !s.is_empty()
+                        && !matches!(
+                            s_lower.as_str(),
+                            "auto" | "low" | "medium" | "high" | "xhigh" | "esc to cancel" | "?"
+                        )
+                })
+                .collect();
+            if let Some(first) = segments.first() {
+                return Some(first.to_string());
+            }
+        }
+    }
+
+    // 3. CodeBuddy status line (bottom left):
+    // e.g. "deepseek-v4.1-flash high · ← for agents                          ⏵⏵ bypass permissions on (⇧tab to cycle)"
+    for &line in search_window.clone() {
+        if line.contains("← for agents") {
+            let Some((before, _)) = line.split_once("← for agents") else {
+                continue;
+            };
+            let trimmed = before.trim().trim_end_matches(|c| c == '·' || c == ' ').trim();
+            let mut words: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(last) = words.last() {
+                if matches!(last.to_ascii_lowercase().as_str(), "low" | "medium" | "high" | "xhigh") && words.len() > 1 {
+                    words.pop();
+                }
+            }
+            let candidate = words.join(" ");
+            let lower = candidate.to_ascii_lowercase();
+            if !candidate.is_empty()
+                && candidate != "·"
+                && !lower.contains("shortcuts")
+                && !lower.contains("bypass")
+            {
+                return Some(candidate);
+            }
+        }
+    }
+
+    // 4. CodeArts status line:
+    // e.g. "  |  Build  Kimi-K3 huaweicloud-maas                                                master"
+    for &line in search_window.clone() {
+        for kw in ["Build", "Plan", "Run"] {
+            if let Some(idx) = line.find(kw) {
+                let rest = &line[idx..];
+                let parts: Vec<&str> = rest.split_whitespace().collect();
+                if parts.len() >= 2 && matches!(parts[0], "Build" | "Plan" | "Run") {
+                    let model = parts[1].trim();
+                    if !model.is_empty() && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                        return Some(model.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Qoder status line:
+    // e.g. " DeepSeek-Flash Model · ctx ░░░░░░░░░░ 0% · /home/codes/lyyStock/stockScreener"
+    for &line in search_window.clone() {
+        for delim in [" Model ·", " Model •"] {
+            if let Some((before, _)) = line.split_once(delim) {
+                let words: Vec<&str> = before.split_whitespace().collect();
+                if let Some(last) = words.last() {
+                    let cand = last.trim();
+                    if !cand.is_empty() && cand.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                        return Some(cand.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Claude Code banner:
+    // e.g. "Model: claude-3-7-sonnet-20250219"
+    for line in search_window {
+        if line.starts_with("Model:") || line.contains(" Model:") {
+            if let Some((_, after)) = line.split_once("Model:") {
+                let cand = after.split_whitespace().next().unwrap_or("").trim();
+                if !cand.is_empty() && cand.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+                    return Some(cand.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn terminal_recent_output_uses_model_family(output: &str, family: &str) -> bool {
@@ -7696,7 +9797,7 @@ fn normalize_terminal_group_color(value: Option<&str>) -> Result<Option<String>>
     };
     let value = value.trim();
     if value.is_empty() {
-        return Ok(Some(String::new()));
+        return Ok(None);
     }
     anyhow::ensure!(
         value.len() <= 7
@@ -7739,12 +9840,87 @@ fn normalize_terminal_group_role(value: Option<&str>) -> Result<Option<String>> 
         return Ok(Some(String::new()));
     }
     let normalized = match normalized.to_ascii_lowercase().as_str() {
-        "manager" | "管理者" | "管理" | "计划者" | "planner" => "管理者",
+        "super_admin" | "超级管理员" => "超级管理员",
+        "manager" | "普通管理员" | "管理者" | "管理" | "计划者" | "planner" => {
+            "普通管理员"
+        }
         "executor" | "执行者" | "执行" | "worker" => "执行者",
         "reviewer" | "复核者" | "复核" => "复核者",
-        _ => anyhow::bail!("分组角色只能是管理者、执行者或复核者"),
+        _ => anyhow::bail!("分组角色只能是超级管理员、普通管理员、执行者或复核者"),
     };
     Ok(Some(normalized.to_string()))
+}
+
+#[cfg(test)]
+mod terminal_super_admin_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_super_admin_role_normalization() {
+        for role in ["super_admin", " SUPER_ADMIN ", "超级管理员"] {
+            assert_eq!(
+                normalize_terminal_group_role(Some(role))
+                    .unwrap()
+                    .as_deref(),
+                Some("超级管理员")
+            );
+        }
+        for role in ["manager", "管理者", "普通管理员"] {
+            assert_eq!(
+                normalize_terminal_group_role(Some(role))
+                    .unwrap()
+                    .as_deref(),
+                Some("普通管理员")
+            );
+        }
+        assert!(normalize_terminal_group_role(Some("invalid_role")).is_err());
+    }
+
+    #[test]
+    fn terminal_super_admin_persists_beside_ordinary_manager() {
+        let mut state = TerminalState::default();
+        for id in ["s1", "s2", "s3"] {
+            state
+                .sessions_by_id
+                .insert(id.into(), super::super::tests::stored_test_terminal_session(id));
+        }
+        let members = vec!["s1".into(), "s2".into(), "s3".into()];
+        let roles = [("s1", "super_admin"), ("s2", "manager"), ("s3", "executor")]
+            .into_iter()
+            .map(|(id, role)| super::super::TerminalGroupRoleAssignment {
+                session_id: id.into(),
+                role: role.into(),
+            })
+            .collect::<Vec<_>>();
+        update_session_group_locked(&mut state, "s2", &members, &roles, false, None, None).unwrap();
+        assert_eq!(state.sessions_by_id["s1"].group_role, "超级管理员");
+        assert_eq!(state.sessions_by_id["s2"].group_role, "普通管理员");
+        let encoded = serde_json::to_vec(&state.sessions_by_id["s1"]).unwrap();
+        let restored: StoredTerminalSession = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.group_role, "超级管理员");
+        // A name/order edit without role assignments must preserve both roles.
+        update_session_group_locked(
+            &mut state,
+            "s2",
+            &members,
+            &[],
+            true,
+            None,
+            Some("协作组".into()),
+        )
+        .unwrap();
+        assert_eq!(state.sessions_by_id["s1"].group_role, "超级管理员");
+        assert_eq!(state.sessions_by_id["s2"].group_role, "普通管理员");
+        let invalid = vec![super::super::TerminalGroupRoleAssignment {
+            session_id: "s1".into(),
+            role: "invalid_role".into(),
+        }];
+        assert!(
+            update_session_group_locked(&mut state, "s2", &members, &invalid, false, None, None)
+                .is_err()
+        );
+        assert_eq!(state.sessions_by_id["s1"].group_role, "超级管理员");
+    }
 }
 
 fn terminal_group_color_slot(token: &str) -> f64 {
@@ -7971,16 +10147,51 @@ pub(super) fn update_session_group_locked(
     } else {
         String::new()
     };
+    let target_session_path = state
+        .sessions_by_id
+        .get(session_id)
+        .map(|s| s.path.clone())
+        .unwrap_or_default();
+
+    let same_project_duplicate = if let Some(ref color) = normalized_color {
+        let color_lower = color.to_lowercase();
+        !color_lower.is_empty()
+            && state.sessions_by_id.values().any(|s| {
+                !members.contains(&s.id)
+                    && s.group_token != old_token
+                    && !s.group_token.is_empty()
+                    && s.path == target_session_path
+                    && s.group_color.to_lowercase() == color_lower
+            })
+    } else {
+        false
+    };
+
     let effective_color = if token.is_empty() {
         String::new()
     } else if let Some(color) = normalized_color {
-        color
+        if same_project_duplicate && old_token.is_empty() {
+            let used_colors = state
+                .sessions_by_id
+                .values()
+                .filter(|session| {
+                    session.group_token != old_token && !members.contains(&session.id)
+                })
+                .filter(|session| !session.group_color.is_empty())
+                .map(|session| session.group_color.to_lowercase())
+                .collect();
+            default_terminal_group_color_avoiding(&token, &used_colors)
+        } else {
+            color
+        }
     } else {
         inherited_color.unwrap_or_else(|| {
             let used_colors = state
                 .sessions_by_id
                 .values()
-                .filter(|session| session.group_token != old_token)
+                .filter(|session| {
+                    session.group_token != old_token && !members.contains(&session.id)
+                })
                 .filter(|session| !session.group_color.is_empty())
                 .map(|session| session.group_color.to_lowercase())
                 .collect();
@@ -8007,11 +10218,14 @@ pub(super) fn update_session_group_locked(
         session.group_token = token.clone();
         session.group_color = effective_color.clone();
         session.group_name = effective_name.clone();
-        session.group_role = normalized_roles
-            .get(id)
-            .cloned()
-            .filter(|role| !role.is_empty())
-            .unwrap_or(default_role.clone());
+        session.group_role =
+            if let Some(role) = normalized_roles.get(id).filter(|role| !role.is_empty()) {
+                role.clone()
+            } else if !session.group_role.is_empty() {
+                session.group_role.clone()
+            } else {
+                default_role.clone()
+            };
         session.group_fixed_order = fixed_order && !token.is_empty();
         session.group_order = if token.is_empty() {
             0
@@ -8395,6 +10609,7 @@ mod workspace_restore_registry_tests {
             state.sessions_by_id.insert(
                 "live-session".to_string(),
                 StoredTerminalSession {
+                    auto_compact_disabled: false,
                     id: "live-session".to_string(),
                     path: base_dir.clone(),
                     user_name: default_terminal_user_name(),
@@ -8840,13 +11055,14 @@ mod explicit_session_tests {
     }
 
     #[test]
-    fn terminal_persistence_detects_commits_at_history_capacity() {
+    fn terminal_input_history_has_no_entry_capacity_limit() {
         let mut history = TerminalInputHistoryCapture::default();
-        for index in 0..MAX_TERMINAL_INPUT_HISTORY_ENTRIES {
+        for index in 0..600 {
             assert!(capture_terminal_input_history(&mut history, &format!("prompt {index}\r")));
         }
         assert!(capture_terminal_input_history(&mut history, "newest prompt\r"));
-        assert_eq!(history.entries.len(), MAX_TERMINAL_INPUT_HISTORY_ENTRIES);
+        assert_eq!(history.entries.len(), 601);
+        assert_eq!(history.entries[0].text, "prompt 0");
         assert_eq!(history.entries.last().unwrap().text, "newest prompt");
         assert!(!capture_terminal_input_history(&mut history, "unfinished"));
     }
@@ -9044,5 +11260,1220 @@ mod session_hide_tests {
         assert!(!state.sessions_by_id["s1"].idle);
         assert!(!state.sessions_by_id["s2"].hidden);
         assert!(!state.sessions_by_id["s2"].idle);
+    }
+}
+
+#[cfg(test)]
+mod composer_draft_isolation_tests {
+    use super::*;
+
+    #[test]
+    fn unclearable_draft_no_longer_blocks_delivery() {
+        let mut writes = 0;
+        let cleared = TerminalManager::try_clear_composer_draft(
+            1,
+            |_| {
+                writes += 1;
+                Ok(())
+            },
+            || Ok(ComposerScan::Draft(vec!["用户草稿".to_string()])),
+        )
+        .expect("清空失败是已知状态，不应返回错误阻断投递");
+        assert!(!cleared);
+        assert_eq!(writes, COMPOSER_DRAFT_CLEAR_ATTEMPTS);
+    }
+
+    #[test]
+    fn clearable_draft_still_isolated() {
+        let mut scans = 0;
+        let cleared = TerminalManager::try_clear_composer_draft(
+            1,
+            |_| Ok(()),
+            || {
+                scans += 1;
+                Ok(ComposerScan::Empty)
+            },
+        )
+        .unwrap();
+        assert!(cleared);
+        assert_eq!(scans, 1);
+    }
+}
+
+#[cfg(test)]
+mod scheduled_delivery_guard_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::collections::{HashMap, VecDeque};
+
+    const SESSION: &str = "s1";
+
+    fn rule() -> String {
+        "─".repeat(110)
+    }
+
+    fn frame(composer: &str) -> String {
+        format!("header\n\n{}\n{}\n{}\n⏵⏵ bypass permissions on\n", rule(), composer, rule())
+    }
+
+    fn empty_pane() -> String {
+        frame(">  ")
+    }
+
+    fn owned_pane(text: &str) -> String {
+        frame(&format!("> {text}"))
+    }
+
+    fn foreign_pane(text: &str) -> String {
+        frame(&format!("> {text}"))
+    }
+
+    /// 选择框（CodeBuddy 评分/AskUserQuestion 风格）叠加在空输入框上方。
+    fn dialog_pane() -> String {
+        format!(
+            "output\n● How is CodeBuddy doing this session? (optional)\n  1: Bad    2: Fine   3: Good   0: Dismiss\n{}\n>  \n{}\nfooter\n",
+            rule(),
+            rule()
+        )
+    }
+
+    fn task(id: &str, text: &str) -> TerminalScheduledInputTask {
+        TerminalScheduledInputTask {
+            status: String::new(),
+            last_error: String::new(),
+            id: id.to_string(),
+            session_id: SESSION.to_string(),
+            terminal_name: String::new(),
+            due_at_millis: 0,
+            created_at_millis: 0,
+            label: String::new(),
+            text: text.to_string(),
+            send_enter: true,
+            task_type: "agent_message".to_string(),
+            working_dir: String::new(),
+            repeat_interval_millis: 0,
+            parent_task_id: String::new(),
+        }
+    }
+
+    fn body_text(task: &TerminalScheduledInputTask) -> String {
+        format!(
+            "[scheduled:{}] {}",
+            task.id,
+            task.text.split_whitespace().collect::<Vec<_>>().join(" ")
+        )
+    }
+
+    fn identity(task: &TerminalScheduledInputTask, text: &str) -> ScheduledBodyIdentity {
+        ScheduledBodyIdentity::new(task, text)
+    }
+
+    fn unwrap_body(data: &str) -> String {
+        data.strip_prefix("\u{1b}[200~")
+            .and_then(|rest| rest.strip_suffix("\u{1b}[201~"))
+            .unwrap_or(data)
+            .to_string()
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum View {
+        Empty,
+        Raw(String),
+        Owned(String),
+        Foreign(String),
+        Dialog,
+        SnapshotError,
+        Unrecognized,
+    }
+
+    #[derive(Default)]
+    struct Counts {
+        body: usize,
+        enter: usize,
+        clear: usize,
+        restore: usize,
+        save: usize,
+        read: usize,
+        remove: usize,
+    }
+
+    /// 记录副作用并提供可脚本化 pane 的最小内部 I/O 设备；不复制 runner 状态机。
+    struct FakeScheduledIo {
+        view: RefCell<View>,
+        counts: RefCell<Counts>,
+        archives: RefCell<HashMap<String, String>>,
+        agent: Cell<Option<ComposerAgent>>,
+        agent_after_body: Cell<Option<ComposerAgent>>,
+        agent_after_enter: Cell<Option<ComposerAgent>>,
+        agent_after_save: Cell<Option<ComposerAgent>>,
+        marker_count: Cell<usize>,
+        late_marker_after_baseline: Cell<Option<usize>>,
+        queue: Cell<bool>,
+        save_fails: Cell<bool>,
+        clear_write_fails: Cell<bool>,
+        receipt_fails: Cell<bool>,
+        body_write_fails: Cell<bool>,
+        enter_write_fails: Cell<bool>,
+        tamper_archive_on_read: Cell<bool>,
+        restore_not_presented: Cell<bool>,
+        agent_after_read: Cell<Option<ComposerAgent>>,
+        after_save: RefCell<VecDeque<View>>,
+        after_read: RefCell<VecDeque<View>>,
+        after_body: RefCell<VecDeque<View>>,
+        after_clear: RefCell<VecDeque<View>>,
+        after_enter: RefCell<VecDeque<View>>,
+        after_enter_marker: RefCell<VecDeque<usize>>,
+    }
+
+    impl FakeScheduledIo {
+        fn new(view: View) -> Self {
+            Self {
+                view: RefCell::new(view),
+                counts: RefCell::new(Counts::default()),
+                archives: RefCell::new(HashMap::new()),
+                // Keep strict-path regressions on a strict adapter. CodeBuddy's
+                // public delivery policy is covered separately below.
+                agent: Cell::new(Some(ComposerAgent::Agy)),
+                agent_after_body: Cell::new(None),
+                agent_after_enter: Cell::new(None),
+                agent_after_save: Cell::new(None),
+                marker_count: Cell::new(0),
+                late_marker_after_baseline: Cell::new(None),
+                queue: Cell::new(false),
+                save_fails: Cell::new(false),
+                clear_write_fails: Cell::new(false),
+                receipt_fails: Cell::new(false),
+                body_write_fails: Cell::new(false),
+                enter_write_fails: Cell::new(false),
+                tamper_archive_on_read: Cell::new(false),
+                restore_not_presented: Cell::new(false),
+                agent_after_read: Cell::new(None),
+                after_save: RefCell::new(VecDeque::new()),
+                after_read: RefCell::new(VecDeque::new()),
+                after_body: RefCell::new(VecDeque::new()),
+                after_clear: RefCell::new(VecDeque::new()),
+                after_enter: RefCell::new(VecDeque::new()),
+                after_enter_marker: RefCell::new(VecDeque::new()),
+            }
+        }
+
+        fn counts(&self) -> Counts {
+            let counts = self.counts.borrow();
+            Counts {
+                body: counts.body,
+                enter: counts.enter,
+                clear: counts.clear,
+                restore: counts.restore,
+                save: counts.save,
+                read: counts.read,
+                remove: counts.remove,
+            }
+        }
+
+        fn archived(&self, buffer: &str) -> Option<String> {
+            self.archives.borrow().get(buffer).cloned()
+        }
+    }
+
+    impl ScheduledDeliveryIo for FakeScheduledIo {
+        fn styled_snapshot(&self, _session: &str) -> Result<String> {
+            Ok(match &*self.view.borrow() {
+                View::SnapshotError => anyhow::bail!("injected snapshot failure"),
+                View::Empty => empty_pane(),
+                View::Raw(text) => text.clone(),
+                View::Owned(text) => owned_pane(text),
+                View::Foreign(text) => foreign_pane(text),
+                View::Dialog => dialog_pane(),
+                // 无横线框/提示符：scan_composer_draft 判 Unrecognized。
+                View::Unrecognized => "plain output\nno composer frame here\n".to_string(),
+            })
+        }
+        fn text_snapshot(&self, _session: &str) -> Result<String> {
+            Ok(if self.queue.get() {
+                "Messages to be submitted at end of turn".to_string()
+            } else {
+                "working".to_string()
+            })
+        }
+        fn detect_agent(&self, _session: &str) -> Option<ComposerAgent> {
+            self.agent.get()
+        }
+        fn delivery_count(&self, _session: &str, _marker: &str) -> Result<usize> {
+            if self.receipt_fails.get() {
+                anyhow::bail!("injected receipt failure");
+            }
+            let count = self.marker_count.get();
+            // 迟到原生收条：baseline 采样之后才落盘。
+            if let Some(late) = self.late_marker_after_baseline.take() {
+                self.marker_count.set(late);
+            }
+            Ok(count)
+        }
+        fn write_body(&self, _session: &str, data: String) -> Result<()> {
+            self.counts.borrow_mut().body += 1;
+            if self.body_write_fails.get() {
+                anyhow::bail!("injected body failure");
+            }
+            if let Some(agent) = self.agent_after_body.get() {
+                self.agent.set(Some(agent));
+            }
+            let text = unwrap_body(&data);
+            let mut view = self.view.borrow_mut();
+            if let Some(next) = self.after_body.borrow_mut().pop_front() {
+                *view = next;
+            } else {
+                *view = View::Owned(text);
+            }
+            Ok(())
+        }
+        fn write_enter(&self, _session: &str) -> Result<()> {
+            self.counts.borrow_mut().enter += 1;
+            if self.enter_write_fails.get() {
+                anyhow::bail!("injected Enter failure");
+            }
+            if let Some(agent) = self.agent_after_enter.get() {
+                self.agent.set(Some(agent));
+            }
+            let mut consumed = false;
+            if let Some(count) = self.after_enter_marker.borrow_mut().pop_front() {
+                self.marker_count.set(count);
+                consumed = count > 0;
+            }
+            let mut view = self.view.borrow_mut();
+            if let Some(next) = self.after_enter.borrow_mut().pop_front() {
+                *view = next;
+            } else if consumed {
+                // 原生收条出现 => 正文已被 Agent 消费，输入框回到空态。
+                *view = View::Empty;
+            }
+            Ok(())
+        }
+        fn write_clear(&self, _session: &str, _keys: &str) -> Result<()> {
+            self.counts.borrow_mut().clear += 1;
+            if self.clear_write_fails.get() {
+                anyhow::bail!("injected clear write failure");
+            }
+            let mut view = self.view.borrow_mut();
+            if let Some(next) = self.after_clear.borrow_mut().pop_front() {
+                *view = next;
+            } else {
+                *view = View::Empty;
+            }
+            Ok(())
+        }
+        fn save_draft(&self, receipt: &DraftReceipt, text: &str) -> Result<()> {
+            self.counts.borrow_mut().save += 1;
+            if self.save_fails.get() {
+                anyhow::bail!("injected draft save failure");
+            }
+            self.archives
+                .borrow_mut()
+                .insert(receipt.buffer().to_string(), text.to_string());
+            // 存档后、清空前界面可能已变（用户改稿/弹窗/新稿/agent 切换）。
+            if let Some(agent) = self.agent_after_save.get() {
+                self.agent.set(Some(agent));
+            }
+            if let Some(next) = self.after_save.borrow_mut().pop_front() {
+                *self.view.borrow_mut() = next;
+            }
+            Ok(())
+        }
+        fn read_draft(&self, receipt: &DraftReceipt) -> Result<Option<String>> {
+            self.counts.borrow_mut().read += 1;
+            if self.tamper_archive_on_read.get() {
+                // 模拟存档正文被篡改/损坏：与凭据 digest 不符。
+                return Ok(Some("篡改稿".to_string()));
+            }
+            let text = self.archives.borrow().get(receipt.buffer()).cloned();
+            // 已取到正确原件、返回前读取窗口内界面/agent 可能已变。
+            if let Some(agent) = self.agent_after_read.get() {
+                self.agent.set(Some(agent));
+            }
+            if let Some(next) = self.after_read.borrow_mut().pop_front() {
+                *self.view.borrow_mut() = next;
+            }
+            Ok(text)
+        }
+        fn remove_draft(&self, receipt: &DraftReceipt) -> Result<()> {
+            self.counts.borrow_mut().remove += 1;
+            self.archives.borrow_mut().remove(receipt.buffer());
+            Ok(())
+        }
+        fn restore_draft(&self, _session: &str, text: &str) -> Result<()> {
+            self.counts.borrow_mut().restore += 1;
+            // 写回返回 Ok 不代表界面真实呈现：可注入「未呈现」。
+            *self.view.borrow_mut() = if self.restore_not_presented.get() {
+                View::Empty
+            } else {
+                View::Foreign(text.to_string())
+            };
+            Ok(())
+        }
+        fn sleep(&self, _duration: Duration) {}
+    }
+
+    fn run(io: &FakeScheduledIo, task: &TerminalScheduledInputTask) -> ScheduledDeliveryOutcome {
+        let text = body_text(task);
+        let identity = identity(task, &text);
+        let stage = Cell::new("isolate");
+        run_scheduled_delivery(io, task, &text, &identity, &stage)
+    }
+
+    fn status_of(outcome: &ScheduledDeliveryOutcome) -> (String, String) {
+        scheduled_outcome_to_status(outcome)
+    }
+
+    #[test]
+    fn generic_agent_without_composer_sends_once_and_confirms_native_receipt() {
+        let io = FakeScheduledIo::new(View::SnapshotError);
+        io.agent.set(None);
+        io.marker_count.set(1);
+        io.after_enter_marker.borrow_mut().push_back(2);
+        let (status, _) = status_of(&run(&io, &task("generic-1", "hello native agent")));
+        assert_eq!(status, "confirmed");
+        let counts = io.counts();
+        assert_eq!(
+            (counts.body, counts.enter, counts.clear, counts.save, counts.restore),
+            (1, 1, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn all_agents_attempt_draft_extraction_and_submit_despite_failures() {
+        for agent in [
+            None,
+            Some(ComposerAgent::Codex),
+            Some(ComposerAgent::Claude),
+            Some(ComposerAgent::CodeBuddy),
+            Some(ComposerAgent::Agy),
+        ] {
+            for view in [
+                View::Foreign("未清空的真实草稿".into()),
+                View::Unrecognized,
+                View::SnapshotError,
+                View::Empty,
+            ] {
+                let io = FakeScheduledIo::new(view);
+                io.agent.set(agent);
+                io.clear_write_fails.set(true);
+                io.after_enter_marker.borrow_mut().push_back(1);
+                let (status, _) = status_of(&run(&io, &task("recovery", "原派单内容")));
+                assert_eq!(status, "confirmed");
+                let counts = io.counts();
+                assert_eq!((counts.body, counts.enter, counts.restore), (1, 1, 0));
+                assert!(counts.clear <= 1);
+            }
+        }
+    }
+
+    #[test]
+    fn immediate_draft_extraction_errors_and_unknown_views_are_advisory() {
+        assert!(
+            best_effort_composer_draft(|| anyhow::bail!("snapshot/save/clear failure")).is_none()
+        );
+        for result in [
+            ComposerDraftIsolation::Clear,
+            ComposerDraftIsolation::Unrecognized,
+            ComposerDraftIsolation::ClearFailed,
+        ] {
+            assert!(best_effort_composer_draft(|| Ok(result)).is_none());
+        }
+    }
+
+    #[test]
+    fn codex_ghost_standard_and_unknown_composer_never_block_submission() {
+        for pane in [
+            "› \x1b[2mTry another approach\x1b[0m\n\n  GPT-6.1-Sol medium · Context 20% used · Standard\n",
+            "› \x1b[2mTry another approach\x1b[0m\n\n  GPT-6.1-Sol medium · Context 20% used · Standa…\n",
+            "› \x1b[2mUnknown new UI suggestion\x1b[0m\nunknown future footer\n",
+        ] {
+            let io = FakeScheduledIo::new(View::Raw(pane.into()));
+            io.agent.set(Some(ComposerAgent::Codex));
+            io.after_enter_marker.borrow_mut().push_back(1);
+            let (status, _) = status_of(&run(&io, &task("codex-suggest", "原派单内容")));
+            assert_eq!(status, "confirmed");
+            let counts = io.counts();
+            assert_eq!((counts.body, counts.enter, counts.clear, counts.save), (1, 1, 0, 0));
+        }
+    }
+
+    #[test]
+    fn codex_real_draft_is_archived_and_clear_failure_still_submits_once() {
+        let pane = "› 真实草稿\n\n  GPT-6.1-Sol medium · Context 20% used · Standard\n";
+        let io = FakeScheduledIo::new(View::Raw(pane.into()));
+        io.agent.set(Some(ComposerAgent::Codex));
+        io.clear_write_fails.set(true);
+        io.after_enter_marker.borrow_mut().push_back(1);
+        let (status, note) = status_of(&run(&io, &task("codex-draft", "原派单内容")));
+        assert_eq!(status, "confirmed");
+        assert!(note.contains("parked="));
+        let counts = io.counts();
+        assert_eq!(
+            (counts.body, counts.enter, counts.clear, counts.save, counts.restore),
+            (1, 1, 1, 1, 0)
+        );
+        let receipt = DraftReceipt::new(SESSION, "codex-draft", "真实草稿");
+        assert_eq!(io.archived(receipt.buffer()), Some("真实草稿".into()));
+    }
+
+    #[test]
+    fn generic_agent_without_receipt_does_not_retry_enter_or_clear_draft() {
+        for view in [
+            View::Unrecognized,
+            View::Foreign("user draft".into()),
+            View::Dialog,
+            View::SnapshotError,
+        ] {
+            let io = FakeScheduledIo::new(view);
+            io.agent.set(None);
+            let (status, note) = status_of(&run(&io, &task("generic-2", "hello")));
+            assert_eq!(status, "unverified");
+            assert!(note.contains("written once"));
+            let counts = io.counts();
+            assert_eq!(
+                (counts.body, counts.enter, counts.clear, counts.save, counts.restore),
+                (1, 1, 0, 0, 0)
+            );
+        }
+        assert!(scheduled_input_reconcile_candidate("agent_message", "unverified"));
+    }
+
+    #[test]
+    fn generic_receipt_failure_does_not_block_terminal_submission() {
+        let io = FakeScheduledIo::new(View::SnapshotError);
+        io.agent.set(None);
+        io.receipt_fails.set(true);
+        let (status, note) = status_of(&run(&io, &task("generic-3", "hello")));
+        assert_eq!(status, "unverified");
+        assert!(note.contains("injected receipt failure"));
+        assert_eq!((io.counts().body, io.counts().enter), (1, 1));
+    }
+
+    #[test]
+    fn generic_terminal_write_failure_stays_unknown_without_replay() {
+        for fail_body in [true, false] {
+            let io = FakeScheduledIo::new(View::SnapshotError);
+            io.agent.set(None);
+            io.body_write_fails.set(fail_body);
+            io.enter_write_fails.set(!fail_body);
+            let (status, note) = status_of(&run(&io, &task("generic-4", "hello")));
+            assert_eq!(status, "unknown");
+            assert!(note.contains(if fail_body {
+                "stage=body"
+            } else {
+                "stage=enter"
+            }));
+            assert_eq!((io.counts().body, io.counts().enter), (1, usize::from(!fail_body)));
+        }
+    }
+
+    // ===================== P0-1 正文归属纯函数回归 =====================
+
+    #[test]
+    fn preflight_states_empty_and_owned_body_are_distinct() {
+        let t = task("t-1", "hello agent");
+        let text = body_text(&t);
+        let id = identity(&t, &text);
+        assert_eq!(
+            classify_scheduled_delivery_preflight(
+                Some(ComposerAgent::CodeBuddy),
+                &empty_pane(),
+                &id
+            ),
+            ScheduledDeliveryPreflight::Empty
+        );
+        assert_eq!(
+            classify_scheduled_delivery_preflight(
+                Some(ComposerAgent::CodeBuddy),
+                &owned_pane(&text),
+                &id
+            ),
+            ScheduledDeliveryPreflight::OwnedBody
+        );
+    }
+
+    #[test]
+    fn body_ownership_rejects_prefix_suffix_middle_other_marker_and_whitespace() {
+        let t = task("t-1", "hello agent");
+        let text = body_text(&t);
+        let id = identity(&t, &text);
+        let cases = [
+            format!("PRE {text}"),                              // 同 marker 前缀
+            format!("{text} 用户补写：批准部署"),               // 同 marker 后缀
+            text.replace("hello", "hel用户lo"),                 // 同 marker 中插
+            text.replace("[scheduled:t-1]", "[scheduled:t-2]"), // 其它任务 marker
+            text.replace("hello agent", "hello  agent"),        // 语义不同的多余空白
+        ];
+        for pane_text in cases {
+            assert_eq!(
+                classify_scheduled_delivery_preflight(
+                    Some(ComposerAgent::CodeBuddy),
+                    &foreign_pane(&pane_text),
+                    &id
+                ),
+                ScheduledDeliveryPreflight::ForeignDraft,
+                "must reject foreign variant: {pane_text}"
+            );
+        }
+        // 正常原文完整拥有。
+        assert_eq!(
+            classify_scheduled_delivery_preflight(
+                Some(ComposerAgent::CodeBuddy),
+                &owned_pane(&text),
+                &id
+            ),
+            ScheduledDeliveryPreflight::OwnedBody
+        );
+    }
+
+    #[test]
+    fn body_ownership_accepts_soft_wrap_and_rejects_truncation() {
+        let t = task("t-1", "hello agent");
+        let text = body_text(&t);
+        let id = identity(&t, &text);
+        // 词间软换行 / 词中软换行均可解释。
+        for rows in [
+            vec!["[scheduled:t-1] hello".into(), "agent".into()],
+            vec!["[scheduled:t-1] hello ag".into(), "ent".into()],
+        ] {
+            assert_eq!(classify_body_ownership(&rows, &id), BodyOwnership::Owned);
+        }
+        // 长消息只可见尾部：明确策略 = 不拥有、停止、可恢复。
+        assert_eq!(
+            classify_body_ownership(&["hello agent".to_string()], &id),
+            BodyOwnership::Truncated
+        );
+        assert_eq!(
+            classify_scheduled_delivery_preflight(
+                Some(ComposerAgent::CodeBuddy),
+                &foreign_pane("hello agent"),
+                &id
+            ),
+            ScheduledDeliveryPreflight::Uncertain
+        );
+    }
+
+    #[test]
+    fn soft_wrap_full_match_preserves_meaningful_whitespace() {
+        // 不靠删除所有空白：有语义差异的文本不得视为相同。
+        assert!(!soft_wrap_full_match(&["ab".to_string()], "a b"));
+        assert!(soft_wrap_full_match(&["a b".to_string()], "a b"));
+        assert!(!soft_wrap_full_match(&["a  b".to_string()], "a b"));
+    }
+
+    #[test]
+    fn selection_dialog_and_busy_hint_samples() {
+        let marker = "[scheduled:t-1]";
+        assert!(pane_has_selection_dialog(&dialog_pane(), marker));
+        assert!(pane_has_selection_dialog(
+            "Do you want to proceed?\n❯ 1. Yes\n  2. No\n",
+            marker
+        ));
+        // 忙碌提示不能当选择框卡死正常投递。
+        let busy =
+            frame(">  ").replace("header", "✺ Locating… (10s · running REPL)\nesc to cancel");
+        assert!(!pane_has_selection_dialog(&busy, marker));
+        // 普通历史输出/正常空框样例不误判为弹框。
+        assert!(!pane_has_selection_dialog(&empty_pane(), marker));
+        assert!(!pane_has_selection_dialog(
+            "normal output\n> [scheduled:t-1] 1. first 2. second\n",
+            marker
+        ));
+    }
+
+    // ===================== P0-2 存档 / DTO 单元回归 =====================
+
+    #[test]
+    fn draft_receipt_is_session_task_scoped_and_archive_roundtrip() {
+        let a = DraftReceipt::new("s1", "t-1", "草稿A");
+        let b = DraftReceipt::new("s1", "t-2", "草稿B");
+        let c = DraftReceipt::new("s2", "t-1", "草稿A");
+        assert_ne!(a.buffer(), b.buffer(), "different task must not overwrite");
+        assert_ne!(a.buffer(), c.buffer(), "different session must not overwrite");
+        assert!(a.reference().starts_with("parked=webclx-user-draft-"));
+        assert!(a.reference().contains(":sha256="));
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("webclx-t5-drafts-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = scheduled_input::scheduled_drafts_path(&dir.join("scheduled.json"));
+        scheduled_input::save_scheduled_draft(&path, &a, "草稿A").unwrap();
+        scheduled_input::save_scheduled_draft(&path, &b, "草稿B").unwrap();
+        assert_eq!(
+            scheduled_input::load_scheduled_draft(&path, &a).unwrap(),
+            Some("草稿A".to_string()),
+            "second task must not overwrite the first un-restored original"
+        );
+        assert_eq!(
+            scheduled_input::load_scheduled_draft(&path, &b).unwrap(),
+            Some("草稿B".to_string())
+        );
+        scheduled_input::remove_scheduled_draft(&path, &a).unwrap();
+        assert_eq!(scheduled_input::load_scheduled_draft(&path, &a).unwrap(), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn draft_archive_recomputes_hash_and_refuses_mismatch() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("webclx-t5-draft-hash-{unique}"));
+        fs::create_dir_all(&dir).unwrap();
+        let path = scheduled_input::scheduled_drafts_path(&dir.join("scheduled.json"));
+
+        // 1) 凭据按“草稿A”生成、正文却是“草稿B”：保存必须拒绝。
+        let mismatched = DraftReceipt::new("s1", "t-1", "草稿A");
+        assert!(
+            scheduled_input::save_scheduled_draft(&path, &mismatched, "草稿B").is_err(),
+            "receipt/text hash mismatch must refuse the save"
+        );
+        assert_eq!(
+            scheduled_input::load_scheduled_draft(&path, &mismatched).unwrap(),
+            None,
+            "refused save must not leave an entry"
+        );
+
+        // 2) 存档 digest 被篡改：加载必须报可见错误，不返回正文。
+        let d = DraftReceipt::new("s3", "t-9", "草稿C");
+        scheduled_input::save_scheduled_draft(&path, &d, "草稿C").unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let wrong = hex::encode(Sha256::digest(b"tampered"));
+        fs::write(&path, raw.replacen(d.digest(), &wrong, 1)).unwrap();
+        assert!(
+            scheduled_input::load_scheduled_draft(&path, &d).is_err(),
+            "tampered archive must surface an error"
+        );
+
+        // 3) 凭据与存档 digest 不同（同 session/task 复用旧凭据）：拒绝。
+        scheduled_input::save_scheduled_draft(&path, &d, "草稿C").unwrap();
+        let other = DraftReceipt::new("s3", "t-9", "草稿D");
+        assert!(
+            scheduled_input::load_scheduled_draft(&path, &other).is_err(),
+            "receipt digest mismatch must surface an error"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocked_outcome_dto_exposes_stage_and_parked_ref() {
+        let receipt = DraftReceipt::new(SESSION, "t-1", "用户草稿");
+        let outcome = ScheduledDeliveryOutcome::Blocked {
+            stage: "isolate",
+            reason: "selection dialog appeared; original archived".into(),
+            parked: Some(receipt.clone()),
+        };
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "blocked_manual_action");
+        assert!(error.contains("stage=isolate"));
+        assert!(error.contains(receipt.reference().as_str()));
+
+        let mut stored = task("t-1", "hello");
+        stored.status = status;
+        stored.last_error = error;
+        let info = scheduled_input::scheduled_input_task_info(&stored);
+        assert_eq!(info.delivery_stage, "isolate");
+        assert_eq!(info.parked_draft_ref, receipt.reference());
+        assert_eq!(info.task_id, "t-1");
+    }
+
+    // ===================== P0-4 真实 runner 控制流正反例 =====================
+
+    #[test]
+    fn selection_dialog_from_start_skips_extraction_and_submits_once() {
+        let io = FakeScheduledIo::new(View::Dialog);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("draft extraction skipped"));
+        let counts = io.counts();
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        assert_eq!(counts.clear, 0, "no destructive clear");
+    }
+
+    #[test]
+    fn draft_save_failure_zero_clear() {
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.save_fails.set(true);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("draft archive save failed"));
+        let counts = io.counts();
+        assert_eq!(counts.clear, 0, "save failure must prevent any clear");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        assert!(!error.contains("parked="), "no archive = no parked evidence");
+    }
+
+    #[test]
+    fn clear_scan_failure_keeps_original_recoverable() {
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_clear.borrow_mut().push_back(View::SnapshotError);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("parked="), "parked evidence must be visible");
+        let counts = io.counts();
+        assert!(counts.clear >= 1, "clear was attempted before scan failed");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        // 原件仍可从独立存档回读。
+        let receipt = DraftReceipt::new(SESSION, "t-1", "用户草稿");
+        assert_eq!(io.archived(receipt.buffer()), Some("用户草稿".to_string()));
+    }
+
+    #[test]
+    fn dialog_after_isolation_keeps_archive_and_submits_once() {
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_clear.borrow_mut().push_back(View::Dialog);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("parked="), "keep archived original");
+        let counts = io.counts();
+        assert_eq!(counts.clear, 1);
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+    }
+
+    #[test]
+    fn dialog_after_body_does_not_block_initial_enter() {
+        let io = FakeScheduledIo::new(View::Empty);
+        io.after_body.borrow_mut().push_back(View::Dialog);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("written once"));
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+    }
+
+    #[test]
+    fn foreign_text_after_body_does_not_block_initial_enter() {
+        let t = task("t-1", "hello agent");
+        let text = body_text(&t);
+        let io = FakeScheduledIo::new(View::Empty);
+        // 同 marker 保留 + 外来后缀：旧 contains(marker) 会误判 Clear。
+        io.after_body
+            .borrow_mut()
+            .push_back(View::Foreign(format!("{text} 用户补写：批准部署")));
+        let outcome = run(&io, &t);
+        let (status, _) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+    }
+
+    #[test]
+    fn normal_long_body_written_exactly_once() {
+        let long = "这是一条很长的正文 ".repeat(40);
+        let t = task("t-1", &long);
+        let io = FakeScheduledIo::new(View::Empty);
+        // 第一次 Enter 后原生 marker 出现（本任务关联证据）。
+        io.after_enter_marker.borrow_mut().push_back(1);
+        let outcome = run(&io, &t);
+        let (status, _) = status_of(&outcome);
+        assert_eq!(status, "confirmed");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1, "body must be written exactly once");
+        assert_eq!(counts.enter, 1);
+        assert_eq!(counts.clear, 0);
+    }
+
+    #[test]
+    fn human_intervention_never_triggers_extra_enter() {
+        let io = FakeScheduledIo::new(View::Empty);
+        // 第一次 Enter 后有人手工输入，未产生原生收条；第二次 Enter 必须不补。
+        io.after_enter
+            .borrow_mut()
+            .push_back(View::Foreign("人工介入输入".into()));
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, _) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 1, "no further Enter after intervention");
+    }
+
+    #[test]
+    fn agent_identity_change_does_not_block_initial_enter() {
+        let io = FakeScheduledIo::new(View::Empty);
+        io.agent_after_body.set(Some(ComposerAgent::Claude));
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert!(error.contains("written once"));
+        assert_eq!(io.counts().enter, 1);
+    }
+
+    #[test]
+    fn restore_dialog_does_not_write_back() {
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_enter.borrow_mut().push_back(View::Dialog);
+        io.after_enter_marker.borrow_mut().push_back(1);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, error) = status_of(&outcome);
+        assert_eq!(status, "confirmed");
+        assert!(error.contains("selection dialog"), "restore must be blocked by dialog");
+        assert!(error.contains("parked="), "parked evidence retained");
+        let counts = io.counts();
+        assert_eq!(counts.restore, 0, "no write-back into dialog");
+        assert_eq!(counts.remove, 0, "archive retained");
+    }
+
+    #[test]
+    fn late_marker_is_read_only_no_resend() {
+        let io = FakeScheduledIo::new(View::Empty);
+        io.marker_count.set(1); // 迟到出现的原生记录
+        let confirmed = reconcile_late_marker(&io, SESSION, "[scheduled:t-1]", 0).unwrap();
+        assert!(confirmed);
+        let counts = io.counts();
+        assert_eq!(counts.body, 0);
+        assert_eq!(counts.enter, 0);
+        assert_eq!(counts.clear, 0);
+        assert_eq!(counts.restore, 0);
+        for status in ["pending_confirmation", "unknown", "blocked_manual_action"] {
+            assert!(scheduled_input_reconcile_candidate("agent_message", status));
+        }
+    }
+
+    #[test]
+    fn queued_banner_only_stops_retries_and_stays_pending() {
+        let io = FakeScheduledIo::new(View::Empty);
+        io.queue.set(true);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, note) = status_of(&outcome);
+        assert_eq!(status, "pending_confirmation", "queue banner is NOT a native receipt");
+        assert!(note.contains("native receipt NOT confirmed"));
+        assert_eq!(io.counts().enter, 1, "queue stops extra Enter only");
+        // 父版本兼容路径单列：其把 queue 当 confirmed 是继承语义，非本任务收条。
+        let legacy = submit_scheduled_message(|| Ok(true), || Ok(()), || Ok(false), || {}).unwrap();
+        assert_eq!(legacy, "confirmed", "parent-version legacy, documented separately");
+    }
+
+    #[test]
+    fn legacy_queue_semantics_is_separate_from_runner() {
+        // 本任务 runner 用 StopRetriesOnly：queue 只止重试，保留 pending。
+        let stop = submit_scheduled_message_loop(
+            QueueAcceptanceSemantics::StopRetriesOnly,
+            || Ok(ScheduledEnterDecision::Proceed),
+            || Ok(true),
+            || Ok(()),
+            || Ok(false),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(stop, ScheduledSubmitOutcome::QueuedAwaitingReceipt);
+        // 父版本继承的 LegacyAsReceipt 把任意 queue 横幅当 confirmed：这是
+        // 已知继承缺陷，单列保留、不叫正确收条，也不据此扩生产兼容路径。
+        let legacy = submit_scheduled_message_loop(
+            QueueAcceptanceSemantics::LegacyAsReceipt,
+            || Ok(ScheduledEnterDecision::Proceed),
+            || Ok(true),
+            || Ok(()),
+            || Ok(false),
+            || {},
+        )
+        .unwrap();
+        assert_eq!(legacy, ScheduledSubmitOutcome::Confirmed);
+    }
+
+    #[test]
+    fn non_agent_task_keeps_legacy_single_body_path() {
+        let mut t = task("t-1", "plain paste");
+        t.task_type = "paste".into();
+        let text = t.text.clone();
+        let id = identity(&t, &text);
+        let stage = Cell::new("isolate");
+        let io = FakeScheduledIo::new(View::Dialog); // 即使有弹框也不走预检
+        let outcome = run_scheduled_delivery(&io, &t, &text, &id, &stage);
+        let (status, _) = status_of(&outcome);
+        assert_eq!(status, "unverified");
+        assert_eq!(io.counts().body, 1);
+        assert_eq!(io.counts().enter, 1);
+        assert_eq!(io.counts().clear, 0);
+    }
+
+    #[test]
+    fn extraction_failures_keep_archive_and_still_submit() {
+        // blocked：隔离后弹框（存档成功、正文未写）。
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_clear.borrow_mut().push_back(View::Dialog);
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        assert!(error.contains("parked="));
+
+        // unknown：清空后 scan 失败。
+        let io2 = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io2.after_clear.borrow_mut().push_back(View::SnapshotError);
+        let (status2, error2) = status_of(&run(&io2, &t));
+        assert_eq!(status2, "unverified");
+        assert!(error2.contains("parked="));
+        assert_eq!(io2.counts().remove, 0, "archive must not be deleted");
+    }
+
+    #[test]
+    fn successful_restore_is_readonly_safe_and_removes_archive() {
+        // 正常隔离 -> 正常投递 -> 安全空框恢复，应写回一次并清理存档，无自动 Enter。
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_enter_marker.borrow_mut().push_back(1);
+        let t = task("t-1", "hello agent");
+        let outcome = run(&io, &t);
+        let (status, note) = status_of(&outcome);
+        assert_eq!(status, "confirmed");
+        assert!(!note.contains("parked="), "archive cleaned after safe restore");
+        let counts = io.counts();
+        assert_eq!(counts.restore, 1);
+        assert_eq!(counts.remove, 1);
+        assert_eq!(counts.enter, 1, "restore must not add an Enter");
+    }
+
+    // ===================== R16 必修反例（同一 runner，真实副作用计数） =====================
+
+    #[test]
+    fn draft_changed_after_save_zero_clear() {
+        // 存档 A 之后、清空之前用户改成 B：必须 0 clear，保留 A。
+        let io = FakeScheduledIo::new(View::Foreign("草稿A".into()));
+        io.after_save
+            .borrow_mut()
+            .push_back(View::Foreign("草稿B".into()));
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        assert!(error.contains("content changed"), "state the observed change");
+        assert!(error.contains("parked="), "original A stays referenced");
+        let counts = io.counts();
+        assert_eq!(counts.save, 1);
+        assert_eq!(counts.clear, 0, "changed content must not be cleared");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        let receipt = DraftReceipt::new(SESSION, "t-1", "草稿A");
+        assert_eq!(io.archived(receipt.buffer()), Some("草稿A".to_string()));
+    }
+
+    #[test]
+    fn new_draft_after_single_clear_not_cleared_again() {
+        // 第一次清空后出现新稿 B：不二次清空，继续首次正文和 Enter。
+        let io = FakeScheduledIo::new(View::Foreign("草稿A".into()));
+        io.after_clear
+            .borrow_mut()
+            .push_back(View::Foreign("草稿B".into()));
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        assert!(error.contains("no further clear"), "single-clear policy stated");
+        let counts = io.counts();
+        assert_eq!(counts.clear, 1, "exactly one destructive clear");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        let receipt = DraftReceipt::new(SESSION, "t-1", "草稿A");
+        assert_eq!(io.archived(receipt.buffer()), Some("草稿A".to_string()));
+    }
+
+    #[test]
+    fn empty_after_body_without_receipt_submits_once() {
+        // 正文写完但输入框已空、marker=0：Empty 不再阻断首次 Enter。
+        let io = FakeScheduledIo::new(View::Empty);
+        io.after_body.borrow_mut().push_back(View::Empty);
+        let t = task("t-1", "hello agent");
+        let (status, _) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+    }
+
+    #[test]
+    fn empty_after_first_enter_without_receipt_no_retry() {
+        // 首 Enter 后回到 Empty、无 marker、无 queue：不得再补 Enter。
+        let io = FakeScheduledIo::new(View::Empty);
+        io.after_enter.borrow_mut().push_back(View::Empty);
+        let t = task("t-1", "hello agent");
+        let (status, _) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 1, "no retry Enter without native receipt");
+    }
+
+    #[test]
+    fn restore_foreign_or_agent_change_no_writeback() {
+        // (a) 恢复读取期间界面出现新稿：不写回、不删存档。
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_enter_marker.borrow_mut().push_back(1);
+        io.after_enter
+            .borrow_mut()
+            .push_back(View::Foreign("新稿B".into()));
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "confirmed");
+        assert!(error.contains("not safely empty"), "state the refusal");
+        assert!(error.contains("parked="));
+        let counts = io.counts();
+        assert_eq!(counts.restore, 0);
+        assert_eq!(counts.remove, 0);
+
+        // (b) 恢复前 agent 身份变化：不写回、不删存档。
+        let io2 = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io2.after_enter_marker.borrow_mut().push_back(1);
+        io2.agent_after_enter.set(Some(ComposerAgent::Claude));
+        let (status2, error2) = status_of(&run(&io2, &t));
+        assert_eq!(status2, "confirmed");
+        assert!(error2.contains("agent identity changed"));
+        assert_eq!(io2.counts().restore, 0);
+        assert_eq!(io2.counts().remove, 0);
+    }
+
+    #[test]
+    fn tampered_or_unpresented_restore_retains_archive() {
+        // (a) 读回正文与凭据 hash 不符：显式拒绝、无 restore、不删证据。
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_enter_marker.borrow_mut().push_back(1);
+        io.tamper_archive_on_read.set(true);
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "confirmed");
+        assert!(error.contains("hash mismatch"), "surface the integrity failure");
+        assert!(error.contains("parked="));
+        assert_eq!(io.counts().restore, 0);
+        assert_eq!(io.counts().remove, 0);
+
+        // (b) 写回返回 Ok 但界面未呈现原文：不删持久原件。
+        let io2 = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io2.after_enter_marker.borrow_mut().push_back(1);
+        io2.restore_not_presented.set(true);
+        let (status2, note2) = status_of(&run(&io2, &t));
+        assert_eq!(status2, "confirmed");
+        assert!(note2.contains("not fully presented"), "write Ok alone is not proof");
+        assert!(note2.contains("parked="));
+        assert_eq!(io2.counts().restore, 1);
+        assert_eq!(io2.counts().remove, 0, "archive retained without presentation proof");
+    }
+
+    #[test]
+    fn agent_change_after_save_zero_clear() {
+        // 存档 A 之后、清空之前 agent 身份变化：必须 0 clear，保留 A。
+        let io = FakeScheduledIo::new(View::Foreign("草稿A".into()));
+        io.agent_after_save.set(Some(ComposerAgent::Claude));
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        assert!(error.contains("agent identity changed"), "state the identity change");
+        assert!(error.contains("parked="), "original A stays referenced");
+        let counts = io.counts();
+        assert_eq!(counts.save, 1);
+        assert_eq!(counts.clear, 0, "agent change before clear must stop the clear");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        let receipt = DraftReceipt::new(SESSION, "t-1", "草稿A");
+        assert_eq!(io.archived(receipt.buffer()), Some("草稿A".to_string()));
+    }
+
+    #[test]
+    fn empty_after_body_with_late_marker_confirms_without_enter() {
+        // 正文写完但输入框已空、迟到原生 marker 已落盘：只读转 confirmed，零 Enter。
+        let io = FakeScheduledIo::new(View::Empty);
+        io.after_body.borrow_mut().push_back(View::Empty);
+        io.late_marker_after_baseline.set(Some(1));
+        let t = task("t-1", "hello agent");
+        let (status, _) = status_of(&run(&io, &t));
+        assert_eq!(status, "confirmed");
+        let counts = io.counts();
+        assert_eq!(counts.body, 1);
+        assert_eq!(counts.enter, 0, "native acceptance observed before Enter");
+    }
+
+    #[test]
+    fn unrecognized_after_save_zero_clear() {
+        // 存档 A 之后、清空之前 composer 不可识别（Unrecognized）：0 clear，保留 A。
+        let io = FakeScheduledIo::new(View::Foreign("草稿A".into()));
+        io.after_save.borrow_mut().push_back(View::Unrecognized);
+        let t = task("t-1", "hello agent");
+        let (status, error) = status_of(&run(&io, &t));
+        assert_eq!(status, "unverified");
+        assert!(error.contains("changed or unrecognized"), "state the unrecognized composer");
+        assert!(error.contains("parked="), "original A stays referenced");
+        let counts = io.counts();
+        assert_eq!(counts.save, 1);
+        assert_eq!(counts.clear, 0, "unrecognized composer must not be cleared");
+        assert_eq!(counts.body, 1, "extraction failure never withholds the body");
+        assert_eq!(counts.enter, 1, "first Enter is independent of composer parsing");
+        let receipt = DraftReceipt::new(SESSION, "t-1", "草稿A");
+        assert_eq!(io.archived(receipt.buffer()), Some("草稿A".to_string()));
+    }
+
+    #[test]
+    fn restore_read_window_changes_no_writeback() {
+        // read_draft 已取到正确原件、返回前界面/agent 变化：紧邻写回复检拦住，
+        // read=1、restore=0、remove=0、原件保留、无额外 Enter；送达 confirmed
+        // 与恢复失败说明分离，不混成一个状态。after_enter 注入的原例保留，
+        // 本例专测 read 期间变化。
+        // (a) read 期间出现弹窗。
+        let io = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io.after_enter_marker.borrow_mut().push_back(1);
+        io.after_read.borrow_mut().push_back(View::Dialog);
+        let t = task("t-1", "hello agent");
+        let (status, note) = status_of(&run(&io, &t));
+        assert_eq!(status, "confirmed", "delivery status stays separate from restore");
+        assert!(note.contains("selection dialog"), "restore blocked by dialog after read");
+        assert!(note.contains("parked="));
+        let counts = io.counts();
+        assert_eq!(counts.read, 1);
+        assert_eq!(counts.restore, 0, "dialog after read must stop write-back");
+        assert_eq!(counts.remove, 0, "archive retained");
+        assert_eq!(counts.enter, 1, "no extra Enter");
+        let receipt = DraftReceipt::new(SESSION, "t-1", "用户草稿");
+        assert_eq!(io.archived(receipt.buffer()), Some("用户草稿".to_string()));
+
+        // (b) read 期间出现新稿 B。
+        let io2 = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io2.after_enter_marker.borrow_mut().push_back(1);
+        io2.after_read
+            .borrow_mut()
+            .push_back(View::Foreign("新稿B".into()));
+        let (status2, note2) = status_of(&run(&io2, &t));
+        assert_eq!(status2, "confirmed");
+        assert!(note2.contains("not safely empty"), "foreign draft after read blocks restore");
+        assert!(note2.contains("parked="));
+        assert_eq!(io2.counts().read, 1);
+        assert_eq!(io2.counts().restore, 0);
+        assert_eq!(io2.counts().remove, 0);
+        assert_eq!(io2.counts().enter, 1);
+        assert_eq!(io2.archived(receipt.buffer()), Some("用户草稿".to_string()));
+
+        // (c) read 期间 agent 类别切换。
+        let io3 = FakeScheduledIo::new(View::Foreign("用户草稿".into()));
+        io3.after_enter_marker.borrow_mut().push_back(1);
+        io3.agent_after_read.set(Some(ComposerAgent::Claude));
+        let (status3, note3) = status_of(&run(&io3, &t));
+        assert_eq!(status3, "confirmed");
+        assert!(
+            note3.contains("agent identity changed"),
+            "agent switch after read blocks restore"
+        );
+        assert!(note3.contains("parked="));
+        assert_eq!(io3.counts().read, 1);
+        assert_eq!(io3.counts().restore, 0);
+        assert_eq!(io3.counts().remove, 0);
+        assert_eq!(io3.counts().enter, 1);
+        assert_eq!(io3.archived(receipt.buffer()), Some("用户草稿".to_string()));
     }
 }

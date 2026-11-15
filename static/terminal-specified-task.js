@@ -73,6 +73,7 @@ function terminalSpecifiedTaskDom() {
     preset: document.getElementById("terminal-specified-task-preset"),
     agentList: document.getElementById("terminal-specified-task-agent-list"),
     presetField: document.getElementById("terminal-specified-task-preset-field"),
+    presetNote: document.getElementById("terminal-specified-task-preset-note"),
     sessionOnly: document.getElementById("terminal-specified-task-session-only"),
     sessionOnlyLabel: document.querySelector(".terminal-specified-task-session-only-label"),
     otherCommandField: document.getElementById("terminal-specified-task-other-command-field"),
@@ -958,7 +959,8 @@ function syncTerminalSpecifiedTaskForm() {
   const hasAccounts = terminalSpecifiedTaskHasAccounts(agent);
   if (dom.presetField) dom.presetField.hidden = !hasAccounts;
   const presetLabel = dom.presetField?.querySelector("span");
-  if (presetLabel) presetLabel.textContent = terminalSpecifiedTaskAccountLabel(agent);
+  // 下拉字段标题保持中性，不重复上方已选 Agent 名称；带 Agent 名的文案只用于状态提示。
+  if (presetLabel) presetLabel.textContent = "账号";
   if (dom.sessionOnlyLabel) dom.sessionOnlyLabel.hidden = !fixed || !hasAccounts;
   if (dom.preset) dom.preset.required = hasAccounts;
   if (dom.otherCommandField) dom.otherCommandField.hidden = !isOther;
@@ -1130,6 +1132,353 @@ function terminalSpecifiedTaskRememberPreset(agent, id, kind) {
   }
 }
 
+const TERMINAL_ACCOUNT_SORT_MODES = [
+  "credits",
+  "recent_switch",
+  "switch_count",
+  "recent_use",
+  "name",
+];
+const TERMINAL_ACCOUNT_SORT_LABELS = {
+  credits: "按积分/额度从高到低（无数据按最近切换）",
+  recent_switch: "按最近切换时间",
+  switch_count: "按切换次数",
+  recent_use: "按最近使用",
+  name: "按账号名称",
+};
+
+function normalizeTerminalAccountSort(value) {
+  const mode = String(value ?? "").trim();
+  return TERMINAL_ACCOUNT_SORT_MODES.includes(mode) ? mode : "credits";
+}
+
+function terminalSpecifiedTaskAccountSort() {
+  return normalizeTerminalAccountSort(
+    typeof state === "object" && state ? state.terminalAccountSort : "",
+  );
+}
+
+function terminalSpecifiedTaskFormatCredits(value) {
+  const credits = Number(value);
+  if (!Number.isFinite(credits)) {
+    return "";
+  }
+  const rounded = Math.round(credits * 100) / 100;
+  return String(Number.isInteger(rounded) ? rounded : rounded.toFixed(2));
+}
+
+function terminalSpecifiedTaskRelativeTime(timestamp, now = Date.now()) {
+  const value = Number(timestamp) || 0;
+  if (!value) {
+    return "";
+  }
+  const diff = Math.max(0, now - value);
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  return `${Math.floor(diff / 86_400_000)} 天前`;
+}
+
+function terminalSpecifiedTaskClockText(timestamp) {
+  const value = Number(timestamp) || 0;
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  const pad = (part) => String(part).padStart(2, "0");
+  const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate();
+  return sameDay ? clock : `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${clock}`;
+}
+
+function terminalSpecifiedTaskQuotaPercent(quotaCache) {
+  const groups = Array.isArray(quotaCache?.quotaSummary?.groups) ? quotaCache.quotaSummary.groups : [];
+  const fractions = [];
+  for (const group of groups) {
+    const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
+    for (const bucket of buckets) {
+      if (bucket?.disabled === true) {
+        continue;
+      }
+      const fraction = Number(bucket?.remainingFraction != null ? bucket.remainingFraction : bucket?.remaining_fraction);
+      if (Number.isFinite(fraction)) {
+        fractions.push(Math.max(0, Math.min(1, fraction)));
+      }
+    }
+  }
+  if (fractions.length === 0 && quotaCache?.models) {
+    for (const [key, model] of Object.entries(quotaCache.models)) {
+      if (model?.disabled === true) continue;
+      const fraction = Number(model?.quotaInfo?.remainingFraction != null ? model.quotaInfo.remainingFraction : model?.quotaInfo?.remaining_fraction);
+      if (Number.isFinite(fraction)) {
+        fractions.push(Math.max(0, Math.min(1, fraction)));
+      }
+    }
+  }
+  if (fractions.length === 0) {
+    return NaN;
+  }
+  return Math.min(...fractions) * 100;
+}
+
+function terminalSpecifiedTaskClassifyAgyGroup(group) {
+  const text = [
+    group?.displayName,
+    group?.name,
+    group?.description,
+    ...(Array.isArray(group?.buckets)
+      ? group.buckets.map((b) => b?.bucketId || b?.id || b?.displayName || b?.name)
+      : []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  if (text.includes("argon")) return "argon";
+  if (text.includes("gemini")) return "gemini";
+  if (text.includes("claude") || text.includes("3p") || text.includes("gpt")) return "claude";
+  return "other";
+}
+
+function terminalSpecifiedTaskAgyBucketFraction(groups, models, provider, window) {
+  for (const group of groups) {
+    if (terminalSpecifiedTaskClassifyAgyGroup(group) === provider) {
+      const buckets = Array.isArray(group?.buckets) ? group.buckets : [];
+      for (const bucket of buckets) {
+        const key = String(bucket?.window || bucket?.bucketId || bucket?.id || "").toLowerCase();
+        if (key.includes(window)) {
+          const fraction = Number(bucket?.remainingFraction != null ? bucket.remainingFraction : bucket?.remaining_fraction);
+          if (Number.isFinite(fraction)) {
+            return Math.max(0, Math.min(1, fraction));
+          }
+        }
+      }
+    }
+  }
+  if (provider === "gemini" && models) {
+    const fractions = [];
+    for (const [key, val] of Object.entries(models)) {
+      const lower = key.toLowerCase();
+      if (!lower.includes("gemini") || lower.includes("argon") || val?.disabled === true) continue;
+      const qi = val?.quotaInfo || val?.quota_info;
+      const frac = Number(qi?.remainingFraction != null ? qi.remainingFraction : qi?.remaining_fraction);
+      if (Number.isFinite(frac)) {
+        fractions.push(Math.max(0, Math.min(1, frac)));
+      }
+    }
+    if (fractions.length > 0) {
+      if (window === "weekly") return 1.0;
+      return Math.min(...fractions);
+    }
+  }
+  if (provider === "argon" && models) {
+    const fractions = [];
+    for (const [key, val] of Object.entries(models)) {
+      const lower = key.toLowerCase();
+      if (!lower.includes("argon") || val?.disabled === true) continue;
+      const qi = val?.quotaInfo || val?.quota_info;
+      const frac = Number(qi?.remainingFraction != null ? qi.remainingFraction : qi?.remaining_fraction);
+      if (Number.isFinite(frac)) {
+        fractions.push(Math.max(0, Math.min(1, frac)));
+      }
+    }
+    if (fractions.length > 0 && window === "weekly") {
+      return Math.min(...fractions);
+    }
+  }
+  return null;
+}
+
+function terminalSpecifiedTaskFormatAgyPercent(fraction) {
+  if (fraction == null || !Number.isFinite(fraction)) return null;
+  const pct = Math.round(Math.max(0, Math.min(1, fraction)) * 1000) / 10;
+  return Number.isInteger(pct) ? `${pct}%` : `${pct.toFixed(1)}%`;
+}
+
+function terminalSpecifiedTaskFormatAgyProvider(groups, models, provider, displayName) {
+  const weekly = terminalSpecifiedTaskFormatAgyPercent(
+    terminalSpecifiedTaskAgyBucketFraction(groups, models, provider, "weekly"),
+  );
+  const h5 = terminalSpecifiedTaskFormatAgyPercent(
+    terminalSpecifiedTaskAgyBucketFraction(groups, models, provider, "5h"),
+  );
+  if (!weekly && !h5) return "";
+  const parts = [];
+  if (weekly) parts.push(`周${weekly}`);
+  if (h5) parts.push(`5h${h5}`);
+  return `${displayName} ${parts.join(" ")}`;
+}
+
+function terminalSpecifiedTaskAgyQuotaLabel(quotaCache) {
+  if (!quotaCache || typeof quotaCache !== "object") return "";
+  const groups = Array.isArray(quotaCache?.quotaSummary?.groups) ? quotaCache.quotaSummary.groups : [];
+  const models = (quotaCache?.models && typeof quotaCache.models === "object") ? quotaCache.models : null;
+  const sections = [];
+  const claudeText = terminalSpecifiedTaskFormatAgyProvider(groups, models, "claude", "Claude");
+  if (claudeText) sections.push(claudeText);
+  const geminiText = terminalSpecifiedTaskFormatAgyProvider(groups, models, "gemini", "Gemini");
+  if (geminiText) sections.push(geminiText);
+  const argonText = terminalSpecifiedTaskFormatAgyProvider(groups, models, "argon", "Argon");
+  if (argonText) sections.push(argonText);
+  for (const group of groups) {
+    if (terminalSpecifiedTaskClassifyAgyGroup(group) === "other") {
+      const gName = group?.displayName || group?.name || "其他";
+      const gBuckets = Array.isArray(group?.buckets) ? group.buckets : [];
+      const parts = [];
+      for (const b of gBuckets) {
+        if (b?.disabled === true) continue;
+        const frac = Number(b?.remainingFraction != null ? b.remainingFraction : b?.remaining_fraction);
+        const pct = terminalSpecifiedTaskFormatAgyPercent(frac);
+        if (pct) {
+          const w = String(b?.window || b?.bucketId || b?.id || "").toLowerCase();
+          const wLabel = w.includes("week") ? "周" : w.includes("5h") ? "5h" : (b.displayName || b.name || "额度");
+          parts.push(`${wLabel}${pct}`);
+        }
+      }
+      if (parts.length > 0) {
+        sections.push(`${gName} ${parts.join(" ")}`);
+      }
+    }
+  }
+  if (sections.length > 0) return `额度: ${sections.join(" | ")}`;
+  return "";
+}
+
+function terminalSpecifiedTaskAccountPreset(item, agent) {
+  const preset = { ...item };
+  preset.kind = item.kind || (agent === "claude" ? "claude" : agent === "codex" ? "api" : agent);
+  preset.name = item.nickname || item.name || item.email || item.enterpriseName || item.id;
+  preset.active = item.active === true || item.current === true;
+  preset.favorite = item.favorite === true;
+  preset.switchCount = Number(item.switch_count ?? item.switchCount ?? 0) || 0;
+  preset.lastSwitchAt = Number(item.last_switch_at ?? item.lastSwitchAt ?? 0) || 0;
+  preset.creditsScore = Number.NaN;
+  preset.creditsLabel = "";
+  preset.creditsUpdatedAt = 0;
+  if (agent === "codebuddy" && item.credits && typeof item.credits === "object") {
+    preset.creditsScore = Number(item.credits.totalRemaining);
+    preset.creditsUpdatedAt = Number(item.credits.updatedAt) || 0;
+  }
+  if (agent === "agy") {
+    const percent = terminalSpecifiedTaskQuotaPercent(item.quota_cache);
+    if (Number.isFinite(percent)) {
+      preset.creditsScore = percent;
+      preset.creditsUpdatedAt = (Number(item.quota_cached_at) || 0) * 1000;
+    }
+    const fullQuotaLabel = terminalSpecifiedTaskAgyQuotaLabel(item.quota_cache);
+    if (fullQuotaLabel) {
+      preset.creditsLabel = fullQuotaLabel;
+    } else if (Number.isFinite(percent)) {
+      preset.creditsLabel = `额度 ${percent.toFixed(0)}%`;
+    }
+  }
+  return preset;
+}
+
+// 当前账号始终排在最前；其余账号按设置里的排序方式排列。
+// 没有积分/额度快照的账号在“按积分”模式下回落到最近切换时间。
+function terminalSpecifiedTaskSortAccountPresets(presets, agent) {
+  const mode = terminalSpecifiedTaskAccountSort();
+  const scoreOf = (item) => {
+    const score = Number(item.creditsScore);
+    return Number.isFinite(score) ? score : Number.NEGATIVE_INFINITY;
+  };
+  const switchDelta = (left, right) =>
+    (Number(right.lastSwitchAt) || 0) - (Number(left.lastSwitchAt) || 0);
+  // 收藏只作为同序时的稳定兜底，不覆盖用户选择的排序方式。
+  const ordered = agent === "codex" || agent === "claude"
+    ? presets.slice().sort(
+        (left, right) => Number(right.favorite === true) - Number(left.favorite === true),
+      )
+    : presets.slice();
+  const base = mode === "recent_use"
+    ? terminalSpecifiedTaskSortPresets(ordered, agent)
+    : ordered.sort((left, right) => {
+        if (mode === "recent_switch") {
+          return switchDelta(left, right);
+        }
+        if (mode === "switch_count") {
+          return (Number(right.switchCount) || 0) - (Number(left.switchCount) || 0);
+        }
+        if (mode === "name") {
+          return String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN");
+        }
+        const scoreDelta = scoreOf(right) - scoreOf(left);
+        if (!Number.isNaN(scoreDelta) && scoreDelta !== 0) {
+          return scoreDelta;
+        }
+        return switchDelta(left, right);
+      });
+  return [
+    ...base.filter((item) => item.active === true),
+    ...base.filter((item) => item.active !== true),
+  ];
+}
+
+function terminalSpecifiedTaskAccountOptionText(item, agent, now) {
+  const kindPrefix = agent === "codex"
+    ? `[${item.kind === "oauth" ? "OAuth" : "API"}] `
+    : "";
+  const parts = [];
+  if (item.active) {
+    parts.push("当前");
+  }
+  parts.push(item.name || item.id);
+  const model = typeof specifiedPresetModel === "function"
+    ? specifiedPresetModel(item, agent)
+    : "";
+  if (model) {
+    parts.push(model);
+  }
+  if (item.creditsLabel) {
+    parts.push(item.creditsLabel);
+  } else if (Number.isFinite(Number(item.creditsScore))) {
+    parts.push(`积分 ${terminalSpecifiedTaskFormatCredits(item.creditsScore)}`);
+  } else if (agent === "codebuddy") {
+    parts.push("积分未知");
+  }
+  if (item.lastSwitchAt) {
+    parts.push(
+      `上次切换 ${terminalSpecifiedTaskClockText(item.lastSwitchAt)}（${terminalSpecifiedTaskRelativeTime(item.lastSwitchAt, now)}）`,
+    );
+  } else {
+    parts.push("切换时间未记录");
+  }
+  return `${kindPrefix}${parts.join(" · ")}`;
+}
+
+function renderTerminalSpecifiedTaskPresetNote(agent, presets, now = Date.now()) {
+  const { presetNote } = terminalSpecifiedTaskDom();
+  if (!presetNote) {
+    return;
+  }
+  if (presets.length === 0) {
+    presetNote.hidden = true;
+    presetNote.textContent = "";
+    return;
+  }
+  const parts = [`现在 ${terminalSpecifiedTaskClockText(now)}`];
+  const snapshotAt = presets.reduce(
+    (latest, item) => Math.max(latest, Number(item.creditsUpdatedAt) || 0),
+    0,
+  );
+  if (presets.some((item) => Number.isFinite(Number(item.creditsScore)))) {
+    const label = agent === "agy" ? "额度快照" : "积分快照";
+    parts.push(
+      snapshotAt ? `${label} ${terminalSpecifiedTaskRelativeTime(snapshotAt, now)}更新` : `暂无${label}`,
+    );
+  }
+  parts.push(TERMINAL_ACCOUNT_SORT_LABELS[terminalSpecifiedTaskAccountSort()]);
+  presetNote.hidden = false;
+  presetNote.textContent = parts.join(" · ");
+}
+
 function terminalSpecifiedTaskSortPresets(presets, agent) {
   const ranks = new Map(terminalSpecifiedTaskReadRecentPresets(agent).map((key, index) => [key, index]));
   const rank = (item) => ranks.get(terminalSpecifiedTaskPresetKey(
@@ -1150,6 +1499,7 @@ async function loadTerminalSpecifiedTaskPresets() {
   const agent = terminalSpecifiedTaskAgent();
   if (!terminalSpecifiedTaskHasAccounts(agent)) {
     preset.disabled = true;
+    renderTerminalSpecifiedTaskPresetNote(agent, []);
     return;
   }
   const previous = preset.dataset.agent === agent ? preset.value : "";
@@ -1159,9 +1509,7 @@ async function loadTerminalSpecifiedTaskPresets() {
     if (agent === "codex") {
       const response = await requestJson("/api/auth/codex-accounts");
       const accounts = Array.isArray(response?.accounts) ? response.accounts : [];
-      presets = accounts
-        .slice()
-        .sort((left, right) => Number(right.favorite === true) - Number(left.favorite === true));
+      presets = accounts.map((item) => terminalSpecifiedTaskAccountPreset(item, agent));
     } else if (agent === "claude") {
       const response = await requestJson("/api/auth/claude-presets");
       const raw = Array.isArray(response?.presets) ? response.presets : [];
@@ -1169,38 +1517,23 @@ async function loadTerminalSpecifiedTaskPresets() {
         .filter((item) => item?.id && ![
           item.name, item.provider_name, item.account, item.base_url, item.endpoint, item.management_url,
         ].some((value) => /sub2api/i.test(String(value || ""))))
-        .slice()
-        .sort((left, right) => Number(right.favorite === true) - Number(left.favorite === true));
+        .map((item) => terminalSpecifiedTaskAccountPreset(item, agent));
     } else if (agent === "codebuddy") {
       const response = await requestJson("/api/auth/codebuddy-accounts");
       const raw = Array.isArray(response) ? response : (Array.isArray(response?.accounts) ? response.accounts : []);
-      presets = raw.map((item) => ({
-        id: item.id,
-        name: item.nickname || item.name || item.email || item.enterpriseName || item.id,
-        active: Boolean(item.active),
-        kind: "codebuddy",
-      }));
+      presets = raw.map((item) => terminalSpecifiedTaskAccountPreset(item, agent));
     } else if (agent === "devin") {
       const response = await requestJson("/api/auth/devin-accounts");
       const raw = Array.isArray(response) ? response : (Array.isArray(response?.accounts) ? response.accounts : []);
-      presets = raw.map((item) => ({
-        id: item.id,
-        name: item.name || item.email || item.id,
-        active: Boolean(item.active),
-        kind: "devin",
-      }));
+      presets = raw.map((item) => terminalSpecifiedTaskAccountPreset(item, agent));
     } else if (agent === "agy") {
       const response = await requestJson("/api/agy/presets");
       const raw = Array.isArray(response) ? response : (Array.isArray(response?.presets) ? response.presets : []);
-      presets = raw.map((item) => ({
-        id: item.id,
-        name: item.name || item.email || item.id,
-        active: Boolean(item.current || item.active),
-        kind: "agy",
-      }));
+      presets = raw.map((item) => terminalSpecifiedTaskAccountPreset(item, agent));
     }
 
-    presets = terminalSpecifiedTaskSortPresets(presets, agent);
+    presets = terminalSpecifiedTaskSortAccountPresets(presets, agent);
+    const now = Date.now();
     const recent = new Set(terminalSpecifiedTaskReadRecentPresets(agent));
     const first = presets[0];
     const recentId = first && recent.has(terminalSpecifiedTaskPresetKey(
@@ -1213,32 +1546,33 @@ async function loadTerminalSpecifiedTaskPresets() {
         break;
       }
     }
-    const preferredId = agent === "agy"
-      ? (activeId || (presets.some((item) => item.id === previous) ? previous : recentId))
-      : (presets.some((item) => item.id === previous) ? previous : recentId);
+    const preferredId = presets.some((item) => item.id === previous)
+      ? previous
+      : (activeId || recentId);
     preset.dataset.activeId = activeId;
 
     preset.replaceChildren();
     for (const item of presets) {
       const option = document.createElement("option");
-      const model = specifiedPresetModel(item, agent);
       option.value = item.id;
       option.dataset.kind = item.kind || (agent === "claude" ? "claude" : "api");
-      const kindLabel = agent === "codex" ? `[${option.dataset.kind === "oauth" ? "OAuth" : "API"}] ` : "";
-      const currentMarker = item.active ? " (当前)" : "";
-      option.textContent = `${kindLabel}${item.name || item.id}${model ? ` · ${model}` : ""}${currentMarker}`;
+      const text = terminalSpecifiedTaskAccountOptionText(item, agent, now);
+      option.textContent = text;
+      option.title = text;
       option.selected = item.id === preferredId || (!preferredId && item.active);
       preset.append(option);
     }
     if (!preset.value && presets[0]) {
       preset.value = presets[0].id;
     }
+    preset.title = preset.selectedOptions?.[0]?.title || preset.selectedOptions?.[0]?.textContent || "";
     if (presets.length === 0) {
       const option = document.createElement("option");
       option.value = "";
       option.textContent = "没有可用账号";
       preset.append(option);
     }
+    renderTerminalSpecifiedTaskPresetNote(agent, presets, now);
     preset.dataset.agent = agent;
     preset.disabled = Boolean(terminalSpecifiedTaskId);
   } catch (error) {
@@ -1483,6 +1817,11 @@ async function launchTerminalSpecifiedPreset(cwd, options = {}) {
     if (!created) {
       throw new Error("交互终端创建失败。");
     }
+    for (const session of createdSessions) {
+      if (typeof insertOrReplaceSession === "function" && session?.id) {
+        insertOrReplaceSession(session);
+      }
+    }
     if (options.autoCompact === false) {
       disableAutoCompactForSession(created.id);
     }
@@ -1493,7 +1832,7 @@ async function launchTerminalSpecifiedPreset(cwd, options = {}) {
       const boundedSuffix = terminalNameSuffix.slice(0, availableSuffixLength).trim();
       terminalName = boundedSuffix ? `${created.name}_${boundedSuffix}` : "";
     }
-    if (terminalName) {
+    if (terminalName && (!options.createGroup || createCount < 2)) {
       created = await renameTerminalForTool(created.id, terminalName, cwd);
     }
     const groupId = String(options.groupId || "").trim();
@@ -1573,6 +1912,7 @@ async function launchTerminalSpecifiedPreset(cwd, options = {}) {
     }
     return created;
   } catch (launchError) {
+    console.error("自组群/指定预设启动失败:", launchError);
     if (createdSessions.length > 1) {
       const deletedIds = new Set();
       for (const session of [...createdSessions].reverse()) {
@@ -1593,7 +1933,8 @@ async function launchTerminalSpecifiedPreset(cwd, options = {}) {
         preferredSessionId: previousSessionId,
         forcePreferredSession: true,
       });
-      throw new Error(`自组群启动失败，已清理 ${deletedIds.size} 个新终端。`);
+      const errorDetail = launchError?.message || String(launchError);
+      throw new Error(`自组群启动失败（${errorDetail}），已清理 ${deletedIds.size} 个新终端。`);
     }
     if (!created?.id) {
       throw launchError;
@@ -1618,7 +1959,7 @@ function terminalSpecifiedTaskSelectedGroupRole() {
   const dom = terminalSpecifiedTaskDom();
   if (dom.joinGroup?.checked !== true) return "";
   const value = String(dom.groupRole?.value || "").trim();
-  return ["manager", "executor", "reviewer"].includes(value) ? value : "executor";
+  return ["super_admin", "manager", "executor", "reviewer"].includes(value) ? value : "executor";
 }
 
 function terminalSpecifiedTaskCreateGroup() {
@@ -1692,7 +2033,7 @@ async function submitTerminalSpecifiedTask() {
         throw new Error("没找到当前会话 ID，无法生成提问提示词。");
       }
       terminalSpecifiedTaskSetQuestionSessionId(detected.resumeId);
-      const prompt = buildSessionQuestionPrompt(detected.resumeId);
+      const prompt = buildSessionQuestionPrompt(detected.resumeId, detected.program || agent);
       const questionNameSuffix = terminalSpecifiedTaskQuestionNameSuffix(
         dom.terminalName?.value || terminalSpecifiedTaskSourceName,
         dom.terminalNameSuffix?.value,
@@ -1723,16 +2064,21 @@ async function submitTerminalSpecifiedTask() {
       } else {
         let shouldRestore = false;
         let previousActiveId = "";
+        let accountSwitched = false;
         if (terminalSpecifiedTaskHasAccounts(agent) && dom.preset?.value) {
           const selectedAccountId = dom.preset.value;
           const temporary = terminalSpecifiedTaskTemporary();
           previousActiveId = dom.preset.dataset.activeId || "";
-          shouldRestore = agent !== "agy" && temporary && previousActiveId && previousActiveId !== selectedAccountId;
-          await applyTerminalSpecifiedAgentAccount(
-            agent,
-            selectedAccountId,
-            dom.preset.selectedOptions?.[0]?.dataset?.kind,
-          );
+          const needsSwitch = Boolean(selectedAccountId && selectedAccountId !== previousActiveId);
+          if (needsSwitch) {
+            accountSwitched = true;
+            shouldRestore = agent !== "agy" && temporary && previousActiveId;
+            await applyTerminalSpecifiedAgentAccount(
+              agent,
+              selectedAccountId,
+              dom.preset.selectedOptions?.[0]?.dataset?.kind,
+            );
+          }
         }
         launchResult = await (terminalSpecifiedTaskLaunchTerminal || launchTerminalSpecifiedPreset)(
           terminalSpecifiedTaskSourcePath || terminalSpecifiedTaskCurrentPath(),
@@ -1818,20 +2164,25 @@ async function submitTerminalSpecifiedTask() {
           throw new Error("没找到当前会话 ID，无法生成提问提示词。");
         }
         terminalSpecifiedTaskSetQuestionSessionId(detected.resumeId);
-        prompt = buildSessionQuestionPrompt(detected.resumeId);
+        prompt = buildSessionQuestionPrompt(detected.resumeId, detected.program || agent);
       }
       let shouldRestore = false;
       let previousActiveId = "";
+      let accountSwitched = false;
       if (terminalSpecifiedTaskHasAccounts(agent) && dom.preset?.value) {
         const selectedAccountId = dom.preset.value;
         const temporary = terminalSpecifiedTaskTemporary();
         previousActiveId = dom.preset.dataset.activeId || "";
-        shouldRestore = agent !== "agy" && temporary && previousActiveId && previousActiveId !== selectedAccountId;
-        await applyTerminalSpecifiedAgentAccount(
-          agent,
-          selectedAccountId,
-          dom.preset.selectedOptions?.[0]?.dataset?.kind,
-        );
+        const needsSwitch = Boolean(selectedAccountId && selectedAccountId !== previousActiveId);
+        if (needsSwitch) {
+          accountSwitched = true;
+          shouldRestore = agent !== "agy" && temporary && previousActiveId;
+          await applyTerminalSpecifiedAgentAccount(
+            agent,
+            selectedAccountId,
+            dom.preset.selectedOptions?.[0]?.dataset?.kind,
+          );
+        }
       }
       const launchResult = await (terminalSpecifiedTaskLaunchTerminal || launchTerminalSpecifiedPreset)(
         terminalSpecifiedTaskSourcePath || terminalSpecifiedTaskCurrentPath(),
@@ -1894,12 +2245,12 @@ async function submitTerminalSpecifiedTask() {
         const label = terminalSpecifiedTaskAccountLabel(agent);
         setTerminalSpecifiedTaskStatus(`已启动 ${label.replace("账号", "").trim()} 终端 ${launchResult?.name || ""}。`, "ok");
         const temporary = terminalSpecifiedTaskTemporary();
-        reportTerminalSpecifiedTaskPageStatus(
-          temporary
-            ? `已在本终端使用指定 ${label}；全局账号未改变。`
-            : `已切换到指定 ${label} 并启动终端。`,
-          "ok",
-        );
+        const statusMessage = accountSwitched
+          ? (temporary
+              ? `已在本终端使用指定 ${label}；全局账号未改变。`
+              : `已切换到指定 ${label} 并启动终端。`)
+          : `已使用当前 ${label} 启动终端。`;
+        reportTerminalSpecifiedTaskPageStatus(statusMessage, "ok");
       } else {
         const displayLabel = agent === "cdx" ? "cdx" : (terminalSpecifiedTaskAgentCommand(agent)?.label || "其它");
         setTerminalSpecifiedTaskStatus(`已启动 ${displayLabel} 终端 ${launchResult?.name || ""}。`, "ok");
@@ -2086,6 +2437,11 @@ function bindTerminalSpecifiedTaskDialog() {
       syncTerminalSpecifiedTaskForm();
       await loadTerminalSpecifiedTaskPresets();
     });
+  });
+  dom.preset?.addEventListener("change", () => {
+    if (dom.preset) {
+      dom.preset.title = dom.preset.selectedOptions?.[0]?.title || dom.preset.selectedOptions?.[0]?.textContent || "";
+    }
   });
   dom.sessionOnly?.addEventListener("change", () => {
     const scopeVal = dom.sessionOnly.checked ? "terminal" : "global";

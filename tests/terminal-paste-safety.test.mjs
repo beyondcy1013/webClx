@@ -19,13 +19,13 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /id="terminal-paste-schedule"[\s\S]*id="terminal-paste-schedule-confirm"[\s\S]*确认定时[\s\S]*id="terminal-paste-schedule-toggle"[\s\S]*定时发送[\s\S]*id="terminal-paste-submit-enter"/,
+  /id="terminal-paste-schedule"[\s\S]*id="terminal-paste-schedule-confirm"[\s\S]*确认定时[\s\S]*id="terminal-paste-submit-enter"[\s\S]*id="terminal-paste-schedule-toggle"[\s\S]*定时发送/,
   "terminal paste dialog should expose server-side scheduled send controls without replacing paste-and-send",
 );
 
 assert.match(
   terminalHtml,
-  /id="terminal-paste-submit"[\s\S]*type="button"[\s\S]*>粘贴到终端<\/button>[\s\S]*id="terminal-paste-submit-enter"[\s\S]*type="submit"[\s\S]*>粘贴并发送<\/button>/,
+  /id="terminal-paste-submit"[\s\S]*type="button"[\s\S]*>粘贴到终端<\/button>[\s\S]*id="terminal-paste-submit-enter"[\s\S]*type="submit"[\s\S]*>直接发送<\/button>/,
   "terminal paste dialog should make Enter default to paste-and-send instead of paste-only or cancel",
 );
 
@@ -49,13 +49,13 @@ assert.match(
 
 assert.match(
   terminalHtml,
-  /terminal\.js\?v=\d{8}[a-z]+/,
+  /terminal\.js\?v=\d{8}[a-z0-9-]+/,
   "terminal page should bump the terminal.js cache key after terminal input visibility changes",
 );
 
 assert.match(
   terminalHtml,
-  /terminal-paste\.js\?v=20260922-scheduled-status/,
+  /terminal-paste\.js\?v=\d{8}[a-z0-9-]+/,
   "terminal page should bump the terminal paste helper cache key after scheduled-task chip changes",
 );
 

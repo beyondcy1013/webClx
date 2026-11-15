@@ -1081,6 +1081,7 @@ fn stored_auth_preset_from_cpa_export(
         .unwrap_or(loaded_at.saturating_add(index as u64));
 
     Ok(StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: format!("auth-cpa-{loaded_at}-{index}"),
         name,
@@ -1093,6 +1094,7 @@ fn stored_auth_preset_from_cpa_export(
         legacy_secondary_config_value: None,
         auth,
         switch_count: 0,
+        last_switch_at: None,
     })
 }
 
@@ -1493,6 +1495,46 @@ pub fn current_timestamp_secs() -> u64 {
         .as_secs()
 }
 
+pub fn current_timestamp_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// 切换历史保留时长（90 天，毫秒）与条数上限，避免账号文件无限膨胀。
+pub const SWITCH_HISTORY_RETENTION_MS: i64 = 90_i64 * 24 * 60 * 60 * 1000;
+pub const SWITCH_HISTORY_MAX_ENTRIES: usize = 500;
+
+/// 追加一条切换时间戳：历史为空时先从 last_switch_at 播种一次（旧数据迁移，不重写磁盘），
+/// 再按保留时长和条数上限裁剪，最后追加当前时间。调用方负责把 last_switch_at 设为 Some(now)。
+pub fn push_switch_event(history: &mut Vec<i64>, last_switch_at: Option<i64>, now: i64) {
+    if history.is_empty() {
+        if let Some(previous) = last_switch_at.filter(|ts| *ts > 0) {
+            history.push(previous);
+        }
+    }
+    let cutoff = now.saturating_sub(SWITCH_HISTORY_RETENTION_MS);
+    history.retain(|ts| *ts >= cutoff);
+    if history.len() >= SWITCH_HISTORY_MAX_ENTRIES {
+        let drop = history.len() - SWITCH_HISTORY_MAX_ENTRIES + 1;
+        history.drain(..drop);
+    }
+    history.push(now);
+}
+
+/// API 响应使用的切换历史：旧账号没有历史时回退到最近一次切换时间，
+/// 保证窗口统计不会漏掉那条唯一已知的记录，且前端无需再自行播种。
+pub fn effective_switch_history(history: &[i64], last_switch_at: Option<i64>) -> Vec<i64> {
+    if !history.is_empty() {
+        return history.to_vec();
+    }
+    match last_switch_at {
+        Some(ts) if ts > 0 => vec![ts],
+        _ => Vec::new(),
+    }
+}
+
 /// Increment the `switch_count` for the preset matching `preset_id` in place.
 /// Returns `true` if a preset was found and incremented, `false` otherwise.
 /// The caller is responsible for persisting the slice after this call.
@@ -1500,6 +1542,7 @@ pub fn bump_switch_count<T: SwitchCounted>(presets: &mut [T], preset_id: &str) -
     for preset in presets.iter_mut() {
         if preset.preset_id() == preset_id {
             *preset.switch_count_mut() = (*preset.switch_count_mut()).saturating_add(1);
+            preset.record_switch(current_timestamp_millis() as i64);
             return true;
         }
     }

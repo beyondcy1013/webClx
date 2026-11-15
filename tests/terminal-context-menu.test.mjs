@@ -50,8 +50,14 @@ assert.match(
 
 assert.match(
   terminalToolsMenu,
-  /id="terminal-codex-full-access-toggle"[\s\S]*?id="terminal-quick-command-buttons"[\s\S]*?id="terminal-copy-all"[\s\S]*?data-action="copy_all_text"[\s\S]*?>\s*复制全部\s*<\/button>[\s\S]*?id="session-detail-toggle"/,
-  "terminal tools should place full access first, followed by quick commands and copy-all",
+  /id="terminal-quick-command-buttons"[\s\S]*?id="terminal-copy-all"[\s\S]*?data-action="copy_all_text"[\s\S]*?>\s*复制全部\s*<\/button>[\s\S]*?id="session-detail-toggle"/,
+  "terminal tools should place quick commands and copy-all",
+);
+
+assert.doesNotMatch(
+  terminalToolsMenu,
+  /id="terminal-codex-full-access-toggle"/,
+  "terminal tools should not contain codex full access toggle",
 );
 
 assert.match(

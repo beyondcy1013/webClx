@@ -1,7 +1,103 @@
-# Android 客户端可靠性（1.8.21）
+# Android 客户端可靠性与发布
 
-本专题记录 1.8.21 版本针对 Android WebView 客户端做的一轮可靠性收敛，
+本专题记录 Android WebView 客户端的系统栏适配、可靠性与发布经验，
 便于后续排查时区分「当前行为」与「仍开放的后续项」。
+
+## 2026-10-25 系统栏遮挡与安全区域（1.10.24）
+
+- 用户报告导航条进入时间、信号图标区域，其他安卓设备不复现。源码
+  targetSdk 为 35，Android 15 对此目标强制 edge-to-edge；原先只设置
+  主题状态栏颜色，没有给主页面和设置页应用系统栏 inset，不能保证
+  新系统下内容避让。问题属于原生窗口兼容缺口，不是 minSdk 太低；
+  现场设备的系统版本与截图尚未采集，不能据此宣称已复现该设备。
+- `WindowInsetsLayout.install` 是主页面及设置页的唯一安全区域所有者。
+  显式统一 decor edge-to-edge，使用 AndroidX WindowInsetsCompat 获取
+  systemBars、displayCutout、ime 的每边最大值，加在安装时的原始
+  padding 上；重复分发不会累加，横竖屏可重新计算，不使用固定状态栏
+  高度，也不依赖网页 CSS 的 safe-area 或给网页另加一份顶部间距。
+- 原生根布局将 systemBars / displayCutout / ime 一并处理后消费 inset，
+  WebView 接收的视口已经避开系统栏和键盘。IME 与底部导航条取最大值，
+  不相加；保留 manifest 的 adjustResize 供旧系统兼容处理器检测 IME，
+  显式关闭 decor 自动 fit，避免另一个原生所有者重复扣减。
+- 原先 WebView 子节点的独立 IME listener 已删除，根监听器消费前
+  同步 `systemKeyboardVisible`，原有 JS bridge 不变；旧系统由
+  AndroidX 提供兼容检测。主页面 renderer 重建继续复用根监听器。
+- `tests/android-window-insets-jvm.sh` 编译真实 helper，使用最小 Android
+  事件替身验证状态栏、刘海、侧边导航、旋转、重复分发、键盘展开/
+  Back 收起、浮动键盘、原始 padding 恢复、设置页和独立根隔离。
+  此测试不模拟 Android 窗口管理器或 WebView 渲染，不能代替真机测试。
+- 修复提交 `76b0dfb`；1.10.24（versionCode `1010024`）构建请求
+  `022800-18e105f98e96e259` 成功，日志
+  `/home/bin/webclx/compile/runs/20261025T022805-4140091-6204/build-1.log`：
+  26 项契约/IME 策略、16 项 inset helper JVM 回归、27 项更新事务回归
+  全通过，`assembleRelease` / `lintRelease` 成功。最终签名产物
+  `android/app/build/outputs/apk/published/webClx-1.10.24.apk`，size `137782`，
+  SHA-256 `0c671967b8154ea56a414a0e87856830c760e4689e56e37f30facb1cf965b1d8`，
+  包名、min/target SDK 及 v2/v3 发布证书与 1.10.23 一致。
+- 已发布 artifact `1792866565468536493`，本机、局域网、公网原生更新
+  清单均为 1.10.24，版本/大小/哈希/说明与产物一致，三条路径完整下载
+  均与本地 APK 字节一致；公网断点下载返回 206、后缀字节一致。
+  目录当前 3 项，符合保留策略。APK：
+  <http://fpsq.xyz:11112/api/artifacts/download/1792866565468536493/webClx-1.10.24.apk>；
+  下载中心：<http://fpsq.xyz:11112/downloads>。
+- 发布说明原文：「修复部分安卓手机顶部导航与时间、信号图标重叠：主页面及设置页统一避让状态栏、刘海和底部导航区域；横竖屏重新计算安全边距，键盘展开和收起时避免重复压缩终端。」
+  自动更新弹窗沿用 `MainActivity.showUpdatePrompt` 的清单说明展示。
+- **用户验收（2026-10-25）**：1.10.24 发布后，用户反馈「修复成功，经验落盘」，
+  据此关闭根 `todo.md` R8 的顶部导航遮挡故障。证据为用户真机反馈，
+  本机没有模拟器或连接设备实测；未取得具体设备型号和系统版本。
+  不将此反馈扩展为主页面/设置页、所有横竖屏、手势/三键导航、键盘开关
+  组合全覆盖，普通软键的键盘三态验收仍保留 R7。
+
+### 再次出现时的最小排查路径
+
+1. 核对实际安装 APK 的 versionName/versionCode、设备 Android 版本、
+   方向与导航模式，再核对 `SourceRegistry` 的实际更新清单；不能只看源码
+   版本或 `dist` 文件。原生根布局修复需安装新 APK，刷新网页不能替代。
+2. 检查主页面/设置页是否调用统一 helper，采集根 Insets、padding 和
+   WebView 屏幕边界。只改变状态栏颜色不会预留空间；不能用降低 targetSdk、
+   提高 minSdk、固定状态栏高度或额外网页 safe-area 掩盖原生所有权缺口。
+3. 保持根布局唯一处理与消费 Insets、IME 可见性先同步、每边取最大值和
+   原始 padding 幂等；检查子 WebView、decor 自动 fit 或网页是否重复扣减。
+   定向契约与真实 helper JVM 回归经编译队列验证后，核验签名和双源发布，
+   最后记录用户故障场景的真机结果；模拟通过不替代设备验收。
+
+## 2026-10-25 安卓更新通道同步（1.10.23）
+
+- 核对发现源码与 `dist/webClx-1.10.22-android.apk` 均为 1.10.22，
+  但原生 `SourceRegistry.UPDATE_MANIFEST_PATH` 对应的局域网、公网清单仍
+  指向 1.8.21；本地产物存在不等于客户端能检查到更新。版本要同时核对
+  APK 内部 `versionName` / `versionCode` 和安装客户端实际读取的清单。
+- 版本提交 `4b8d041` 将 Cargo 版本及锁文件同步至 1.10.23，Android
+  构建入口据此生成 versionCode `1010023`，高于本地旧产物和已发布版本。
+  本次未修改原生 Java；沿用现有 IME 可见性接口及原发布签名。普通软键
+  保持系统键盘显隐的修复由服务端网页提供，见
+  [输入法复发专题](terminal-mobile-scroll-settle.md#2026-10-25-android-soft-key-ime-recurrence)。
+- 编译队列 `021725-18e105f98e96e257` 成功，日志
+  `/home/bin/webclx/compile/runs/20261025T021730-4017332-3406/build-1.log`：
+  Android 契约与 IME 策略共 25 项通过，真实 UpdateManager 的 JVM 回归
+  27 项通过，`assembleRelease` / `lintRelease` 成功。
+- 最终签名 APK：`android/app/build/outputs/apk/published/webClx-1.10.23.apk`，
+  package `com.webclx.app`，versionName `1.10.23`，versionCode `1010023`，
+  minSdk 24、targetSdk 35，universal（无原生 ABI 库），size `133686`，
+  SHA-256 `39e42dae4a9978d48bd7f3aefd820ffe99be195d8fabf9cdac662b61767c43e0`。
+  v2/v3 签名校验通过，证书 SHA-256
+  `915c0c49a0f788dc67315fb6de093ba22fa3d67cf68102d2c5f962284f8e5ec4`
+  与已发布的 1.8.21 一致。
+- 通过 artifact publisher 注册，artifact ID `1792865928566680584`；
+  更新清单已切至 1.10.23。本机、局域网及公网完整 APK 下载均与构建
+  产物逐字节相同，清单版本、文件名、大小、SHA-256、release notes
+  逐项一致；公网 `Range: bytes=1024-` 返回 206，内容与 APK 对应后缀
+  一致。下载目录当前 2 项，满足最多保留 3 项策略。
+- 公网下载：<http://fpsq.xyz:11112/api/artifacts/download/1792865928566680584/webClx-1.10.23.apk>；
+  下载中心：<http://fpsq.xyz:11112/downloads>；更新清单：
+  <http://fpsq.xyz:11112/api/artifacts/update/android/webClx>。
+- 发布说明原文：「安卓客户端更新版本同步至 1.10.23。配套终端网页已修复普通软键误触发系统键盘，保留原有展开或收起状态，并处理返回键收起后的残留焦点；升级后请重新加载终端页。」
+  `MainActivity.showUpdatePrompt` 会将清单说明放入自动更新确认弹窗；本次
+  仅核对源码和清单，没有旧版真机上的弹窗、安装与 IME 显隐验收证据。
+- 公网两项修复模块的 HTTP 哈希与源码一致，loader 缓存键仍为
+  `20261025-ime-state`。升级 APK 后也需重新加载终端页；仅回到前台
+  不会 reload。真机验收继续保留在根 `todo.md` R7，不能以发布或
+  浏览器桥接模拟通过代替 Android 原生验收。
 
 ## 当前行为
 
@@ -22,8 +118,10 @@
   `requestSourceReevaluation()` 在后台复核当前源。
 - 文件选择器回调、安装权限返回与主题/font 设置路径不变；resume 不再
   reload，设计上保留 JS 侧草稿/滚动状态（未做真机逐条验证）。
-- 键盘可见性：API≥30 用 `WindowInsets.Type.ime()`，更低版本保留
-  `getWindowVisibleDisplayFrame` 几何估计。
+- 键盘可见性：1.10.24 起由根 `WindowInsetsLayout` 经 AndroidX
+  `WindowInsetsCompat.Type.ime()` 同步；API≥30 读取原生 IME inset，
+  更低版本走 AndroidX 兼容实现。1.8.21–1.10.23 使用独立 WebView
+  listener 与旧版几何估计，现已由统一根布局替代。
 
 ### 生命周期安全
 
@@ -155,7 +253,7 @@
   915c0c49…5ec4 与既有发布密钥一致。
 - 发布已完成并实测：artifact ID 1791127641326918880，sha256/size 与构建
   产物一致；更新清单与完整 APK 下载在本机（localhost:11111）、局域网
-  （HOST:PORT）与公网（PUBLIC_DOMAIN:11112）三条路径均验证可取。
+  （192.168.3.2:11111）与公网（fpsq.xyz:11112）三条路径均验证可取。
   发布后 webClx 清单曾含 1.8.21（1791127641326918880）、1.8.20
   （1787300692092056720）、1.8.19（1787298042450438948）；1.8.18 已按
   保留策略自动移除。

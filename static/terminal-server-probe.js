@@ -40,7 +40,7 @@ const TERMINAL_SERVER_PROBE = (() => {
     const fromSelect = select
       ? [...select.querySelectorAll("option")].map((opt) => opt.value).filter(Boolean)
       : [];
-    cachedCandidates = [...new Set(["HOST", ...fromSelect])];
+    cachedCandidates = [...new Set(["192.168.3.2", ...fromSelect])];
     return cachedCandidates;
   }
 

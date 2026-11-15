@@ -19,6 +19,9 @@ use crate::{AppState, login};
 
 pub const LOCAL_API_TOKEN_FILE_NAME: &str = ".webclx-local-api-token";
 pub const LOCAL_API_TOKEN_HEADER: &str = auth_core::WEBCLX_LOCAL_API_TOKEN_HEADER;
+pub const SUPER_ADMIN_ROLE: &str = "super_admin";
+pub const REQUEST_ROLE_HEADER: &str = "x-webclx-auth-role";
+pub const REQUEST_USER_HEADER: &str = "x-webclx-auth-user";
 const LOCAL_API_TOKEN_BYTES: usize = 32;
 
 /// 未认证尝试频控与熔断配置
@@ -174,6 +177,31 @@ fn is_api_request(path: &str) -> bool {
     path.starts_with("/api/")
 }
 
+fn percent_encode_user(user: &str) -> Option<String> {
+    if user.is_empty() || user.len() > 128 {
+        return None;
+    }
+    let mut encoded = String::with_capacity(user.len());
+    for byte in user.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Some(encoded)
+}
+
+fn inject_authenticated_identity(request: &mut Request, user: Option<String>) {
+    let headers = request.headers_mut();
+    headers.remove(REQUEST_ROLE_HEADER);
+    headers.remove(REQUEST_USER_HEADER);
+    headers.insert(REQUEST_ROLE_HEADER, SUPER_ADMIN_ROLE.parse().unwrap());
+    if let Some(encoded_user) = user.as_deref().and_then(percent_encode_user) {
+        headers.insert(REQUEST_USER_HEADER, encoded_user.parse().unwrap());
+    }
+}
+
 fn has_valid_local_api_token(headers: &HeaderMap, addr: SocketAddr, expected: &str) -> bool {
     if !addr.ip().is_loopback() || expected.is_empty() {
         return false;
@@ -207,7 +235,9 @@ pub async fn require_auth(
     let path = request.uri().path().to_string();
     let local_api = is_api_request(&path)
         && has_valid_local_api_token(request.headers(), addr, &state.local_api_token);
-    if local_api || login::verify_session_from_headers(request.headers(), &state).is_some() {
+    let session_user = login::verify_session_from_headers(request.headers(), &state);
+    if local_api || session_user.is_some() {
+        inject_authenticated_identity(&mut request, session_user);
         request.headers_mut().remove(LOCAL_API_TOKEN_HEADER);
         clear_unauth_failures(addr.ip());
         return next.run(request).await;

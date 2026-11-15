@@ -21,7 +21,7 @@ function harness(storage = new Map()) {
   const context = vm.createContext({
     document: { createElement: () => ({ dataset: {} }) },
     localStorage: { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
-    state: { sessions: [], currentPath: "/workspace" },
+    state: { sessions: [], currentPath: "/workspace", terminalAccountSort: "recent_use" },
     specifiedPresetModel: () => "",
     requestJson: async () => ({ accounts: [
       { id: "favorite", kind: "api", favorite: true },
@@ -55,7 +55,8 @@ function harness(storage = new Map()) {
 test("successful launches move presets to the front, deduplicate, and survive a page reload", async () => {
   const h = harness();
   await h.context.loadTerminalSpecifiedTaskPresets();
-  assert.deepEqual(h.options.map((option) => option.value), ["favorite", "a", "b", "c"]);
+  // 当前账号始终置顶，其余按最近使用排序。
+  assert.deepEqual(h.options.map((option) => option.value), ["a", "favorite", "b", "c"]);
   for (const id of ["a", "b", "c", "a"]) {
     h.preset.value = id;
     await h.context.submitTerminalSpecifiedTask();

@@ -8,6 +8,9 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, function createTerminalTouchSelectionPolicy() {
   const TERMINAL_TOUCH_SELECTION_LONG_PRESS_MS = 2000;
   const TERMINAL_TOUCH_SELECTION_DRAG_CANCEL_PX = 8;
+  const TERMINAL_TOUCH_DOUBLE_TAP_MAX_DELAY_MS = 300;
+  const TERMINAL_TOUCH_DOUBLE_TAP_MAX_DISTANCE_PX = 24;
+  const TERMINAL_TOUCH_WORD_SEPARATORS = " ()[]{}',\"`";
 
   function finiteNumber(value, fallback = 0) {
     const number = Number(value);
@@ -81,13 +84,110 @@
     };
   }
 
+  function terminalTouchSelectionIsDoubleTap(lastTap, currentTap, options = {}) {
+    if (!lastTap || !currentTap) {
+      return false;
+    }
+
+    const maxDelay = finiteNumber(
+      options.maxDelayMs,
+      TERMINAL_TOUCH_DOUBLE_TAP_MAX_DELAY_MS,
+    );
+    const maxDistance = finiteNumber(
+      options.maxDistancePx,
+      TERMINAL_TOUCH_DOUBLE_TAP_MAX_DISTANCE_PX,
+    );
+
+    const elapsed = finiteNumber(currentTap.time) - finiteNumber(lastTap.time);
+    if (elapsed < 0 || elapsed > maxDelay) {
+      return false;
+    }
+
+    const dx = finiteNumber(currentTap.clientX) - finiteNumber(lastTap.clientX);
+    const dy = finiteNumber(currentTap.clientY) - finiteNumber(lastTap.clientY);
+    const distance = Math.hypot(dx, dy);
+
+    return distance <= maxDistance;
+  }
+
+  function terminalTouchSelectionWordRange(point, lineText, columns, wordSeparators = TERMINAL_TOUCH_WORD_SEPARATORS) {
+    const cols = Math.max(Math.trunc(finiteNumber(columns, 1)), 1);
+    const cell = normalizeTouchSelectionCell(point, cols);
+    const text = typeof lineText === "string" ? lineText : "";
+    const col = Math.min(cell.column, cols - 1);
+
+    if (!text || col >= text.length) {
+      return {
+        column: col,
+        row: cell.row,
+        length: 1,
+      };
+    }
+
+    const char = text.charAt(col);
+    const separators = typeof wordSeparators === "string" ? wordSeparators : TERMINAL_TOUCH_WORD_SEPARATORS;
+
+    if (/\s/.test(char)) {
+      let start = col;
+      while (start > 0 && /\s/.test(text.charAt(start - 1))) {
+        start--;
+      }
+      let end = col;
+      while (end + 1 < text.length && end + 1 < cols && /\s/.test(text.charAt(end + 1))) {
+        end++;
+      }
+      return {
+        column: start,
+        row: cell.row,
+        length: end - start + 1,
+      };
+    }
+
+    if (separators.includes(char)) {
+      return {
+        column: col,
+        row: cell.row,
+        length: 1,
+      };
+    }
+
+    let start = col;
+    while (start > 0) {
+      const prevChar = text.charAt(start - 1);
+      if (separators.includes(prevChar) || /\s/.test(prevChar)) {
+        break;
+      }
+      start--;
+    }
+
+    let end = col;
+    while (end + 1 < text.length && end + 1 < cols) {
+      const nextChar = text.charAt(end + 1);
+      if (separators.includes(nextChar) || /\s/.test(nextChar)) {
+        break;
+      }
+      end++;
+    }
+
+    return {
+      column: start,
+      row: cell.row,
+      length: end - start + 1,
+    };
+  }
+
   return {
+    TERMINAL_TOUCH_DOUBLE_TAP_MAX_DELAY_MS,
+    TERMINAL_TOUCH_DOUBLE_TAP_MAX_DISTANCE_PX,
     TERMINAL_TOUCH_SELECTION_DRAG_CANCEL_PX,
     TERMINAL_TOUCH_SELECTION_LONG_PRESS_MS,
+    TERMINAL_TOUCH_WORD_SEPARATORS,
     terminalTouchScrollStep,
     terminalTouchSelectionContextMenuAction,
     terminalTouchSelectionInitialRange,
+    terminalTouchSelectionIsDoubleTap,
     terminalTouchSelectionMoveAction,
     terminalTouchSelectionRangeBetweenCells,
+    terminalTouchSelectionWordRange,
   };
 });

@@ -9,19 +9,29 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
-CHROMIUM = "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome"
+CHROMIUM = "/home/third_party/browser-tools/bin/chromium"
 SESSION_ID = "ime-policy-session"
 
 
-async def main():
+async def main(android=False):
     page_errors = []
+    received_input = []
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(
             executable_path=CHROMIUM,
             headless=True,
             args=["--no-sandbox", "--disable-gpu"],
         )
-        page = await browser.new_page(viewport={"width": 390, "height": 700})
+        page = await browser.new_page(
+            viewport={"width": 390, "height": 700},
+            has_touch=True,
+            is_mobile=android,
+            user_agent=(
+                "Mozilla/5.0 (Linux; Android 14; WebClx Test; wv) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
+                "Chrome/146.0.0.0 Mobile Safari/537.36 webClxAndroid/1.10.22"
+            ) if android else None,
+        )
         page.on("pageerror", lambda error: page_errors.append(str(error)))
 
         async def handle_http(route):
@@ -89,6 +99,13 @@ async def main():
             await route.fulfill(status=404, body="not found")
 
         async def handle_websocket(websocket):
+            def receive(message):
+                if isinstance(message, str):
+                    payload = json.loads(message)
+                    if payload.get("type") == "input":
+                        received_input.append(payload["data"])
+
+            websocket.on_message(receive)
             websocket.send(b"\r\n[root@webclx webClx]# ")
 
         await page.route("**/*", handle_http)
@@ -97,11 +114,14 @@ async def main():
             f"http://webclx.test/terminal?path=webClx&session={SESSION_ID}",
             wait_until="domcontentloaded",
         )
+        if android:
+            await page.locator('#webclx-language-welcome button[data-locale="zh-CN"]').click()
         await page.wait_for_function(
             """() => state.activeSessionId === 'ime-policy-session'
                 && terminalSoftKeyboardVisible()
                 && terminalHelperTextarea()"""
         )
+        assert await page.evaluate("term.options.rendererType") == ("dom" if android else "canvas")
 
         await page.evaluate(
             """() => {
@@ -368,6 +388,276 @@ async def main():
             )
             assert end_state == {"enabled": enabled, "focused": enabled}, end_state
 
+        # Android Back can dismiss the IME without blurring xterm's helper.
+        # Exercise real touch dispatch and WebSocket input, including that state.
+        for visible, focused in ((True, True), (False, False), (False, True)):
+            await page.evaluate(
+                """({ visible, focused }) => {
+                  terminalActionKeyboardPolicyActive = false;
+                  terminalActionEditableFocusBlocked = false;
+                  terminalNativeKeyboardVisible = window.__originalTerminalNativeKeyboardVisible;
+                  window.WebClxAndroid = { isSystemKeyboardVisible: () => visible };
+                  setTerminalSystemImeEnabled(true);
+                  const helper = terminalHelperTextarea();
+                  if (focused) helper.focus({ preventScroll: true });
+                  else helper.blur();
+                  window.__imePolicyHelperFocusCalls = 0;
+                  window.__imePolicyAttributeChanges = [];
+                  window.__imePolicyObserver = new MutationObserver((records) => {
+                    window.__imePolicyAttributeChanges.push(...records.map((r) => r.attributeName));
+                  });
+                  window.__imePolicyObserver.observe(helper, {
+                    attributes: true,
+                    attributeFilter: ['inputmode', 'enterkeyhint', 'autocomplete',
+                      'autocapitalize', 'autocorrect', 'spellcheck'],
+                  });
+                }""",
+                {"visible": visible, "focused": focused},
+            )
+            received_input.clear()
+            for sequence in ("home", "tab", "end"):
+                await page.locator(f'#terminal-mobile-keys [data-sequence="{sequence}"]').tap()
+            await page.evaluate("mobileKeySendQueue")
+            await page.wait_for_timeout(380)
+            real_touch_state = await page.evaluate(
+                """() => {
+                  window.__imePolicyObserver.disconnect();
+                  return {
+                    enabled: terminalSystemImeEnabled,
+                    focused: terminalHelperTextareaFocused(),
+                    focusCalls: window.__imePolicyHelperFocusCalls,
+                    attributeChanges: window.__imePolicyAttributeChanges.length,
+                  };
+                }"""
+            )
+            assert "".join(received_input) == "\x1b[H\t\x1b[F", received_input
+            assert real_touch_state == {
+                "enabled": True,
+                "focused": visible,
+                "focusCalls": 0,
+                "attributeChanges": 0,
+            }, (visible, focused, real_touch_state)
+        # A real held touch must select without ever restarting the input
+        # connection, including a WebView retaining focus after Android Back.
+        cdp = await page.context.new_cdp_session(page)
+        for visible, focused, enabled in (
+            (True, True, True), (False, False, True),
+            (False, True, True), (False, False, False),
+        ):
+            await page.evaluate(
+                """({ visible, focused, enabled }) => {
+                  terminalActionKeyboardPolicyActive = false;
+                  terminalActionEditableFocusBlocked = false;
+                  window.WebClxAndroid = { isSystemKeyboardVisible: () => visible };
+                  setTerminalSystemImeEnabled(enabled, { clearSuppression: true });
+                  term.clearSelection();
+                  const helper = terminalHelperTextarea();
+                  if (focused) helper.focus({ preventScroll: true });
+                  else helper.blur();
+                  window.__imePolicyHelperFocusCalls = 0;
+                  window.__selectionFocusEvents = [];
+                  window.__selectionNativeRangeClears = 0;
+                  window.__imeMenuCalls = [];
+                  window.__originalRemoveAllRanges ??= Selection.prototype.removeAllRanges;
+                  Selection.prototype.removeAllRanges = function () {
+                    window.__selectionNativeRangeClears++;
+                    return window.__originalRemoveAllRanges.call(this);
+                  };
+                  window.__selectionTouchDefaultPrevented = null;
+                  terminalHost.addEventListener('touchstart', (event) => {
+                    window.__selectionTouchDefaultPrevented = event.defaultPrevented;
+                  }, { capture: true, once: true });
+                  helper.onfocus = () => window.__selectionFocusEvents.push('focus');
+                  helper.onblur = () => window.__selectionFocusEvents.push('blur');
+                  window.__imePolicyAttributeChanges = [];
+                  window.__imePolicyObserver.observe(helper, {
+                    attributes: true,
+                    attributeFilter: ['inputmode', 'enterkeyhint', 'autocomplete',
+                      'autocapitalize', 'autocorrect', 'spellcheck'],
+                  });
+                }""",
+                {"visible": visible, "focused": focused, "enabled": enabled},
+            )
+            received_input.clear()
+            point = await page.evaluate("""() => {
+              const rect = term.element.querySelector('.xterm-screen').getBoundingClientRect();
+              return { x: Math.max(0, rect.left) + 25,
+                y: Math.max(0, rect.top) + 10 };
+            }""")
+            await cdp.send('Input.dispatchTouchEvent', {
+                "type": "touchStart", "touchPoints": [point],
+            })
+            # Observe the beginning separately: the native WebView must not
+            # receive an uncancelled touchstart before the long-press timer.
+            await page.wait_for_timeout(100)
+            start_state = await page.evaluate("""() => ({
+              defaultPrevented: window.__selectionTouchDefaultPrevented,
+              focused: terminalHelperTextareaFocused(),
+              focusCalls: window.__imePolicyHelperFocusCalls,
+              focusEvents: window.__selectionFocusEvents,
+              candidate: Boolean(terminalTouchSelectionCandidate),
+              selected: term.hasSelection(),
+            })""")
+            assert start_state == {
+                "defaultPrevented": True, "focused": focused,
+                "focusCalls": 0, "focusEvents": [], "candidate": True,
+                "selected": False,
+            }, (visible, focused, enabled, start_state)
+            await page.wait_for_timeout(2050)
+            assert await page.evaluate("""() => Boolean(
+              terminalTouchSelection?.anchor && term.hasSelection()
+              && !terminalSelectionStartHandle.hidden
+              && !terminalSelectionEndHandle.hidden)"""), 'timer must select before contextmenu'
+            # Headless Chromium does not consistently emit the platform menu.
+            # Deliver it to the real xterm element while the touch is held.
+            await page.evaluate(
+                """({ x, y }) => document.elementFromPoint(x, y).dispatchEvent(
+                  new PointerEvent('contextmenu', {
+                    bubbles: true, cancelable: true, pointerType: 'touch',
+                    clientX: x, clientY: y,
+                  }))""", point,
+            )
+            await cdp.send('Input.dispatchTouchEvent', {
+                "type": "touchEnd", "touchPoints": [],
+            })
+            await page.wait_for_timeout(380)
+            handle = await page.locator('#terminal-selection-end-handle').bounding_box()
+            assert handle, 'long press must expose the selection handle'
+            handle_point = {"x": handle["x"] + handle["width"] / 2,
+                            "y": handle["y"] + handle["height"] / 2}
+            await cdp.send('Input.dispatchTouchEvent', {
+                "type": "touchStart", "touchPoints": [handle_point],
+            })
+            await cdp.send('Input.dispatchTouchEvent', {
+                "type": "touchMove",
+                "touchPoints": [{**handle_point, "x": handle_point["x"] + 20}],
+            })
+            await cdp.send('Input.dispatchTouchEvent', {
+                "type": "touchEnd", "touchPoints": [],
+            })
+            await page.wait_for_timeout(100)
+            selection_state = await page.evaluate(
+                """() => {
+                  window.__imePolicyObserver.disconnect();
+                  const result = {
+                    enabled: terminalSystemImeEnabled,
+                    focused: terminalHelperTextareaFocused(),
+                    focusCalls: window.__imePolicyHelperFocusCalls,
+                    focusEvents: window.__selectionFocusEvents,
+                    nativeRangeClears: window.__selectionNativeRangeClears,
+                    attributeChanges: window.__imePolicyAttributeChanges,
+                    selected: term.hasSelection(),
+                    handlesVisible: !terminalSelectionStartHandle.hidden
+                      && !terminalSelectionEndHandle.hidden,
+                  };
+                  terminalHelperTextarea().onfocus = null;
+                  terminalHelperTextarea().onblur = null;
+                  return result;
+                }"""
+            )
+            assert selection_state == {
+                "enabled": enabled, "focused": focused, "focusCalls": 0,
+                "focusEvents": [], "nativeRangeClears": 0, "attributeChanges": [],
+                "selected": True, "handlesVisible": True,
+            }, (visible, focused, enabled, selection_state)
+            assert not received_input, received_input
+            assert await page.evaluate("""() => terminalHelperTextareaFocused()
+              ? true
+              : terminalHelperTextarea().getAttribute('inputmode') === 'none'"""), (
+              "an unfocused helper must stay inputmode=none so long-press cannot raise the IME",
+              visible, focused, enabled,
+            )
+            if not focused:
+                # Even if some native or scripted path focuses the helper during
+                # a selection gesture, the IME must stay off: the helper is only
+                # editable for the native keyboard after an explicit IME action.
+                stray = await page.evaluate("""() => {
+                  const helper = terminalHelperTextarea();
+                  const before = helper.getAttribute('inputmode');
+                  helper.focus({ preventScroll: true });
+                  const result = {
+                    before,
+                    after: helper.getAttribute('inputmode'),
+                    armed: terminalSystemImeArmed,
+                  };
+                  helper.blur();
+                  return result;
+                }""")
+                assert stray == {"before": "none", "after": "none", "armed": False}, (
+                  visible, focused, enabled, stray,
+                )
+            menu = await page.evaluate("""() => ({
+              copyVisible: !terminalSelectionCopyButton.hidden,
+              copyAllVisible: !terminalSelectionCopyAllButton.hidden,
+              imeVisible: !terminalSelectionOpenImeButton.hidden,
+            })""")
+            assert menu == {
+                "copyVisible": True, "copyAllVisible": True, "imeVisible": True,
+            }, menu
+            await page.evaluate("""() => {
+              window.__imeBridgeShowCalls = 0;
+              window.WebClxAndroid.showSystemKeyboard = () => {
+                window.__imeBridgeShowCalls += 1;
+                return true;
+              };
+              const button = terminalSelectionOpenImeButton;
+              button.dispatchEvent(new PointerEvent('pointerdown', {
+                bubbles: true, cancelable: true, pointerType: 'touch',
+              }));
+              button.click();
+            }""")
+            await page.wait_for_timeout(100)
+            opened = await page.evaluate("""() => ({
+              enabled: terminalSystemImeEnabled,
+              focused: terminalHelperTextareaFocused(),
+              selected: term.hasSelection(),
+              bridgeCalls: window.__imeBridgeShowCalls,
+            })""")
+            assert opened == {
+                "enabled": True, "focused": True, "selected": True,
+                "bridgeCalls": 1,
+            }, (visible, focused, enabled, opened)
+        await cdp.detach()
+        # Selection suppression ends on the next touch; ordinary taps still
+        # enter the terminal's direct-input path.
+        await page.evaluate("""() => {
+          terminalActionKeyboardPolicyActive = false;
+          terminalActionEditableFocusBlocked = false;
+          setTerminalSystemImeEnabled(true, { clearSuppression: true });
+          terminalHelperTextarea().blur();
+        }""")
+        await page.touchscreen.tap(point["x"], point["y"])
+        await page.wait_for_function("terminalHelperTextareaFocused()", timeout=2000)
+        assert await page.evaluate("""() => !term.hasSelection()"""), "ordinary tap clears prior long-press selection"
+        # Double tap selects the word under cursor and displays handles
+        await page.wait_for_timeout(350)
+        await page.touchscreen.tap(point["x"], point["y"])
+        await page.touchscreen.tap(point["x"], point["y"])
+        assert await page.evaluate("""() => Boolean(
+            term.hasSelection() &&
+            !terminalSelectionStartHandle.hidden &&
+            !terminalSelectionEndHandle.hidden &&
+            !terminalSelectionCopyButton.hidden &&
+            !terminalSelectionCopyAllButton.hidden &&
+            !terminalSelectionOpenImeButton.hidden
+        )"""), "double tap must select word and display handles and the whole selection menu"
+        # Tapping away clears the selection
+        await page.wait_for_timeout(350)
+        await page.touchscreen.tap(point["x"] + 100, point["y"] + 60)
+        await page.wait_for_timeout(350)
+        assert await page.evaluate("""() => Boolean(
+            !term.hasSelection() &&
+            terminalSelectionCopyButton.hidden &&
+            terminalSelectionCopyAllButton.hidden &&
+            terminalSelectionOpenImeButton.hidden
+        )"""), "tapping away clears selection and hides the whole selection menu"
+        await page.evaluate(
+            """() => {
+              delete window.WebClxAndroid;
+              window.__setTerminalNativeKeyboardVisible(false);
+            }"""
+        )
+
         for selector in (
             '#terminal-mobile-keys [data-sequence="home"]',
             '#scroll-terminal-bottom',
@@ -495,6 +785,9 @@ async def main():
         )
         result["detachedMenuCount"] = detached_menu_count
         result["directSoftKeyCount"] = direct_soft_key_count
+        result["android"] = android
+        result["realTouchStateCount"] = 3
+        result["longPressSelectionStateCount"] = 4
         await browser.close()
 
     assert not page_errors, page_errors
@@ -502,4 +795,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(asyncio.wait_for(main(), timeout=90))
+    asyncio.run(asyncio.wait_for(main(android=True), timeout=90))

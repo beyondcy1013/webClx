@@ -229,6 +229,11 @@ pub(super) fn capture_tmux_visible_text_pane_snapshot(session_id: &str) -> Resul
     capture_tmux_joined_pane_snapshot_from(session_id, "0", false)
 }
 
+/// Composer suggestions are distinguishable from user input only with SGR styles.
+pub(super) fn capture_tmux_visible_styled_pane_snapshot(session_id: &str) -> Result<Vec<u8>> {
+    capture_tmux_joined_pane_snapshot_from(session_id, "0", true)
+}
+
 pub(super) fn capture_tmux_text_pane_snapshot(session_id: &str) -> Result<Vec<u8>> {
     capture_tmux_pane_snapshot_from(session_id, "-", false)
 }
@@ -585,6 +590,37 @@ fn send_tmux_literal_keys(session_id: &str, text: &str) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     anyhow::bail!(
         "无法发送终端启动脚本: {}",
+        if stderr.is_empty() {
+            "tmux returned a non-zero status".to_string()
+        } else {
+            stderr
+        }
+    );
+}
+
+/// 把文本放进命名粘贴缓冲区，供用户手工恢复（prefix ] 或终端页粘贴）。
+pub(super) fn send_tmux_buffer(session_id: &str, name: &str, text: &str) -> Result<()> {
+    let mut command = isolated_tmux_command(session_id);
+    sanitize_child_command(&mut command);
+    command
+        .arg("set-buffer")
+        .arg("-b")
+        .arg(name)
+        .arg("--")
+        .arg(text);
+    let output = command_output::bounded_command_output(
+        command,
+        TMUX_COMMAND_TIMEOUT,
+        TMUX_SMALL_OUTPUT_LIMIT,
+    )
+    .context("无法写入终端粘贴缓冲区")?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::bail!(
+        "无法写入终端粘贴缓冲区: {}",
         if stderr.is_empty() {
             "tmux returned a non-zero status".to_string()
         } else {

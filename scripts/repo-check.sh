@@ -15,6 +15,7 @@ cd "$PROJECT_DIR"
 GROUP_RUST=0
 GROUP_NODE=0
 GROUP_BROWSER=0
+GROUP_TERMINAL_SCROLL=0
 LIST_ONLY=0
 FILTER=""
 LOG_ROOT="${WEBCLX_REPO_CHECK_LOG_DIR:-/tmp/webclx-repo-check}"
@@ -23,16 +24,25 @@ BROWSER_SMOKE_TESTS=(
   tests/terminal-session-switch-focus.browser.py
   tests/workspace_project_icons.browser.py
   tests/codex_status_compact.browser.py
+  tests/terminal-session-cache.browser.py
+)
+TERMINAL_SCROLL_NODE_TESTS=(
+  tests/terminal-scroll-intent.test.mjs
+  tests/terminal-session-cache.test.mjs
+  tests/terminal-session-switch-output.test.mjs
+  tests/terminal-layout-scroll-preserve.test.mjs
+  tests/terminal-backlog-replay.test.mjs
 )
 
 usage() {
   cat <<'EOF'
-用法: scripts/repo-check.sh [--rust] [--node] [--browser] [--all] [--list] [--filter SUBSTR]
+用法: scripts/repo-check.sh [--rust] [--node] [--browser] [--terminal-scroll] [--all] [--list] [--filter SUBSTR]
                             [--log-dir DIR] [--timeout SECS]
 
   --rust           Rust 检查：cargo fmt --all --check、cargo check --workspace、cargo test --workspace
   --node           全部 Node 契约测试（find tests -name '*.test.mjs'，逐条 timeout --signal=KILL）
   --browser        关键浏览器冒烟（固定清单，Playwright 自包含，无需真实服务）
+  --terminal-scroll 终端滚动专项：5 项 Node 回归 + 桌面/触屏/Android DOM/重连浏览器矩阵
   --all            三组全部执行（默认）
   --list           只打印将执行的命令集，不执行（用于两次触发比对）
   --filter SUBSTR  只保留路径含 SUBSTR 的测试（node/browser 组）
@@ -48,6 +58,7 @@ while [ "$#" -gt 0 ]; do
     --rust) GROUP_RUST=1 ;;
     --node) GROUP_NODE=1 ;;
     --browser) GROUP_BROWSER=1 ;;
+    --terminal-scroll) GROUP_TERMINAL_SCROLL=1; GROUP_NODE=1; GROUP_BROWSER=1 ;;
     --all) GROUP_RUST=1; GROUP_NODE=1; GROUP_BROWSER=1 ;;
     --list) LIST_ONLY=1 ;;
     --filter) FILTER="${2:?--filter 需要参数}"; shift ;;
@@ -76,7 +87,13 @@ KERNEL="$(uname -s)-$(uname -m)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 collect_node_tests() {
-  find tests -name '*.test.mjs' | sort | while IFS= read -r t; do
+  {
+    if [ "$GROUP_TERMINAL_SCROLL" = "1" ]; then
+      printf '%s\n' "${TERMINAL_SCROLL_NODE_TESTS[@]}"
+    else
+      find tests -name '*.test.mjs' | sort
+    fi
+  } | while IFS= read -r t; do
     if [ -z "$FILTER" ] || [[ "${t#tests/}" == *"$FILTER"* ]]; then
       printf '%s\n' "$t"
     fi
@@ -85,7 +102,11 @@ collect_node_tests() {
 
 collect_browser_tests() {
   local t
-  for t in "${BROWSER_SMOKE_TESTS[@]}"; do
+  local tests=("${BROWSER_SMOKE_TESTS[@]}")
+  if [ "$GROUP_TERMINAL_SCROLL" = "1" ]; then
+    tests=(tests/terminal-session-cache.browser.py)
+  fi
+  for t in "${tests[@]}"; do
     if [ -z "$FILTER" ] || [[ "${t#tests/}" == *"$FILTER"* ]]; then
       printf '%s\n' "$t"
     fi
@@ -127,6 +148,23 @@ run_cmd() {
   CMD_DURATIONS+=("$((end - start))")
   printf '[rc=%s %sms] %s\n' "$rc" "$((end - start))" "$argv_display"
   return 0
+}
+
+run_terminal_scroll_browser_matrix() {
+  local variant mobile android reconnect
+  for variant in desktop touch android reconnect; do
+    mobile=0; android=0; reconnect=0
+    case "$variant" in
+      touch) mobile=1 ;;
+      android) mobile=1; android=1 ;;
+      reconnect) reconnect=1 ;;
+    esac
+    run_cmd "browser/terminal-session-cache/${variant}" \
+      "${LOG_DIR}/browser/terminal-session-cache.${variant}.log" \
+      env WEBCLX_TEST_MOBILE="$mobile" WEBCLX_TEST_ANDROID="$android" \
+      WEBCLX_TEST_ANDROID_LEGACY=0 WEBCLX_TEST_RECONNECT="$reconnect" \
+      python3 tests/terminal-session-cache.browser.py
+  done
 }
 
 LOG_DIR="${LOG_ROOT}/${STAMP}-${COMMIT}"
@@ -175,6 +213,10 @@ fi
 if [ "$GROUP_BROWSER" = "1" ]; then
   while IFS= read -r t; do
     [ -n "$t" ] || continue
+    if [ "$t" = "tests/terminal-session-cache.browser.py" ]; then
+      run_terminal_scroll_browser_matrix
+      continue
+    fi
     name="${t#tests/}"; name="${name//\//__}"
     run_cmd "browser/${name}" "${LOG_DIR}/browser/${name}.log" python3 "$t"
   done <<<"$BROWSER_TESTS_SELECTED"

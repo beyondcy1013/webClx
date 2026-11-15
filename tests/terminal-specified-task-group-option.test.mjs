@@ -142,9 +142,9 @@ test("selected group is ignored unless the optional checkbox is enabled", () => 
   assert.equal(context.terminalSpecifiedTaskSelectedGroup(), "group-1");
 });
 
-test("new dialog can specify manager, executor, or reviewer for a joined group", () => {
+test("new dialog accepts super admin and the three existing group roles", () => {
   assert.match(terminalHtml, /id="terminal-specified-task-group-role"/);
-  assert.match(terminalHtml, /<option value="manager">管理者<\/option>/);
+  assert.match(terminalHtml, /<option value="manager">普通管理员<\/option>/);
   assert.match(terminalHtml, /<option value="executor">执行者<\/option>/);
   assert.match(terminalHtml, /<option value="reviewer">复核者<\/option>/);
   const context = loadSpecifiedTask({
@@ -154,6 +154,12 @@ test("new dialog can specify manager, executor, or reviewer for a joined group",
     },
   });
   assert.equal(context.terminalSpecifiedTaskSelectedGroupRole(), "manager");
+  assert.match(terminalHtml, /<option value="super_admin">👑 超级管理员<\/option>/);
+  const superContext = loadSpecifiedTask({ elements: {
+    "terminal-specified-task-join-group": { checked: true },
+    "terminal-specified-task-group-role": { value: "super_admin" },
+  } });
+  assert.equal(superContext.terminalSpecifiedTaskSelectedGroupRole(), "super_admin");
 });
 
 test("new dialog exposes a self-assembled group with a terminal count", () => {
@@ -262,7 +268,22 @@ test("self-assembled launch failure cleans up every newly created terminal", asy
       createGroup: true,
       createGroupCount: 2,
     }),
-    /自组群启动失败/,
+    /自组群启动失败（group failed），已清理 2 个新终端。/,
   );
   assert.deepEqual(calls.filter((item) => item[1] === "DELETE").length, 2);
+});
+
+test("renameTerminalForTool falls back to API update when session is pending in state", async () => {
+  const terminalToolSource = readFileSync(
+    new URL("../static/terminal-tool-actions.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    terminalToolSource,
+    /const targetPath = session\?\.path \|\| path;[\s\S]*\/api\/terminal\/sessions\/\$\{encodeURIComponent\(targetSessionId\)\}/,
+  );
+  assert.match(
+    terminalToolSource,
+    /insertOrReplaceSession\(renamed\)/,
+  );
 });

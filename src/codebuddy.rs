@@ -156,14 +156,14 @@ impl CodeBuddyVariant {
     pub fn api_endpoint(self) -> &'static str {
         match self {
             Self::Cn => "https://www.codebuddy.cn",
-            Self::Ai => "https://www.workbuddy.ai",
+            Self::Ai => "https://www.codebuddy.ai",
         }
     }
 
     pub fn oauth_platform(self) -> &'static str {
         match self {
             Self::Cn => "workbuddy",
-            Self::Ai => "workbuddy-ai",
+            Self::Ai => "CLI",
         }
     }
 
@@ -175,16 +175,13 @@ impl CodeBuddyVariant {
     }
 
     pub fn cli_openai_base_url(self) -> Option<&'static str> {
-        match self {
-            Self::Cn => None,
-            Self::Ai => Some("https://www.codebuddy.ai/v2"),
-        }
+        None
     }
 
     pub fn cli_internet_environment(self) -> &'static str {
         match self {
             Self::Cn => "internal",
-            Self::Ai => "public",
+            Self::Ai => "external",
         }
     }
 
@@ -323,6 +320,44 @@ pub struct CodeBuddyAccount {
     pub active: bool,
     #[serde(default)]
     pub switch_count: u64,
+    /// 最近一次切换到该账号的时间（毫秒）；旧的账号档案没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch_at: Option<i64>,
+    /// 每次切换到该账号的时间戳（毫秒），用于按时间窗口统计使用次数。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
+    /// 绑定的稳定设备指纹（UUID 格式）；未显式指定时由系统按账号 ID 确定性生成。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+}
+
+/// 为 CodeBuddy 账号生成唯一、稳定、符合 UUID 标准的设备指纹。
+pub fn account_machine_id(account_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"codebuddy-device-fingerprint-v1:");
+    hasher.update(account_id.as_bytes());
+    let hash = hasher.finalize();
+    let b = hash.as_slice();
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        (b[6] & 0x0f) | 0x40,
+        b[7],
+        (b[8] & 0x3f) | 0x80,
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
+    )
 }
 
 fn skip_if_false(value: &bool) -> bool {
@@ -371,6 +406,9 @@ impl CodeBuddyAccount {
             "needsReloginReason": self.needs_relogin_reason,
             "active": self.active,
             "switchCount": self.switch_count,
+            "lastSwitchAt": self.last_switch_at,
+            "switchHistory": auth_core::effective_switch_history(&self.switch_history, self.last_switch_at),
+            "machineId": self.machine_id.clone().unwrap_or_else(|| account_machine_id(&self.id)),
         })
     }
 }
@@ -380,6 +418,8 @@ impl CodeBuddyAccount {
 struct AutoConfig {
     checkin: bool,
     travel: bool,
+    #[serde(rename = "blockInternationalAutoSwitch")]
+    block_international_auto_switch: bool,
 }
 
 impl Default for AutoConfig {
@@ -388,15 +428,18 @@ impl Default for AutoConfig {
         Self {
             checkin: true,
             travel: true,
+            block_international_auto_switch: true,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct CodeBuddyState {
     active_account_id: String,
     auto: AutoConfig,
+    #[serde(default = "default_device_fingerprint")]
+    device_fingerprint: bool,
     last_checkin_run_ms: i64,
     last_travel_run_ms: i64,
     last_credits_run_ms: i64,
@@ -407,6 +450,27 @@ struct CodeBuddyState {
     travel: HashMap<String, Value>,
     /// 每账号积分快照：key = account id。
     credits: HashMap<String, Value>,
+}
+
+fn default_device_fingerprint() -> bool {
+    true
+}
+
+impl Default for CodeBuddyState {
+    fn default() -> Self {
+        Self {
+            active_account_id: String::new(),
+            auto: AutoConfig::default(),
+            device_fingerprint: true,
+            last_checkin_run_ms: 0,
+            last_travel_run_ms: 0,
+            last_credits_run_ms: 0,
+            last_keepalive_day: String::new(),
+            checkin_logs: Vec::new(),
+            travel: HashMap::new(),
+            credits: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +552,10 @@ impl CodeBuddyManager {
     // -----------------------------------------------------------------
     // 账号列表 / 手动添加 / 删除
     // -----------------------------------------------------------------
+
+    pub(crate) fn manages_home(&self, home: &std::path::Path) -> bool {
+        self.user_home == home
+    }
 
     pub fn list_accounts(&self) -> Vec<Value> {
         let inner = self.read_inner();
@@ -686,6 +754,9 @@ impl CodeBuddyManager {
                 }
                 if saved.switch_count == 0 && inner.accounts[index].switch_count > 0 {
                     saved.switch_count = inner.accounts[index].switch_count;
+                }
+                if saved.last_switch_at.is_none() {
+                    saved.last_switch_at = inner.accounts[index].last_switch_at;
                 }
                 inner.accounts[index] = saved.clone();
                 saved
@@ -931,6 +1002,7 @@ impl CodeBuddyManager {
                 .and_then(Value::as_i64)
                 .map(|secs| now_ms() as i64 + secs * 1000)
         });
+        account = self.exchange_account_channel_token(account).await;
         if let Some(profile) = self.fetch_account_profile(&account).await {
             apply_profile(&mut account, &profile);
         }
@@ -1033,14 +1105,98 @@ impl CodeBuddyManager {
         account.refreshed_at = Some(now_ms() as i64);
         account.needs_relogin = false;
         account.needs_relogin_reason.clear();
+        account = self.exchange_account_channel_token(account).await;
         let _ = self.replace_account(account.clone());
         // 唯一成功路径：活动账号刷新后把 CLI settings.json 里的旧 env token 换成新 token。
         self.sync_active_cli_token(&old_token, account.access_token.trim());
         account
     }
 
-    /// 惰性刷新：缺少 expiresAt 或 24 小时内到期时先刷新。
-    async fn ensure_fresh_token(&self, account: CodeBuddyAccount) -> CodeBuddyAccount {
+    /// 激活个人/企业渠道凭据：调用 POST /v2/plugin/account/switch 换取含 token_source: "enterprise_switch" 的凭据。
+    async fn exchange_account_channel_token(
+        &self,
+        mut account: CodeBuddyAccount,
+    ) -> CodeBuddyAccount {
+        if account.refresh_token.trim().is_empty() {
+            return account;
+        }
+        let already_switched = extract_jwt_claims(&account.access_token)
+            .as_ref()
+            .and_then(|c| c.get("token_source").and_then(Value::as_str))
+            == Some("enterprise_switch");
+        if already_switched {
+            return account;
+        }
+
+        let variant = account.variant();
+        let domain = match variant {
+            CodeBuddyVariant::Cn => "www.codebuddy.cn",
+            CodeBuddyVariant::Ai => "www.codebuddy.ai",
+        };
+        let mut headers = auth_headers(&account);
+        push_header(&mut headers, "X-Refresh-Token", &account.refresh_token);
+        push_header(&mut headers, "X-Domain", domain);
+        let url = format!("{}{}/account/switch", variant.api_endpoint(), PLUGIN_PREFIX);
+        let response = self
+            .request_json(reqwest::Method::POST, &url, Some(json!({})), headers)
+            .await;
+        let code = response.get("code").and_then(Value::as_i64).unwrap_or(-1);
+        if code == 0 || code == 200 {
+            let data = response.get("data").cloned().unwrap_or_else(|| json!({}));
+            if let Some(new_token) = data
+                .get("accessToken")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("access_token").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                account.access_token = new_token.to_string();
+            }
+            if let Some(new_refresh) = data
+                .get("refreshToken")
+                .and_then(Value::as_str)
+                .or_else(|| data.get("refresh_token").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                account.refresh_token = new_refresh.to_string();
+            }
+            let expires_at = normalize_ts(data.get("expiresAt").or_else(|| data.get("expires_at")))
+                .or_else(|| {
+                    data.get("expiresIn")
+                        .and_then(Value::as_i64)
+                        .map(|secs| now_ms() as i64 + secs * 1000)
+                });
+            if expires_at.is_some() {
+                account.expires_at = expires_at;
+            }
+            let refresh_expires_at = normalize_ts(
+                data.get("refreshExpiresAt")
+                    .or_else(|| data.get("refresh_expires_at")),
+            )
+            .or_else(|| {
+                data.get("refreshExpiresIn")
+                    .and_then(Value::as_i64)
+                    .map(|secs| now_ms() as i64 + secs * 1000)
+            });
+            if refresh_expires_at.is_some() {
+                account.refresh_expires_at = refresh_expires_at;
+            }
+            account.refreshed_at = Some(now_ms() as i64);
+        }
+        account
+    }
+
+    /// 惰性刷新：缺少 expiresAt、未完成渠道激活或 24 小时内到期时先刷新。
+    async fn ensure_fresh_token(&self, mut account: CodeBuddyAccount) -> CodeBuddyAccount {
+        let needs_switch = extract_jwt_claims(&account.access_token)
+            .as_ref()
+            .and_then(|c| c.get("token_source").and_then(Value::as_str))
+            != Some("enterprise_switch");
+        if needs_switch && !account.refresh_token.trim().is_empty() {
+            account = self.exchange_account_channel_token(account).await;
+            let _ = self.replace_account(account.clone());
+        }
         let stale = match account.expires_at {
             Some(expires_at) => {
                 (now_ms() as i64) >= expires_at || expires_at - (now_ms() as i64) < 24 * 3600 * 1000
@@ -1644,10 +1800,14 @@ impl CodeBuddyManager {
         {
             let mut inner = self.write_inner();
             inner.state.active_account_id = account.id.clone();
+            let switched_at = now_ms() as i64;
             for other in inner.accounts.iter_mut() {
                 other.active = other.id == account.id;
                 if other.id == account.id {
                     other.switch_count += 1;
+                    let previous = other.last_switch_at;
+                    auth_core::push_switch_event(&mut other.switch_history, previous, switched_at);
+                    other.last_switch_at = Some(switched_at);
                 }
             }
             self.persist_accounts(&inner.accounts)?;
@@ -1719,6 +1879,59 @@ impl CodeBuddyManager {
             CodeBuddyVariant::Ai => {
                 if let Some(openai_base) = variant.cli_openai_base_url() {
                     env_obj.insert("CODEBUDDY_BASE_URL".to_string(), json!(openai_base));
+                } else {
+                    env_obj.remove("CODEBUDDY_BASE_URL");
+                }
+            }
+        }
+
+        if self.is_device_fingerprint_enabled() {
+            let machine_id = account
+                .machine_id
+                .clone()
+                .unwrap_or_else(|| account_machine_id(&account.id));
+            env_obj.insert("CLIENT_INFO_MACHINE_ID".to_string(), json!(machine_id));
+            // 严禁设置 CODEBUDDY_SKIP_INTERNAL_HEADERS：该变量会导致客户端给自身打上 X-Skip-Auth-Interceptor 并跳过鉴权拦截器，引发 401
+            env_obj.remove("CODEBUDDY_SKIP_INTERNAL_HEADERS");
+            self.sync_fingerprint_bashrc(Some(&machine_id))?;
+        } else {
+            env_obj.remove("CLIENT_INFO_MACHINE_ID");
+            env_obj.remove("CODEBUDDY_SKIP_INTERNAL_HEADERS");
+            self.sync_fingerprint_bashrc(None)?;
+        }
+
+        // 区域模型适配：避免国内/国际版切换后 settings.json 残留不兼容模型名导致推理报错
+        let current_model = settings
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        match variant {
+            CodeBuddyVariant::Ai => {
+                // 国际版个人可用模型包含 default-model, fast-model, balanced-model, primary-model, hy4-preview, hy3, gpt-5.6-sol 等
+                // 若当前模型为空、包含国内专属前缀（deepseek-/minimax-/mimo-/step-/space-bunny）或为不存在的 gpt-6.1-sol，重置为 default-model
+                let needs_reset = current_model.is_empty()
+                    || current_model.starts_with("deepseek-")
+                    || current_model.starts_with("minimax-")
+                    || current_model.starts_with("mimo-")
+                    || current_model.starts_with("step-")
+                    || current_model == "gpt-6.1-sol"
+                    || current_model == "space-bunny";
+                if needs_reset {
+                    if let Some(obj) = settings.as_object_mut() {
+                        obj.insert("model".to_string(), json!("default-model"));
+                    }
+                }
+            }
+            CodeBuddyVariant::Cn => {
+                // 国内版不支持 default-model 或 gpt-* / gemini-*，重置为缺省（由客户端使用国内默认模型）
+                let needs_reset = current_model == "default-model"
+                    || current_model.starts_with("gpt-")
+                    || current_model.starts_with("gemini-");
+                if needs_reset {
+                    if let Some(obj) = settings.as_object_mut() {
+                        obj.remove("model");
+                    }
                 }
             }
         }
@@ -1729,12 +1942,31 @@ impl CodeBuddyManager {
         // 同步 local_storage 缓存，避免 CLI 启动时 ProductManager 读取陈旧环境缓存
         let storage_dir = settings_dir.join("local_storage");
         let _ = std::fs::create_dir_all(&storage_dir);
+        if let Ok(entries) = std::fs::read_dir(&storage_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with("entry_") && file_name.ends_with(".info") {
+                        if file_name == CLI_PRODUCT_CACHE_FILE
+                            || file_name == "entry_3aedeedf0d092a51274ce4ea969ce8ec.info"
+                        {
+                            let _ = std::fs::remove_file(&path);
+                        } else if let Ok(content) = std::fs::read_to_string(&path) {
+                            if content.contains("H4sI") {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let env_path = storage_dir.join(CLI_ENV_CACHE_FILE);
         let endpoint_path = storage_dir.join(CLI_ENDPOINT_CACHE_FILE);
-        let product_path = storage_dir.join(CLI_PRODUCT_CACHE_FILE);
-        let _ = std::fs::remove_file(&product_path);
         let _ = write_cli_json_string_cache(&env_path, variant.cli_internet_environment());
         let _ = write_cli_json_string_cache(&endpoint_path, variant.cli_endpoint());
+
+        // 同步 CodeBuddyExtension 原生认证文件，保持 resolveEnvFromSessionFileSync 与 X-User-Id 一致
+        self.sync_native_auth_session(account, variant);
 
         info!(
             "codebuddy: 已切换 CLI 账号到 {}（{}，{}）",
@@ -1743,6 +1975,110 @@ impl CodeBuddyManager {
             variant.label()
         );
         Ok(())
+    }
+
+    fn sync_native_auth_session(&self, account: &CodeBuddyAccount, variant: CodeBuddyVariant) {
+        let auth_dir = self
+            .user_home
+            .join(".local/share/CodeBuddyExtension/Data/Public/auth");
+        let _ = std::fs::create_dir_all(&auth_dir);
+        let info_file = auth_dir.join("Tencent-Cloud.coding-copilot.info");
+
+        let claims = extract_jwt_claims(&account.access_token);
+        let uid = if !account.uid.trim().is_empty() {
+            account.uid.trim().to_string()
+        } else {
+            claims
+                .as_ref()
+                .and_then(|c| c.get("sub").and_then(Value::as_str))
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        };
+        let nickname = account.display_name();
+        let domain = match variant {
+            CodeBuddyVariant::Cn => "www.codebuddy.cn",
+            CodeBuddyVariant::Ai => "www.codebuddy.ai",
+        };
+        let session_state = claims
+            .as_ref()
+            .and_then(|c| c.get("sid").and_then(Value::as_str))
+            .unwrap_or("")
+            .to_string();
+        let scope = claims
+            .as_ref()
+            .and_then(|c| c.get("scope").and_then(Value::as_str))
+            .unwrap_or("openid profile offline_access email")
+            .to_string();
+        let exp_ms = account.expires_at.unwrap_or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|c| c.get("exp").and_then(Value::as_i64))
+                .map(|s| s * 1000)
+                .unwrap_or_else(|| (now_ms() as i64) + 4752000 * 1000)
+        });
+        let refresh_exp_ms = account.refresh_expires_at.unwrap_or(exp_ms);
+
+        let native_info = json!({
+            "account": {
+                "uid": uid,
+                "nickname": nickname,
+                "uin": "",
+                "type": "personal",
+                "lastLogin": true,
+                "isCreator": false,
+                "isAdmin": false,
+                "pluginEnabled": true,
+                "deployStatus": { "statusCode": 0, "statusMsg": "", "detailMsg": "" },
+                "accountType": "",
+                "sso": { "domain": "", "domainModifiedTimes": 0 },
+                "idp": "",
+                "areaInfoComplete": false,
+                "oneidAccountId": "",
+                "isCurrentOneIdEnterprise": false,
+                "isCurrentOneIdPersonal": false,
+                "isFirstLogin": false,
+                "phoneNumber": ""
+            },
+            "auth": {
+                "accessToken": account.access_token.trim(),
+                "expiresIn": 4752000,
+                "refreshExpiresIn": 5184000,
+                "refreshToken": account.refresh_token.trim(),
+                "tokenType": "Bearer",
+                "notBeforePolicy": 0,
+                "sessionState": session_state,
+                "scope": scope,
+                "domain": domain,
+                "lastRefreshTime": now_ms() as i64,
+                "expiresAt": exp_ms,
+                "refreshExpiresAt": refresh_exp_ms
+            },
+            "accounts": [{
+                "uid": uid,
+                "nickname": nickname,
+                "uin": "",
+                "type": "personal",
+                "lastLogin": true,
+                "isCreator": false,
+                "isAdmin": false,
+                "pluginEnabled": true,
+                "deployStatus": { "statusCode": 0, "statusMsg": "", "detailMsg": "" },
+                "accountType": "",
+                "sso": { "domain": "", "domainModifiedTimes": 0 },
+                "idp": "",
+                "areaInfoComplete": false,
+                "oneidAccountId": "",
+                "isCurrentOneIdEnterprise": false,
+                "isCurrentOneIdPersonal": false,
+                "isFirstLogin": false,
+                "phoneNumber": ""
+            }]
+        });
+
+        if let Ok(content) = serde_json::to_string(&native_info) {
+            let _ = atomic_write(&info_file, &content);
+        }
     }
 
     /// token 保活同步：活动账号刷新成功后，仅当 settings.json 的
@@ -1803,6 +2139,22 @@ impl CodeBuddyManager {
             }
             Err(error) => warn!("codebuddy: 同步 CLI token 序列化失败: {error}"),
         }
+
+        // 同时同步更新原生 auth 文件中的 accessToken 与刷新时间
+        let info_file = self.user_home.join(
+            ".local/share/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+        );
+        if let Ok(content) = std::fs::read_to_string(&info_file) {
+            if let Ok(mut json) = serde_json::from_str::<Value>(&content) {
+                if let Some(auth) = json.get_mut("auth").and_then(Value::as_object_mut) {
+                    auth.insert("accessToken".to_string(), json!(new_token));
+                    auth.insert("lastRefreshTime".to_string(), json!(now_ms() as i64));
+                    if let Ok(updated) = serde_json::to_string(&json) {
+                        let _ = atomic_write(&info_file, &updated);
+                    }
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1820,10 +2172,29 @@ impl CodeBuddyManager {
         })
     }
 
-    pub fn set_auto_config(&self, checkin: bool, travel: bool) -> Result<Value, String> {
+    pub fn block_international_auto_switch(&self) -> bool {
+        self.read_inner().state.auto.block_international_auto_switch
+    }
+
+    pub fn set_auto_config(
+        &self,
+        checkin: Option<bool>,
+        travel: Option<bool>,
+        block_international_auto_switch: Option<bool>,
+    ) -> Result<Value, String> {
         let mut inner = self.write_inner();
-        inner.state.auto = AutoConfig { checkin, travel };
-        self.persist_state(&inner.state)?;
+        let mut state = inner.state.clone();
+        if let Some(value) = checkin {
+            state.auto.checkin = value;
+        }
+        if let Some(value) = travel {
+            state.auto.travel = value;
+        }
+        if let Some(value) = block_international_auto_switch {
+            state.auto.block_international_auto_switch = value;
+        }
+        self.persist_state(&state)?;
+        inner.state = state;
         Ok(json!({"ok": true, "auto": inner.state.auto}))
     }
 
@@ -1846,8 +2217,13 @@ impl CodeBuddyManager {
         Ok(settings)
     }
 
+    pub fn is_device_fingerprint_enabled(&self) -> bool {
+        self.read_inner().state.device_fingerprint
+    }
+
     /// 读取 CLI 选项：permissions.defaultMode 是否为 bypassPermissions，
-    /// 以及 env.CODEBUDDY_IS_SANDBOX 是否开启（危险操作也不询问，仅隔离环境）。
+    /// env.CODEBUDDY_IS_SANDBOX 是否开启（危险操作也不询问，仅隔离环境），
+    /// 以及 deviceFingerprint 是否开启（设备指纹隔离与防检测头，默认开启）。
     pub fn cli_options(&self) -> Value {
         let settings = self.read_cli_settings().ok();
         let bypass = settings
@@ -1871,18 +2247,24 @@ impl CodeBuddyManager {
             })
             .map(|value| value == "1")
             .unwrap_or(false);
-        json!({"bypassPermissions": bypass, "sandbox": sandbox})
+        json!({
+            "bypassPermissions": bypass,
+            "sandbox": sandbox,
+            "deviceFingerprint": self.is_device_fingerprint_enabled(),
+        })
     }
 
     /// 写入或撤销 CLI 选项，其余 settings.json 内容保持不变：
     /// - bypassPermissions：把 permissions.defaultMode 设为 bypassPermissions 或移除；
     /// - sandbox：把 env.CODEBUDDY_IS_SANDBOX 设为 "1" 或移除。注意 CodeBuddy CLI
     ///   只从进程环境变量读取该开关（help 原文 "process env only"），settings.json
-    ///   的 env 不生效，因此同时向 ~/.bashrc 写入/移除 export 行，新终端会话生效。
+    ///   的 env 不生效，因此同时向 ~/.bashrc 写入/移除 export 行，新终端会话生效；
+    /// - deviceFingerprint：切换账号时自动轮换独立机器码与防检测头（默认开启）。
     pub fn set_cli_options(
         &self,
         bypass_permissions: bool,
         sandbox: bool,
+        device_fingerprint: bool,
     ) -> Result<Value, String> {
         let mut settings = self.read_cli_settings()?;
         {
@@ -1918,18 +2300,47 @@ impl CodeBuddyManager {
             } else {
                 env.remove("CODEBUDDY_IS_SANDBOX");
             }
+
+            if device_fingerprint {
+                let inner = self.read_inner();
+                let active_mid = inner
+                    .accounts
+                    .iter()
+                    .find(|acc| acc.id == inner.state.active_account_id)
+                    .or_else(|| inner.accounts.first())
+                    .map(|acc| {
+                        acc.machine_id
+                            .clone()
+                            .unwrap_or_else(|| account_machine_id(&acc.id))
+                    });
+                if let Some(mid) = active_mid {
+                    env.insert("CLIENT_INFO_MACHINE_ID".to_string(), json!(mid));
+                    env.remove("CODEBUDDY_SKIP_INTERNAL_HEADERS");
+                    self.sync_fingerprint_bashrc(Some(&mid))?;
+                }
+            } else {
+                env.remove("CLIENT_INFO_MACHINE_ID");
+                env.remove("CODEBUDDY_SKIP_INTERNAL_HEADERS");
+                self.sync_fingerprint_bashrc(None)?;
+            }
+        }
+        {
+            let mut inner = self.write_inner();
+            inner.state.device_fingerprint = device_fingerprint;
+            self.persist_state(&inner.state)?;
         }
         let settings_file = self.user_home.join(".codebuddy").join("settings.json");
         let content = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
         atomic_write(&settings_file, &content)?;
         self.sync_sandbox_bashrc(sandbox)?;
         info!(
-            "codebuddy: 已更新 CLI 选项 bypassPermissions={bypass_permissions}, sandbox={sandbox}"
+            "codebuddy: 已更新 CLI 选项 bypassPermissions={bypass_permissions}, sandbox={sandbox}, deviceFingerprint={device_fingerprint}"
         );
         Ok(json!({
             "ok": true,
             "bypassPermissions": bypass_permissions,
             "sandbox": sandbox,
+            "deviceFingerprint": device_fingerprint,
         }))
     }
 
@@ -1960,6 +2371,42 @@ impl CodeBuddyManager {
                 .join("\n")
                 + "\n"
         };
+        atomic_write(&bashrc, &next)
+    }
+
+    /// 把 CLIENT_INFO_MACHINE_ID 写入/移出 ~/.bashrc。
+    fn sync_fingerprint_bashrc(&self, machine_id: Option<&str>) -> Result<(), String> {
+        const MARKER: &str = "# CodeBuddy device fingerprint isolation";
+        let bashrc = self.user_home.join(".bashrc");
+        let content = fs::read_to_string(&bashrc).unwrap_or_default();
+        let has_env = content.contains("CLIENT_INFO_MACHINE_ID=");
+        let has_skip = content.contains("CODEBUDDY_SKIP_INTERNAL_HEADERS");
+        if machine_id.is_some() && has_env && !has_skip {
+            if let Some(mid) = machine_id {
+                if content.contains(&format!("CLIENT_INFO_MACHINE_ID=\"{mid}\"")) {
+                    return Ok(());
+                }
+            }
+        }
+        if machine_id.is_none() && !has_env && !content.contains(MARKER) && !has_skip {
+            return Ok(());
+        }
+        let filtered: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                !line.contains("CLIENT_INFO_MACHINE_ID")
+                    && !line.contains("CODEBUDDY_SKIP_INTERNAL_HEADERS")
+                    && !line.contains(MARKER)
+            })
+            .collect();
+        let mut next = filtered.join("\n").trim_end().to_string();
+        if let Some(mid) = machine_id {
+            next.push_str("\n\n");
+            next.push_str(MARKER);
+            next.push_str(&format!("\nexport CLIENT_INFO_MACHINE_ID=\"{mid}\"\n"));
+        } else {
+            next.push('\n');
+        }
         atomic_write(&bashrc, &next)
     }
 
@@ -3074,19 +3521,19 @@ mod tests {
     #[test]
     fn variant_endpoints_and_cli_configs_match_specs() {
         assert_eq!(CodeBuddyVariant::Cn.api_endpoint(), "https://www.codebuddy.cn");
-        assert_eq!(CodeBuddyVariant::Ai.api_endpoint(), "https://www.workbuddy.ai");
+        assert_eq!(CodeBuddyVariant::Ai.api_endpoint(), "https://www.codebuddy.ai");
 
         assert_eq!(CodeBuddyVariant::Cn.oauth_platform(), "workbuddy");
-        assert_eq!(CodeBuddyVariant::Ai.oauth_platform(), "workbuddy-ai");
+        assert_eq!(CodeBuddyVariant::Ai.oauth_platform(), "CLI");
 
         assert_eq!(CodeBuddyVariant::Cn.cli_endpoint(), "https://copilot.tencent.com");
         assert_eq!(CodeBuddyVariant::Ai.cli_endpoint(), "https://www.codebuddy.ai");
 
         assert_eq!(CodeBuddyVariant::Cn.cli_openai_base_url(), None);
-        assert_eq!(CodeBuddyVariant::Ai.cli_openai_base_url(), Some("https://www.codebuddy.ai/v2"));
+        assert_eq!(CodeBuddyVariant::Ai.cli_openai_base_url(), None);
 
         assert_eq!(CodeBuddyVariant::Cn.cli_internet_environment(), "internal");
-        assert_eq!(CodeBuddyVariant::Ai.cli_internet_environment(), "public");
+        assert_eq!(CodeBuddyVariant::Ai.cli_internet_environment(), "external");
 
         assert!(CodeBuddyVariant::Cn.supports_checkin());
         assert!(!CodeBuddyVariant::Ai.supports_checkin());
@@ -3135,26 +3582,26 @@ mod tests {
     fn imports_wb_switch_accounts_json_correctly() {
         let sample = json!([
             {
-                "id": "11111111-1111-4111-8111-111111111111",
-                "uid": "00000000-0000-4000-8000-000000000000",
+                "id": "e47bb399-7130-42e1-bdce-d9f892954f3a",
+                "uid": "7aa42ba4-eb33-4139-baed-a284f27c4748",
                 "domain": "www.workbuddy.ai",
                 "variant": "ai",
-                "nickname": "test.user@example.invalid",
+                "nickname": "beyondcy@gmail.com",
                 "email": null,
-                "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDAiLCJlbWFpbCI6InRlc3QudXNlckBleGFtcGxlLmludmFsaWQifQ==.signature",
+                "access_token": "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI3YWE0MmJhNC1lYjMzLTQxMzktYmFlZC1hMjg0ZjI3YzQ3NDgiLCJlbWFpbCI6ImJleW9uZGN5QGdtYWlsLmNvbSJ9.signature",
                 "refresh_token": "refresh-123",
                 "expiresAt": 1823165039883i64
             }
         ]);
         let parsed = parse_codebuddy_import_account(&sample[0]).expect("should parse");
-        assert_eq!(parsed.id, "11111111-1111-4111-8111-111111111111");
-        assert_eq!(parsed.uid, "00000000-0000-4000-8000-000000000000");
+        assert_eq!(parsed.id, "e47bb399-7130-42e1-bdce-d9f892954f3a");
+        assert_eq!(parsed.uid, "7aa42ba4-eb33-4139-baed-a284f27c4748");
         assert_eq!(parsed.variant, Some("ai".to_string()));
-        assert_eq!(parsed.email, "test.user@example.invalid");
-        assert_eq!(parsed.nickname, "test.user@example.invalid");
+        assert_eq!(parsed.email, "beyondcy@gmail.com");
+        assert_eq!(parsed.nickname, "beyondcy@gmail.com");
         assert_eq!(
             parsed.access_token,
-            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIwMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDAiLCJlbWFpbCI6InRlc3QudXNlckBleGFtcGxlLmludmFsaWQifQ==.signature"
+            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiI3YWE0MmJhNC1lYjMzLTQxMzktYmFlZC1hMjg0ZjI3YzQ3NDgiLCJlbWFpbCI6ImJleW9uZGN5QGdtYWlsLmNvbSJ9.signature"
         );
         assert_eq!(parsed.refresh_token, "refresh-123");
         assert_eq!(parsed.expires_at, Some(1823165039883i64));
@@ -3265,6 +3712,52 @@ mod tests {
     }
 
     #[test]
+    fn auto_config_blocks_international_by_default_and_persists_partial_updates() {
+        let dir = std::env::temp_dir().join(format!("webclx-codebuddy-auto-{}", new_id()));
+        fs::create_dir_all(&dir).unwrap();
+        let home = dir.join("home");
+        let fresh = CodeBuddyManager::load(dir.clone(), home.clone()).unwrap();
+        assert!(fresh.block_international_auto_switch());
+
+        // Existing installations have only checkin/travel. Loading them must
+        // enable the new policy without losing the user's existing switches.
+        fs::write(
+            dir.join(CODEBUDDY_STATE_FILE),
+            r#"{"auto":{"checkin":false,"travel":true},"active_account_id":"original"}"#,
+        )
+        .unwrap();
+        let manager = CodeBuddyManager::load(dir.clone(), home.clone()).unwrap();
+        assert_eq!(
+            manager.auto_config()["auto"],
+            json!({
+                "checkin": false, "travel": true, "blockInternationalAutoSwitch": true
+            })
+        );
+        manager.set_auto_config(None, None, Some(false)).unwrap();
+        assert!(!manager.block_international_auto_switch());
+        // Older clients omit the new field when changing their existing switches.
+        manager.set_auto_config(Some(true), None, None).unwrap();
+        let reloaded = CodeBuddyManager::load(dir.clone(), home.clone()).unwrap();
+        assert_eq!(
+            reloaded.auto_config()["auto"],
+            json!({
+                "checkin": true, "travel": true, "blockInternationalAutoSwitch": false
+            })
+        );
+        assert_eq!(reloaded.read_inner().state.active_account_id, "original");
+        reloaded
+            .set_auto_config(None, Some(false), Some(true))
+            .unwrap();
+        assert!(
+            CodeBuddyManager::load(dir.clone(), home.clone())
+                .unwrap()
+                .block_international_auto_switch()
+        );
+        assert!(!home.exists(), "automation policy must not write native CLI configuration");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn bypass_permissions_fills_prefix_allow_rules_and_off_removes_them() {
         let dir = std::env::temp_dir().join(format!(
             "webclx-codebuddy-options-{}",
@@ -3279,7 +3772,7 @@ mod tests {
         fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
         fs::write(&settings_file, r#"{"model":"glm-5.3-flash"}"#).unwrap();
 
-        manager.set_cli_options(true, false).unwrap();
+        manager.set_cli_options(true, false, true).unwrap();
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
         assert_eq!(settings["permissions"]["defaultMode"], json!("bypassPermissions"));
@@ -3291,7 +3784,7 @@ mod tests {
         assert!(allow.len() >= BYPASS_PERMISSION_ALLOW_RULES.len());
         assert_eq!(manager.cli_options()["bypassPermissions"], json!(true));
 
-        manager.set_cli_options(false, false).unwrap();
+        manager.set_cli_options(false, false, true).unwrap();
         let settings: Value =
             serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
         assert!(settings["permissions"].get("defaultMode").is_none());
@@ -3303,6 +3796,191 @@ mod tests {
                 .map(|allow| allow.is_empty())
                 .unwrap_or(true)
         );
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn device_fingerprint_isolation_rotates_and_syncs_credentials() {
+        let dir = std::env::temp_dir().join(format!(
+            "webclx-codebuddy-fingerprint-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let home = dir.join("home");
+        let manager = CodeBuddyManager::load(dir.clone(), home.clone()).unwrap();
+        let settings_file = home.join(".codebuddy/settings.json");
+        let bashrc_file = home.join(".bashrc");
+        fs::create_dir_all(settings_file.parent().unwrap()).unwrap();
+
+        // 默认 deviceFingerprint 启用
+        assert_eq!(manager.cli_options()["deviceFingerprint"], json!(true));
+
+        let acc1 = CodeBuddyAccount {
+            id: "cb-acc-1".to_string(),
+            uid: "uid-001".to_string(),
+            access_token: "token-1".to_string(),
+            ..Default::default()
+        };
+        let acc2 = CodeBuddyAccount {
+            id: "cb-acc-2".to_string(),
+            uid: "uid-002".to_string(),
+            access_token: "token-2".to_string(),
+            ..Default::default()
+        };
+        manager.upsert_account(acc1).unwrap();
+        manager.upsert_account(acc2).unwrap();
+
+        // 切换到账号 1
+        manager.switch_account("cb-acc-1").unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        let mid1 = settings["env"]["CLIENT_INFO_MACHINE_ID"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(mid1, account_machine_id("cb-acc-1"));
+        assert!(
+            settings["env"]
+                .get("CODEBUDDY_SKIP_INTERNAL_HEADERS")
+                .is_none()
+        );
+        let bashrc = fs::read_to_string(&bashrc_file).unwrap();
+        assert!(bashrc.contains(&format!("CLIENT_INFO_MACHINE_ID=\"{mid1}\"")));
+        assert!(!bashrc.contains("CODEBUDDY_SKIP_INTERNAL_HEADERS"));
+
+        // 切换到账号 2 -> 机器指纹应自动轮换
+        manager.switch_account("cb-acc-2").unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        let mid2 = settings["env"]["CLIENT_INFO_MACHINE_ID"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(mid2, account_machine_id("cb-acc-2"));
+        assert_ne!(mid1, mid2);
+        let bashrc = fs::read_to_string(&bashrc_file).unwrap();
+        assert!(bashrc.contains(&format!("CLIENT_INFO_MACHINE_ID=\"{mid2}\"")));
+        assert!(!bashrc.contains(&format!("CLIENT_INFO_MACHINE_ID=\"{mid1}\"")));
+
+        // 关闭设备指纹隔离
+        manager.set_cli_options(false, false, false).unwrap();
+        assert_eq!(manager.cli_options()["deviceFingerprint"], json!(false));
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        assert!(settings["env"].get("CLIENT_INFO_MACHINE_ID").is_none());
+        assert!(
+            settings["env"]
+                .get("CODEBUDDY_SKIP_INTERNAL_HEADERS")
+                .is_none()
+        );
+        let bashrc = fs::read_to_string(&bashrc_file).unwrap();
+        assert!(!bashrc.contains("CLIENT_INFO_MACHINE_ID"));
+        assert!(!bashrc.contains("CODEBUDDY_SKIP_INTERNAL_HEADERS"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn switch_account_syncs_native_auth_and_external_environment_for_ai() {
+        let dir = std::env::temp_dir().join(format!(
+            "webclx-codebuddy-ai-switch-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let home = dir.join("home");
+        let manager = CodeBuddyManager::load(dir.clone(), home.clone()).unwrap();
+        let settings_file = home.join(".codebuddy/settings.json");
+        let native_auth_file = home.join(
+            ".local/share/CodeBuddyExtension/Data/Public/auth/Tencent-Cloud.coding-copilot.info",
+        );
+        let storage_dir = home.join(".codebuddy/local_storage");
+
+        let cn_acc = CodeBuddyAccount {
+            id: "cb-cn-1".to_string(),
+            uid: "uid-cn-1".to_string(),
+            variant: Some("cn".to_string()),
+            access_token: "tok-cn".to_string(),
+            ..Default::default()
+        };
+        let ai_acc = CodeBuddyAccount {
+            id: "cb-ai-1".to_string(),
+            uid: "uid-ai-1".to_string(),
+            variant: Some("ai".to_string()),
+            access_token: "tok-ai".to_string(),
+            ..Default::default()
+        };
+        manager.upsert_account(cn_acc).unwrap();
+        manager.upsert_account(ai_acc).unwrap();
+
+        // 切换到国内账号
+        manager.switch_account("cb-cn-1").unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        assert_eq!(settings["env"]["CODEBUDDY_INTERNET_ENVIRONMENT"], "internal");
+        assert!(settings["env"].get("CODEBUDDY_BASE_URL").is_none());
+        assert!(settings.get("model").is_none());
+        let native: Value =
+            serde_json::from_str(&fs::read_to_string(&native_auth_file).unwrap()).unwrap();
+        assert_eq!(native["auth"]["domain"], "www.codebuddy.cn");
+        assert_eq!(native["account"]["uid"], "uid-cn-1");
+
+        // 模拟生成陈旧的 Product-Cache 文件（含版本化与无版本化）
+        fs::write(storage_dir.join(CLI_PRODUCT_CACHE_FILE), "dummy").unwrap();
+        fs::write(storage_dir.join("entry_3aedeedf0d092a51274ce4ea969ce8ec.info"), "dummy")
+            .unwrap();
+        fs::write(storage_dir.join("entry_test_gzip.info"), "\"H4sIAAAAA...\"").unwrap();
+
+        // 切换到国际账号 -> model 应自动设为 default-model
+        manager.switch_account("cb-ai-1").unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        assert_eq!(settings["env"]["CODEBUDDY_INTERNET_ENVIRONMENT"], "external");
+        assert!(settings["env"].get("CODEBUDDY_BASE_URL").is_none());
+        assert_eq!(settings["model"], "default-model");
+        let native: Value =
+            serde_json::from_str(&fs::read_to_string(&native_auth_file).unwrap()).unwrap();
+        assert_eq!(native["auth"]["domain"], "www.codebuddy.ai");
+        assert_eq!(native["account"]["uid"], "uid-ai-1");
+
+        // 再切回国内账号 -> 国际版 default-model 互斥，应被自动清除
+        manager.switch_account("cb-cn-1").unwrap();
+        let settings: Value =
+            serde_json::from_str(&fs::read_to_string(&settings_file).unwrap()).unwrap();
+        assert_eq!(settings["env"]["CODEBUDDY_INTERNET_ENVIRONMENT"], "internal");
+        assert!(settings.get("model").is_none());
+
+        // 恢复切回国际账号以便验证缓存
+        manager.switch_account("cb-ai-1").unwrap();
+        let native: Value =
+            serde_json::from_str(&fs::read_to_string(&native_auth_file).unwrap()).unwrap();
+        assert_eq!(native["auth"]["domain"], "www.codebuddy.ai");
+        assert_eq!(native["account"]["uid"], "uid-ai-1");
+
+        // 验证陈旧 product 缓存已被清理，env 与 endpoint 缓存已被写入
+        assert!(!storage_dir.join(CLI_PRODUCT_CACHE_FILE).exists());
+        assert!(
+            !storage_dir
+                .join("entry_3aedeedf0d092a51274ce4ea969ce8ec.info")
+                .exists()
+        );
+        assert!(!storage_dir.join("entry_test_gzip.info").exists());
+        let env_cache: String = serde_json::from_str(
+            &fs::read_to_string(storage_dir.join(CLI_ENV_CACHE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(env_cache, "external");
+        let endpoint_cache: String = serde_json::from_str(
+            &fs::read_to_string(storage_dir.join(CLI_ENDPOINT_CACHE_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(endpoint_cache, "https://www.codebuddy.ai");
 
         fs::remove_dir_all(dir).unwrap();
     }

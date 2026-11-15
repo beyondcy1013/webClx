@@ -37,6 +37,7 @@ impl SettingsManager {
                     show_dot_entries: default_show_dot_entries(),
                     show_all_workspace_sessions: default_show_all_workspace_sessions(),
                     terminal_new_session_behavior: default_terminal_new_session_behavior(),
+                    terminal_account_sort: default_terminal_account_sort(),
                     desktop_terminal_soft_keyboard_enabled:
                         default_desktop_terminal_soft_keyboard_enabled(),
                     terminal_soft_keyboard_scale: default_terminal_soft_keyboard_scale(),
@@ -70,6 +71,9 @@ impl SettingsManager {
                     terminal_error_keyword_actions: default_terminal_error_keyword_actions(),
                     terminal_activity_agent_display: default_terminal_activity_agent_display(),
                     terminal_completion_bell_enabled: default_terminal_completion_bell_enabled(),
+                    terminal_report_debounce_seconds: default_terminal_report_debounce_seconds(),
+                    terminal_message_queue_seconds: default_terminal_message_queue_seconds(),
+                    terminal_task_timeout_secs: default_terminal_task_timeout_secs(),
                     server_port_auto_increment: default_server_port_auto_increment(),
                     compile_command_timeout_secs: default_compile_command_timeout_secs(),
                     compile_max_concurrency: default_compile_max_concurrency(),
@@ -120,6 +124,7 @@ impl SettingsManager {
                     show_dot_entries: default_show_dot_entries(),
                     show_all_workspace_sessions: default_show_all_workspace_sessions(),
                     terminal_new_session_behavior: default_terminal_new_session_behavior(),
+                    terminal_account_sort: default_terminal_account_sort(),
                     desktop_terminal_soft_keyboard_enabled:
                         default_desktop_terminal_soft_keyboard_enabled(),
                     terminal_soft_keyboard_scale: default_terminal_soft_keyboard_scale(),
@@ -153,6 +158,9 @@ impl SettingsManager {
                     terminal_error_keyword_actions: default_terminal_error_keyword_actions(),
                     terminal_activity_agent_display: default_terminal_activity_agent_display(),
                     terminal_completion_bell_enabled: default_terminal_completion_bell_enabled(),
+                    terminal_report_debounce_seconds: default_terminal_report_debounce_seconds(),
+                    terminal_message_queue_seconds: default_terminal_message_queue_seconds(),
+                    terminal_task_timeout_secs: default_terminal_task_timeout_secs(),
                     server_port_auto_increment: default_server_port_auto_increment(),
                     compile_command_timeout_secs: default_compile_command_timeout_secs(),
                     compile_max_concurrency: default_compile_max_concurrency(),
@@ -201,6 +209,7 @@ impl SettingsManager {
             loaded.show_dot_entries,
             loaded.show_all_workspace_sessions,
             loaded.terminal_new_session_behavior.clone(),
+            loaded.terminal_account_sort.clone(),
             loaded.desktop_terminal_soft_keyboard_enabled,
             loaded.terminal_soft_keyboard_scale,
             loaded.terminal_floating_button_offset_vh,
@@ -223,6 +232,9 @@ impl SettingsManager {
             &loaded.terminal_error_keyword_actions,
             loaded.terminal_activity_agent_display,
             loaded.terminal_completion_bell_enabled,
+            loaded.terminal_report_debounce_seconds,
+            loaded.terminal_message_queue_seconds,
+            loaded.terminal_task_timeout_secs,
             loaded.server_port_auto_increment,
             loaded.compile_command_timeout_secs,
             loaded.compile_max_concurrency,
@@ -276,6 +288,7 @@ impl SettingsManager {
             terminal_new_session_behavior: Arc::new(RwLock::new(
                 loaded.terminal_new_session_behavior,
             )),
+            terminal_account_sort: Arc::new(RwLock::new(loaded.terminal_account_sort)),
             desktop_terminal_soft_keyboard_enabled: Arc::new(RwLock::new(
                 loaded.desktop_terminal_soft_keyboard_enabled,
             )),
@@ -332,6 +345,13 @@ impl SettingsManager {
             terminal_completion_bell_enabled: Arc::new(RwLock::new(
                 loaded.terminal_completion_bell_enabled,
             )),
+            terminal_report_debounce_seconds: Arc::new(RwLock::new(
+                loaded.terminal_report_debounce_seconds,
+            )),
+            terminal_message_queue_seconds: Arc::new(RwLock::new(
+                loaded.terminal_message_queue_seconds,
+            )),
+            terminal_task_timeout_secs: Arc::new(RwLock::new(loaded.terminal_task_timeout_secs)),
             server_port_auto_increment: Arc::new(RwLock::new(loaded.server_port_auto_increment)),
             compile_command_timeout_secs: Arc::new(RwLock::new(
                 loaded.compile_command_timeout_secs,
@@ -532,6 +552,13 @@ impl SettingsManager {
             .clone()
     }
 
+    pub fn terminal_account_sort(&self) -> String {
+        self.terminal_account_sort
+            .read()
+            .expect("workspace settings poisoned")
+            .clone()
+    }
+
     pub fn desktop_terminal_soft_keyboard_enabled(&self) -> bool {
         *self
             .desktop_terminal_soft_keyboard_enabled
@@ -682,6 +709,27 @@ impl SettingsManager {
     pub fn terminal_completion_bell_enabled(&self) -> bool {
         *self
             .terminal_completion_bell_enabled
+            .read()
+            .expect("workspace settings poisoned")
+    }
+
+    pub fn terminal_report_debounce_seconds(&self) -> u32 {
+        *self
+            .terminal_report_debounce_seconds
+            .read()
+            .expect("workspace settings poisoned")
+    }
+
+    pub fn terminal_message_queue_seconds(&self) -> u32 {
+        *self
+            .terminal_message_queue_seconds
+            .read()
+            .expect("workspace settings poisoned")
+    }
+
+    pub fn terminal_task_timeout_secs(&self) -> u64 {
+        *self
+            .terminal_task_timeout_secs
             .read()
             .expect("workspace settings poisoned")
     }
@@ -858,6 +906,7 @@ impl SettingsManager {
             self.show_dot_entries(),
             self.show_all_workspace_sessions(),
             self.terminal_new_session_behavior(),
+            self.terminal_account_sort(),
             self.desktop_terminal_soft_keyboard_enabled(),
             self.terminal_soft_keyboard_scale(),
             self.terminal_floating_button_offset_vh(),
@@ -880,6 +929,9 @@ impl SettingsManager {
             &self.terminal_error_keyword_actions(),
             self.terminal_activity_agent_display(),
             self.terminal_completion_bell_enabled(),
+            self.terminal_report_debounce_seconds(),
+            self.terminal_message_queue_seconds(),
+            self.terminal_task_timeout_secs(),
             self.server_port_auto_increment(),
             self.compile_command_timeout_secs(),
             self.compile_max_concurrency(),
@@ -935,6 +987,7 @@ impl SettingsManager {
         show_dot_entries: bool,
         show_all_workspace_sessions: bool,
         terminal_new_session_behavior: String,
+        terminal_account_sort: String,
         desktop_terminal_soft_keyboard_enabled: bool,
         terminal_soft_keyboard_scale: f32,
         terminal_floating_button_offset_vh: f32,
@@ -957,6 +1010,9 @@ impl SettingsManager {
         terminal_error_keyword_actions: Vec<TerminalErrorKeywordAction>,
         terminal_activity_agent_display: TerminalActivityAgentDisplay,
         terminal_completion_bell_enabled: bool,
+        terminal_report_debounce_seconds: u32,
+        terminal_message_queue_seconds: u32,
+        terminal_task_timeout_secs: u64,
         server_port_auto_increment: bool,
         compile_command_timeout_secs: u64,
         compile_max_concurrency: u32,
@@ -1042,6 +1098,10 @@ impl SettingsManager {
             .terminal_new_session_behavior
             .write()
             .expect("workspace settings poisoned") = terminal_new_session_behavior;
+        *self
+            .terminal_account_sort
+            .write()
+            .expect("workspace settings poisoned") = terminal_account_sort;
         *self
             .desktop_terminal_soft_keyboard_enabled
             .write()
@@ -1131,6 +1191,18 @@ impl SettingsManager {
             .terminal_completion_bell_enabled
             .write()
             .expect("workspace settings poisoned") = terminal_completion_bell_enabled;
+        *self
+            .terminal_report_debounce_seconds
+            .write()
+            .expect("workspace settings poisoned") = terminal_report_debounce_seconds;
+        *self
+            .terminal_message_queue_seconds
+            .write()
+            .expect("workspace settings poisoned") = terminal_message_queue_seconds;
+        *self
+            .terminal_task_timeout_secs
+            .write()
+            .expect("workspace settings poisoned") = terminal_task_timeout_secs;
         *self
             .server_port_auto_increment
             .write()

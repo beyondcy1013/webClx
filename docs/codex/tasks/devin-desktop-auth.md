@@ -101,3 +101,35 @@ Python 测试现为 4 项通过，覆盖文本与二进制往返、旧快照兼�
 - 新凭据覆盖分支由单元测试覆盖，未在线上改写真实凭据。
 
 遗留：真实 Desktop GPG 备份/恢复与原生登录验收仍需退出 Desktop 后进行；另一个会话的批量导入弹窗（未跟踪文件）仍按 `imported_count == 账号数` 判定成功，遇到跳过项会提示“接收数量不一致”。
+
+## 2026-10-25 套餐内外额度
+
+LLM_API 的 Devin 列表增加「套餐内剩余」「套餐外剩余」两列，加载时查询，单列可手动刷新。新增只读接口 `GET /api/auth/devin-accounts/{account_id}/quota`：按账号库中该账号的 token 与 org_id 请求 `https://app.devin.ai/api/{orgId}/billing/quota/usage`，使用 Bearer 和 `x-cog-org-id`，不切换当前登录、不把 token 返回浏览器。参考实现为 `/home/codes/plugins/ppdevinRefactory/out/switch/quota.js`。
+
+真实响应包含 `daily_percentage`、`weekly_percentage`、重置时间和 `overage_balance`。官方网页在已用百分比达到 100 时判为额度耗尽，因此套餐内显示 `max(0, 100 - percentage)` 的日/周剩余比例；`hide_daily_quota` 为 true 时不显示日窗口。非额度套餐、未分配额度、字段缺失分别明确提示，不把缺失字段当作零。套餐外显示 `overage_balance` 原始单位、保留负值，两位小数；不把套餐内百分比与套餐外余额相加。
+
+浏览器按账号缓存成功响应 60 秒，并合并同账号并发请求；查询失败明确提示，不显示旧余额冒充新结果。Desktop 仅含登录摘要，显示不支持查询。测试涵盖零余额、负余额、日周剩余计算、隐藏日窗口、缓存、手动刷新、失败和 Desktop 不发送请求。后端验证与部署结果以本次编译队列回调为准。
+
+本次验证与上线：提交 `058fcd5`；后端队列 `023202-18e105f98e96e25a` 的 12 项 Devin 测试通过，Node 行为测试与 Chromium 隔离双列渲染通过。部署 `023250-18e105f98e96e25b` 成功，运行/安装二进制 SHA-256 同为 `d60818c0e783931101732476179c38f101a188a07ed2997efd878f4fbbe4afd0`；认证接口 HTTP 200，HTTP 静态 `index.html` 含两个表头，额度模块缓存版本 `20261025-quota` 已生效。真实账号查询一条 HTTP 200（日已用 0%、周已用 83%、套餐外余额 -0.045780214），对应显示日剩余 100%、周剩余 17%、套餐外 -0.05；另一条上游返回 HTTP 404，按查询失败展示，不伪造余额。根路径未带浏览器登录 Cookie 会返回登录页，不能用它替代已登录列表的页面验收。持久验收提醒已取消。安装审计：`/home/bin/webclx/compile/runs/20261025T023255-5558-19523/install-report-1.json`。
+
+### CLI 团队标识与网页额度组织（2026-10-25）
+
+`ozy9zne9@icloudev.com` 查询返回 `Organization not found`，根因是原生 CLI `Team ID` 为 `devin-team$account-…`，而网页 billing 接口需要 `org-…`。不能把该 CLI 团队标识直接拼入网页额度 URL，也不能改写 CLI 配置迎合网页接口。
+
+查询时对 `devin-team$` 前缀，通过同一 token 的 `GET /api/organizations`，严格按 `account_id` 匹配对应组织，并将唯一匹配的 `org_id` 同时用于额度路径和 `x-cog-org-id`。无匹配或多匹配明确失败，不猜测首个组织、不修改账号库。已有网页 `org_id` 直接查询。真实只读复验已成功取得日已用 17%、周已用 96%、套餐外余额 2.753169283951077；显示应为日剩余 83%、周剩余 4%、套餐外 2.75。新增回归覆盖精确匹配、无匹配、多匹配与非法响应；运行服务修复仍以本轮测试、部署回调为准。
+
+CLI 组织映射修复 `68b8169` 已上线：13 项后端测试通过；部署 `023750-18e18b1011833e81` 成功，运行/安装 SHA-256 同为 `7419c6ba8fb6897b334e957a0cebcd79dda4230cabba0d03adccb195d5aa7da6`，服务 active，认证 HTTP 200。线上指定账号额度接口 HTTP 200，日剩余 83%、周剩余 4%、套餐外 2.75，账号库仍保留原 CLI 团队标识。提醒 `paste-1792867050195-12187` 已清理。
+
+### 重设时间与倒计时
+
+套餐内日、周窗口下方分别显示距重设剩余时间与具体重设时间，按浏览器本地时区展示并标注时区。使用接口 ISO 时间中的时区解析绝对时刻，每 30 秒更新倒计时；已到期提示刷新额度，缺失或非法时间显示未知，不猜测下一周期。不为套餐外余额编造重设时间。成功查询和失败重试时清理旧时间明细；全局单一定时器仅扫描连接到文档的行，表格重绘不保留旧节点。静态模块缓存版本 `20261025-quota-reset`；Node 测试与 Chromium 时钟推进验证覆盖日周时间、时区、到期、隐藏日窗口和倒计时自动变化。
+
+### 套餐到期与续费时间（2026-10-25）
+
+`POST /api/auth/devin-accounts/{account_id}/subscription/refresh` 使用该账号的 token 和精确映射后的 `x-cog-org-id`，只读请求 Devin `GET /api/billing/subscription`。官方网页 billing actions 使用 Unix 秒字段 `current_period_end` 显示续费时间，使用 `cancel_at` 显示套餐结束；`end_of_cycle_slug` 与当前套餐不同时表示到期变更套餐。它们与日周 quota reset 是不同时间，不能互相推算。
+
+仅白名单持久化 `subscription`（slug、status、current_period_end、cancel_at、end_of_cycle_slug、queried_at）；不修改 CLI 登录、组织配置、账号凭据时间 `saved_at` 或切换记录。网络请求不持有账号锁，保存前核对账号 token/org 未变，原子写入成功后更新内存。上游失败或非法日期不覆盖上次结果；成功响应的空日期会清除旧日期。
+
+Devin 列表复用「到期」列自动查询，并支持手动刷新、60 秒成功缓存和同账号请求合并；明确展示续费、套餐结束、套餐变更或「接口未提供套餐到期时间」。日期按浏览器本地时区显示并标注时区与剩余天数；失败时明确标注上次成功结果。Desktop 摘要不发送查询。
+
+实测指定 `ozy9zne9@icloudev.com` 订阅接口 HTTP 200、pro/active，`current_period_end=1793784543`，即北京时间 2026-11-04 17:29:03；`cancel_at=null`，应标为续费时间。另一现有账号 pro/canceled 且日期均为空，不编造到期日。16 项后端 Devin 测试通过（队列 `135210-18e1adb15d2e2c9f`）；Node 行为测试与 Chromium 本地时区/取消后清除日期验证通过。部署 `135413-18e1adb15d2e2ca1` 已成功，运行/安装二进制 SHA-256 同为 `b415652d86136742e708601eea224bed101f4ed7beda6d5cda7f261eb6b5c5b5`；服务 active/running，认证 HTTP 200。线上两账号 subscription/refresh 均 HTTP 200，分别返回上述 active/续费日期与 canceled/空日期；列表接口与磁盘的 subscription 与查询结果一致，token、CLI org、saved_at、last_switch_at、active 均保持原值。HTTP 两个 JS 模块及 index.html 哈希与源码一致，缓存版本 `20261025-devin-subscription` 生效。部署前暂存改动已完整恢复；安装审计 `/home/bin/webclx/compile/runs/20261025T135418-4059978-15425/install-report-1.json`。

@@ -5,7 +5,7 @@ Date: 2026-05-18
 ## Symptoms
 
 - Switching terminal conversations from the dropdown could leave the visible terminal showing another session's fast-scrolling output.
-- Originally, replay always forced the bottom and lost manual reading positions. Current policy: selecting a different terminal intentionally opens at bottom; same-session reconnect/layout preserves the current reading intent.
+- Current policy (2026-10-25): switching restores each terminal's saved reading/follow intent. New background output updates that terminal to the bottom; foreground manual reading, reconnect and layout preserve the reading position.
 - Long Codex output could appear to lose visible lines when output was written faster than the browser terminal could render.
 - Typing several characters or moving the cursor could appear several seconds late when high-frequency terminal output or replay had built up small browser-side write/input units.
 - Creating a new terminal could show text from an older terminal above the fresh prompt.
@@ -36,9 +36,9 @@ High-volume live output could also disappear from browser history before reconne
 - Server-side websocket handling must read input independently from output/backlog sending. Sending the initial backlog before entering the socket receive loop can queue typed input behind a large history replay, even if the frontend interrupts its local replay queue.
 - Initial websocket replay must use a bounded tmux snapshot, not `capture-pane -S -` over the full `history-limit`. Full 100000-line history with ANSI escapes can keep xterm in hidden replay for 10+ seconds; user input still reaches the PTY, but its echo cannot be shown until the initial write drains.
 - Save scroll metrics per session id before changing sessions and on user scroll events.
-- Selecting a different terminal resets its saved position and follow intent to
-  bottom. Same-session reconnect and replay completion still respect the current
-  saved intent, including manual history reading after selection.
+- Selecting a different terminal invalidates restores from the previous visit,
+  then restores its saved reading/follow intent before revealing it. Background
+  output updates that saved intent to bottom; selection alone never does.
 - Wrap xterm layout fitting in scroll preservation: capture the active session's current position, suppress layout-induced scroll saves, then restore immediately and on the next frame. This prevents mobile IME/visualViewport resize events from overwriting a user's saved scroll location.
 - If the page itself was at the bottom before a dropdown session switch, preserve that page-bottom state across asynchronous xterm replacement, websocket open, and backlog replay settle stages. Bind the restore to the selected session and new connection token, and cancel it only on explicit user scroll input.
 - Treat bottom restoration as an idempotent request. If the xterm logical viewport or page is already within its bottom tolerance, synchronize its DOM projection and controls without calling `term.scrollToBottom()` or `window.scrollTo()` again. Cached dropdown switches can otherwise execute the replay anchor, layout preservation, and page restore paths repeatedly even though the selected terminal is already displayed correctly.
@@ -195,20 +195,49 @@ Native touch also exposes the unchanged bundled xterm's passive-touchstart
 `preventDefault` warning (`cancelEvents: true`). The browser test requires that
 exact known warning and reports it separately; other console errors still fail.
 
-### Switch Always Opens At Bottom (2026-10-14)
+### Cached Switch Preserves Position (2026-10-25)
 
-The latest user policy requires every dropdown switch to display the target's
-latest output, even when it was previously left at the top or in the middle.
-`activateTerminalSessionContext()` resets the target's saved position and
-`followOutput` only when the active context changes. Its scroll intent revision
-invalidates older layout/input restores, and a retained reconnect frame also
-scrolls to bottom. Cached output, connections, and xterm instances stay intact.
-Same-session reconnects preserve manual reading; scrolling up after selection
-still disables follow until the next selection, input, or bottom button action.
+The 2026-10-14/16 policy forced bottom on every selection. The user's current
+request replaces it: remember the reading position when switching, and follow
+new background output. The old `activateTerminalContext()` overwrote the saved
+position and `followOutput` even when no output arrived. A real-xterm regression
+left A at row 0, switched to B and back, and observed row 722 with following
+enabled throughout the sampled frames.
 
-`tests/terminal-session-cache.browser.py` covers immediate and settled bottom
-positions, subsequent live output, native wheel/touch history followed by a
-switch, and manual history reading during replay without a session switch.
+Activation now advances the intent revision to invalidate callbacks from the
+previous visit, carries the saved position to that revision, and positions both
+the current xterm and any retained reconnect frame before revealing them.
+It preserves `followOutput`; `followBackgroundTerminalOutput()` remains the
+owner of updating background output to bottom. New input and the bottom button
+resume following; foreground manual reading keeps its position during output.
+
+Cache eviction exposed a second path: a layout snapshot taken before the new
+xterm's first replay captured row 0, then ran after replay and moved the terminal
+back to row 0 even though the saved position was still row 20. While
+`hasLoadedOutput === false`, `captureTerminalScrollSnapshotForSession()` now
+uses the saved scroll position. This applies to initial replay after eviction
+and replacement during reconnect, without changing replay bytes or queueing.
+
+`tests/terminal-session-cache.browser.py` samples buffer and DOM positions every
+frame for repeated cached switches at rows 0 and 20, including pending resume
+callbacks. It also checks background output, continuous foreground output,
+native wheel/touch input, reconnect and replay after cache eviction. The changed
+shell and navigation modules use cache key `20261025-cached-scroll-position`;
+existing pages need a reload.
+
+Verification on 2026-10-25: scroll-intent, session-cache, switch-output,
+layout-scroll-preserve and backlog-replay Node tests pass; desktop canvas,
+touch canvas, Android DOM and reconnect browser runs pass, including the
+eviction/replay case. The switch-focus browser check also passes. These use
+real xterm with intercepted HTTP/WebSocket fixtures, not an installed Android
+device. Authenticated live HTML references both new cache keys; both HTTP
+modules match the source files. Static changes require no service restart.
+
+The mandatory regression entry is now `bash scripts/repo-check.sh
+--terminal-scroll`: five Node checks and the same four browser variants.
+Default browser checks, the deployment script and terminal-scroll CI all use
+this entry/matrix. See [repository checks](repo-check-entry.md#终端滚动防回归2026-10-25)
+for trigger boundaries, reports and remote required-check limitations.
 
 ### First Scroll After Page Resume Snapped Back (2026-10-20)
 
@@ -775,7 +804,7 @@ node tests/terminal-session-cache.test.mjs
 
 2026-10-16 用户明确要求后台新增输出也相应滚到底部，替代 2026-10-15 的“后台不强制滚动”策略。`drainTerminalOutputQueue` 写入完成及 `endTerminalBacklogReplay` 结束后，非活动 context 通过 `followBackgroundTerminalOutput` 滚动所属 xterm、启用 `followOutput` 并保存底部意图；不得调用依赖全局 term 的前台滚动函数。前台手动阅读仍保持位置，`scheduleTerminalRenderRefresh` 仍只为活动 context 安排额外刷新。
 
-`activateTerminalContext` 保留显示前定位：在 `setTerminalContextRenderVisibility(context, true)` 前将新 term 和 retained term 定位到底部；显示后再同步 DOM。没有新输出的后台终端切回也到底；同会话前台重连不重置阅读意图。
+`activateTerminalContext` 保留显示前定位：在 `setTerminalContextRenderVisibility(context, true)` 前根据保存意图定位 term 和 retained term；显示后再同步 DOM。2026-10-25 起，没有新输出的终端切回恢复原位置；后台新输出仍将保存意图更新到底部；同会话前台重连不重置阅读意图。
 
 浏览器回归三轮各 200 行后台输出：每轮先在 A 阅读历史，再切到 B 阅读历史；等待末行标记进入 A 缓冲区后，在切回前断言 A 已到底、follow 与保存意图均为底部，B 的历史位置不变；继续检查解除 hidden 前与切回后的底部状态。旧代码复现请求 `205100-18debef697f8f6aa`：后台 `viewportY=9`、`baseY=320`、`followOutput=false`。之前请求 `211116-18deb5f45ecf1533` 只验旧策略，不能作为新语义的验收证据。缓存键更新为 `20261016-background-bottom`。
 
@@ -815,3 +844,83 @@ cargo test --bin webclx cli::tests session_hide_tests
 结束事务不再禁用全局“新开 / 结束 / 落盘并结束”按钮，仅按目标 session ID 防止重复提交。同一终端隐藏与关闭仍按顺序执行；用户可以在请求期间操作其他终端。后台成功或失败通过现有 `terminal-status-toast` 提示（`pointer-events: none`），不获取焦点；结束完成不再自动返回上一页，避免打断用户已经展开的新工作。隐藏失败不关闭目标；关闭失败保留隐藏终端供重试。
 
 验证：`tests/terminal-experience-save.browser.py` 在桌面与移动尺寸故意挂起 close 响应，检查三个动作按钮可用、重复目标不重复发送、真实下拉切换和真实“新开”对话框可在关闭完成前操作；释放响应后对话框和焦点保持不变。另通过 selection-race、delete-safety、experience-save Node 回归及语法检查。静态缓存键为 `20261017-background-close`，无需重建或重启。
+
+## 持续 Agent 输出跟随回归（2026-10-22）
+
+用户要求打开终端运行智能体后，持续输出期间保持自动滚到底部。当前实现未复现失效，保留原有产品语义：默认跟随；主动上翻阅读时保持阅读位置，输入或跳底恢复跟随。
+
+`tests/terminal-session-cache.browser.py` 新增连续 30 批输出（每批含清除状态行、回车和 8 行正文），无需再次输入，每批检查 `followOutput=true`、`viewportY=baseY`、DOM 滚动位置等于最大值且最后一行未被裁切。桌面 canvas、触屏 canvas、Android DOM 三种 Chromium 模拟模式全部通过；`node tests/terminal-scroll-intent.test.mjs` 通过。此为真实 xterm 的模拟 WebSocket 回归，不代表用户现有客户端或真实智能体现场已复现并修复；未修改运行逻辑，无需重启或更新静态缓存键。
+
+## CodeBuddy 等静默智能体切换保留底部跟随（2026-11-01）
+
+### 现象
+运行 Codex 的终端在持续输出或切换后能正常维持底部，但运行 CodeBuddy（或其他在等待输入时不产生后台心跳或输出的静默智能体）的终端在发生大量滚动后，切换到其他会话再切回时，停留在非底部位置，必须重新输入或有新输出才能回到终端底部。
+
+### 根因链分析
+1. **静默智能体与有后台流智能体的差异**：
+   - Codex、Claude 等智能体在后台经常产生心跳、token 流或状态刷新；有新输出时触发 `followBackgroundTerminalOutput`，自动将 `context.followOutput = true` 并写入 `{ atBottom: true }` 到 `terminalScrollPositions`。
+   - CodeBuddy 基于 Ink 渲染，交互完成后（等待用户输入阶段）完全处于静默状态，切换到后台时不会产生任何新字节。它的切回位置 100% 取决于切换切走时所持久化的意图状态。
+2. **前台输出排空时未同步记录底部快照**：
+   - `drainTerminalOutputQueue` 在前台写入完成且粘底时调用了 `scrollTerminalToBottom()`，但没有同步更新 `terminalScrollPositions.set(context.sessionId, { ... atBottom: true })`。
+3. **切走保存时将瞬态 DOM 几何误判为用户意图**：
+   - 会话切换时 `selectSession` 调用 `saveTerminalScrollPositionForSession(sessionId)`。原逻辑中的 `preserveIntent` 仅在 `terminalScrollSaveSuppressed() || context.outputWriteInFlight || context.backlogReplayActive` 时生效。
+   - 对于静默等待输入的终端，写入已经完成，上述标志均为 `false`，导致使用瞬时 DOM 几何 `metrics.atBottom`。Ink 渲染光标上移或 DOM 渲染微小抖动时 `metrics.atBottom` 判定为 `false`，错误地将 `followOutput` 降级为 `false`。
+4. **切回恢复逻辑对 `followOutput` 的非严格判断**：
+   - `restoreCachedTerminalViewport` 中判断 `if (context.followOutput)`，当被上述步骤降级后无法触发 `scrollTerminalToBottom()`。
+5. **快照捕获覆盖**：
+   - `captureTerminalScrollSnapshotForSession` 在未加载完时直接强制覆盖 `atBottom`，需优先继承已保存记录与 context 的跟随状态。
+
+### 修复
+1. **切换会话时保护未被用户取消的跟随状态**：
+   - `selectSession` 调用 `saveTerminalScrollPositionForSession` 时显式传入 `{ switchingSession: true }`。
+   - `saveTerminalScrollPositionForSession` 的 `preserveIntent` 增加 `(switchingSession && context?.followOutput !== false)` 分支。这样只要用户未主动向上翻页（`followOutput !== false`），会话切换保存时就坚决保留底部意图，不被瞬时 DOM 几何破坏；用户主动向上滚动时（由原生滚动事件 `userIntent: false` 且非 `switchingSession` 触发）仍能正常转为 `followOutput: false` 并保留历史阅读位置。
+2. **前台输出排空同步更新意图缓存**：
+   - `drainTerminalOutputQueue` 在前台正常滚动到底部且 `context.followOutput !== false` 时，更新 `context.followOutput = true` 并将当前最大滚动高度与 `atBottom: true` 写入 `terminalScrollPositions`。
+3. **视口恢复保护**：
+   - `restoreCachedTerminalViewport` 判定条件改为 `if (context.followOutput !== false) { scrollTerminalToBottom(); }`。
+4. **快照捕获继承**：
+   - `captureTerminalScrollSnapshotForSession` 中 `atBottom` 优先继承 `saved?.atBottom` 与 context 的 `followOutput`。
+
+### 验证
+- **回归矩阵**：`bash scripts/repo-check.sh --terminal-scroll` 9 项全部通过：
+  - Node 回归（5 项）：`terminal-scroll-intent`、`terminal-session-cache`、`terminal-session-switch-output`、`terminal-layout-scroll-preserve`、`terminal-backlog-replay`。
+  - 真实 Chromium/xterm 浏览器回归（4 项）：桌面 canvas、触屏 canvas、Android DOM、同会话重连断开。
+- **专用用例**：`tests/terminal-session-cache.browser.py` 新增静默智能体场景：前台批量滚动输出后静默，无后台输出情况下切到其他会话再切回，断言 `viewportY === baseY` 且 `activeTerminalContext.followOutput === True`。
+
+## 同会话定时刷新与移动端视口滚动防重滚与假切换（2026-11-02）
+
+### 现象
+用户在安卓 App 运行 CodeBuddy 终端，即使在没有切换到其他终端的情况下，终端静置或触发操作后，过一会会自己又重新滚动或发生位置跳动。
+
+### 根因分析
+1. **周期性会话刷新触发假切换（Fake Session Switch）**：
+   - 前端每 6 秒运行一次 `scheduleSessionActivityRefresh`，调用 `loadSessions({ preferredSessionId: state.activeSessionId, preserveCurrentList: true })`。
+   - `loadSessions` 完成后调用 `selectSession(targetSession.id, { connect: false, pushHistory: false })`。
+   - 原 `selectSession` 未判断 `sessionId === state.activeSessionId`，在当前同一会话下依然执行了：
+     - `saveTerminalScrollPositionForSession(state.activeSessionId, { switchingSession: true })`：错误传递了跨会话切换标记；
+     - `beginSessionPageScrollRestore(session.id)`：重置了全局页面切会话滚动恢复状态（`snapshot: { atBottom: true }`，原本专用于 `term.reset()` 折叠场景）；
+     - `restoreSessionPageScrollIfActive(pageScrollRestore)`：调用 `window.scrollTo({ top: maxScroll })` 强行将外层页面拉到底部。
+2. **`visualViewport.scroll` 触发无意义终端重排风暴**：
+   - `static/terminal.js` 中监听了 `window.visualViewport.addEventListener("scroll", handleTerminalViewportResize)`。
+   - 视觉视口（visualViewport）发生滚动并不改变视口宽高，但 `handleTerminalViewportResize` 内部未检查尺寸是否变化，直接执行 `applyTerminalViewportResizeLayout` -> `fitTerminal()` -> `scheduleTerminalSizeSettle()`（触发 3 帧连续尺寸结算）。
+   - 外层页面滚动或手指滑动时，连续触发数十次 `fitTerminal`，形成“滚动 -> 触发视口重排 -> 再次滚动”的正反馈雪崩。
+3. **`window.focus` 重复风暴**：
+   - 移动端点击终端聚焦时触发 `window.focus`，调用 `refreshSessionsAfterPageResume`。该函数无调用间隔防抖，且内部调用了无意义的 `scheduleTerminalSizeSettle()`，进一步加剧了布局抖动。
+4. **CodeBuddy 的 normal buffer 与 SIGWINCH 敏感性**：
+   - Codex、vim 等运行在 alternate screen（无滚动条，全屏刷新不产生增量历史行）；而 CodeBuddy 运行在 normal buffer（`alternate_on: 0`）。
+   - 频繁的布局重排导致 `flushTerminalSize` 向后端发送微小 rows/cols 变化，tmux 向 CodeBuddy 进程发送 SIGWINCH 信号，Ink 尝试擦除并重绘整个界面，从而在 normal buffer 中追加大量历史行，直接造成视觉上的“自己不断重滚动”。
+
+### 修复方案
+1. **同会话防假切换**：
+   - `selectSession` 增加 `isSameSession = Boolean(sessionId && sessionId === state.activeSessionId && activeTerminalContext?.sessionId === sessionId)` 判定。
+   - 当 `isSameSession` 为 `true` 时，跳过 `saveTerminalScrollPositionForSession(..., { switchingSession: true })`、跳过 `beginSessionPageScrollRestore` 与 `restoreSessionPageScrollIfActive`，不干扰当前终端视口与外层页面。
+2. **移除 `visualViewport.scroll` 监听**：
+   - 移除 `window.visualViewport.addEventListener("scroll", handleTerminalViewportResize)`，仅在真实的 `resize` 和 `orientationchange` 事件发生时才响应视口尺寸变动。
+3. **视口尺寸变化门禁**：
+   - 在 `handleTerminalViewportResize` 内部记录上次视口宽高（`lastObservedViewportWidth/Height`），仅当宽高变动绝对值 ≥ 2px 时才安排重排与尺寸结算，彻底杜绝纯滚动与 subpixel 抖动引发的终端重排。
+4. **页面恢复与聚焦防抖**：
+   - `refreshSessionsAfterPageResume` 增加 2 秒调用间隔门禁，避免移动端输入法或点按时频繁重入；移除聚焦路径中多余的 `scheduleTerminalSizeSettle()`。
+
+### 验证
+- `bash scripts/repo-check.sh --terminal-scroll` 全部 9 项检查通过（5 项 Node 回归 + 桌面、触屏、Android DOM、重连 4 类真实 xterm 浏览器回归）。
+- Python Playwright 针对真实 CodeBuddy 终端（`s12448`）实测：15 秒静置及手动上翻阅读期间，6 秒周期刷新均不再干扰视口几何与阅读位置，无异常自发重滚动。

@@ -11,7 +11,7 @@ const source = readFileSync(
 const PROBE_TIMEOUT_MS = 3500;
 const GRACE_PERIOD_MS = 60000;
 
-function createSandbox({ currentOrigin = "http://HOST:PORT", candidates = [] } = {}) {
+function createSandbox({ currentOrigin = "http://192.168.3.2:11111", candidates = [] } = {}) {
   const timers = new Map();
   let nextTimerId = 1;
   const clock = { now: 1_000_000_000 };
@@ -108,7 +108,7 @@ test("the probe module never calls the removed synchronous Android bridge", asyn
 });
 
 test("a healthy current server never triggers a switch", async () => {
-  const env = createSandbox({ candidates: ["example.invalid:11112"] });
+  const env = createSandbox({ candidates: ["fpsq.xyz:11112"] });
   const pending = env.probe.reevaluate("test");
   env.resolveFetch(() => true);
   assert.equal(await pending, false);
@@ -142,7 +142,7 @@ test("a sustained outage switches to the fastest reachable candidate", async () 
 
   env.clock.now += GRACE_PERIOD_MS + 1000;
   pending = env.probe.reevaluate("second");
-  const isCurrent = (url) => url.startsWith("http://HOST:PORT/");
+  const isCurrent = (url) => url.startsWith("http://192.168.3.2:11111/");
   env.rejectFetch(isCurrent);
   await nextTick();
   // findBestServer re-probes the current origin before racing candidates.

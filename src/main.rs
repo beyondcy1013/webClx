@@ -301,6 +301,8 @@ async fn main() -> anyhow::Result<()> {
     state.terminal_manager.spawn_error_auto_continue_runner(
         state.workspace_settings.clone(),
         state.auth_manager.clone(),
+        state.codebuddy_manager.clone(),
+        state.agy_manager.clone(),
     );
     state.preset_test_scheduler.spawn_runner(
         state.auth_manager.clone(),
@@ -726,15 +728,16 @@ mod tests {
         for id in [
             "session-detail-toggle",
             "session-agent-toggle",
+            "session-model-family-toggle",
+            "session-context-toggle",
             "session-auto-continue-toggle",
-            "terminal-codex-full-access-toggle",
         ] {
             assert_eq!(html.matches(&format!("id=\"{id}\"")).count(), 1);
             assert!(menu.contains(&format!("id=\"{id}\"")));
         }
         assert!(menu.contains("role=\"menu\""));
-        assert!(menu.contains("role=\"switch\""));
         assert!(menu.contains("type=\"checkbox\""));
+        assert!(!html.contains("terminal-codex-full-access-toggle"));
         assert!(!html.contains("terminal-codex-full-access-start"));
         assert!(embedded_static_asset("terminal-tools.js").is_some());
         assert!(tools_js.contains("terminalToolsRestoringTriggerFocus = true"));

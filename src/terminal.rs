@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     process::Command,
@@ -86,8 +86,6 @@ pub(crate) fn set_terminal_initial_snapshot_line_limit(value: u32) {
 }
 const INITIAL_TMUX_REDRAW_SUPPRESS_MS: u64 = 160;
 const TERMINAL_RECENT_OUTPUT_ACTIVE_MS: u64 = 15_000;
-const MAX_TERMINAL_INPUT_HISTORY_ENTRIES: usize = 500;
-const MAX_TERMINAL_INPUT_HISTORY_LINE_BYTES: usize = 16 * 1024;
 const PASTE_ASSET_DIR_NAME: &str = ".webclx-paste";
 const SHUTDOWN_CTRL_C_DELAY_MS: u64 = 120;
 const SHUTDOWN_CTRL_C_CLAUDE_TOTAL_COUNT: usize = 3;
@@ -153,6 +151,9 @@ pub struct TerminalManager {
     scheduled_input_file: Arc<PathBuf>,
     auto_continue_file: Arc<PathBuf>,
     pending_build_file: Arc<PathBuf>,
+    /// 服务端自动压缩的本地设置（上下文占用阈值）。
+    auto_compact_settings_file: Arc<PathBuf>,
+    auto_compact_settings: Arc<RwLock<TerminalAutoCompactSettings>>,
     shutdown_restore_file: Arc<PathBuf>,
     workspace_restore_file: Arc<PathBuf>,
     env_snapshot: Arc<TerminalEnvironmentSnapshot>,
@@ -168,6 +169,9 @@ pub struct TerminalManager {
     auto_continue_backoff_factor: Arc<AtomicU64>,
     auto_continue_backoff_max_millis: Arc<AtomicU64>,
     auto_continue_respect_manual_interrupt: Arc<AtomicBool>,
+    report_debounce_seconds: Arc<AtomicU64>,
+    message_queue_seconds: Arc<AtomicU64>,
+    last_message_received_at: Arc<Mutex<HashMap<String, u64>>>,
     quota_reset_cache: crate::quota_reset_cache::QuotaResetCache,
     api_preset_snapshot: Arc<RwLock<Vec<StoredApiPreset>>>,
     scheduled_input_tasks: Arc<Mutex<HashMap<String, TerminalScheduledInputTask>>>,
@@ -180,6 +184,8 @@ pub struct TerminalManager {
     probe_snapshot_cache: Arc<Mutex<manager::activity_probe::ProbeSnapshotCache>>,
     /// Service restart keeps tmux-backed sessions available for reconnection.
     service_restart_pending: Arc<AtomicBool>,
+    /// 服务启动后异步恢复历史终端就绪标记：未完成前确保消息/输入写入阻塞等待，避免重启后并发消息因 live 会话未挂载而误判 session inactive。
+    pub(crate) initial_restore_done: Arc<AtomicBool>,
     /// 持久化的终端消息投递账本：dedup/冲突状态跨重启保留，投递状态可查询。
     terminal_message_ledger: Arc<Mutex<manager::message_ledger::TerminalMessageLedger>>,
 }
@@ -197,6 +203,14 @@ struct SessionRuntimeState {
     auto_compact_signature: Option<String>,
     /// 上次 continue/compact 发送完成时间（毫秒），驱动冷却与退避。
     auto_continue_last_sent_at: Option<u64>,
+    /// 服务端自动压缩：连续观察到 completed 的起始时间（毫秒）。
+    auto_compact_completed_since: Option<u64>,
+    /// 服务端自动压缩：上次发送 `/compact` 的时间（毫秒）。
+    auto_compact_last_sent_at: Option<u64>,
+    /// 服务端自动压缩：上次发送时的输出时间戳，用于要求其后有新输出。
+    auto_compact_last_sent_output_at: u64,
+    /// 观察到压缩完成标记时的输出时间戳；用户查看前不再重复压缩。
+    auto_compact_completed_output_at: Option<u64>,
     /// 已取消的自动继续签名（裸签名；会话 id 由 map 键承担）。
     canceled_signatures: HashSet<String>,
     /// 串行化同一会话的 start/delete/restore/cleanup。
@@ -214,6 +228,10 @@ impl SessionRuntimeState {
         self.error_auto_continue.is_none()
             && self.auto_compact_signature.is_none()
             && self.auto_continue_last_sent_at.is_none()
+            && self.auto_compact_completed_since.is_none()
+            && self.auto_compact_last_sent_at.is_none()
+            && self.auto_compact_last_sent_output_at == 0
+            && self.auto_compact_completed_output_at.is_none()
             && self.canceled_signatures.is_empty()
     }
 
@@ -227,6 +245,86 @@ impl SessionRuntimeState {
     }
 }
 
+/// 服务端自动压缩的本地设置（独立于通用设置文件，便于单独维护）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TerminalAutoCompactSettings {
+    #[serde(default = "default_auto_compact_context_threshold_percent")]
+    pub context_threshold_percent: u32,
+    /// 按模型关键词覆盖阈值：键为归一化模型名（小写、分隔符统一为 '-'），
+    /// 值命中时优先于默认阈值。
+    #[serde(default = "default_auto_compact_model_thresholds")]
+    pub model_thresholds: BTreeMap<String, u32>,
+}
+
+fn default_auto_compact_context_threshold_percent() -> u32 {
+    50
+}
+
+fn default_auto_compact_model_thresholds() -> BTreeMap<String, u32> {
+    BTreeMap::from([
+        ("gpt-6-1-sol".to_string(), 60),
+        ("gpt-6-astra".to_string(), 40),
+        ("claude-opus".to_string(), 40),
+        ("claude-fable".to_string(), 40),
+    ])
+}
+
+/// 模型关键词归一化：小写，'.'、'_'、空格统一成 '-'，压缩重复分隔符。
+pub(crate) fn normalize_auto_compact_model_key(value: &str) -> String {
+    let mut key = String::with_capacity(value.len());
+    for character in value.trim().chars() {
+        let character = character.to_ascii_lowercase();
+        if character == '.' || character == '_' || character == ' ' || character == '/' {
+            if !key.ends_with('-') {
+                key.push('-');
+            }
+        } else {
+            key.push(character);
+        }
+    }
+    key.trim_matches('-').to_string()
+}
+
+impl Default for TerminalAutoCompactSettings {
+    fn default() -> Self {
+        Self {
+            context_threshold_percent: default_auto_compact_context_threshold_percent(),
+            model_thresholds: default_auto_compact_model_thresholds(),
+        }
+    }
+}
+
+pub(crate) const TERMINAL_AUTO_COMPACT_SETTINGS_FILE_NAME: &str =
+    "terminal-auto-compact-settings.json";
+
+impl TerminalAutoCompactSettings {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.context_threshold_percent = self.context_threshold_percent.clamp(1, 100);
+        self.model_thresholds = self
+            .model_thresholds
+            .into_iter()
+            .filter_map(|(pattern, percent)| {
+                let pattern = normalize_auto_compact_model_key(&pattern);
+                (!pattern.is_empty()).then_some((pattern, percent.clamp(1, 100)))
+            })
+            .collect();
+        self
+    }
+
+    /// 命中模型关键词时返回覆盖阈值，否则回落到默认阈值。
+    pub(crate) fn threshold_for_model(&self, model_key: Option<&str>) -> u32 {
+        let Some(model_key) = model_key else {
+            return self.context_threshold_percent;
+        };
+        self.model_thresholds
+            .iter()
+            .filter(|(pattern, _)| model_key.contains(pattern.as_str()))
+            .max_by_key(|(pattern, _)| pattern.len())
+            .map(|(_, percent)| *percent)
+            .unwrap_or(self.context_threshold_percent)
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalState {
     sessions_by_id: HashMap<String, StoredTerminalSession>,
@@ -235,6 +333,9 @@ pub(crate) struct TerminalState {
     live_sessions: HashMap<String, Arc<TerminalSession>>,
     output_observations: HashMap<String, TerminalOutputObservation>,
     input_histories: HashMap<String, TerminalInputHistoryCapture>,
+    input_history_cleared_at: HashMap<String, u64>,
+    terminal_messages_cleared_at: HashMap<String, u64>,
+    compile_notifications_cleared_at: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -367,6 +468,13 @@ struct TerminalScheduledInputTask {
 pub(crate) struct TerminalScheduledInputTaskInfo {
     pub(crate) status: String,
     pub(crate) last_error: String,
+    /// 只读失败阶段：isolate/body/enter/confirm；从 last_error 的
+    /// `stage=<阶段>:` 前缀解析，没有前缀时为空串。
+    pub(crate) delivery_stage: String,
+    /// 只读：破坏性清空前已存档、尚未安全恢复的原始草稿引用
+    /// （`parked=<buffer>:sha256=<hex>`）。从 last_error 解析；只证明本次
+    /// 映射与归档引用存在，不证明永久可查询或可自动恢复。
+    pub(crate) parked_draft_ref: String,
     pub(crate) id: String,
     pub(crate) task_id: String,
     pub(crate) session_id: String,
@@ -451,6 +559,12 @@ struct StoredTerminalRegistry {
     input_histories: HashMap<String, Vec<TerminalInputHistoryEntry>>,
     #[serde(default)]
     output_observations: HashMap<String, TerminalOutputObservation>,
+    #[serde(default)]
+    input_history_cleared_at: HashMap<String, u64>,
+    #[serde(default)]
+    terminal_messages_cleared_at: HashMap<String, u64>,
+    #[serde(default)]
+    compile_notifications_cleared_at: HashMap<String, u64>,
 }
 
 impl Default for StoredTerminalRegistry {
@@ -460,6 +574,9 @@ impl Default for StoredTerminalRegistry {
             sessions: Vec::new(),
             input_histories: HashMap::new(),
             output_observations: HashMap::new(),
+            input_history_cleared_at: HashMap::new(),
+            terminal_messages_cleared_at: HashMap::new(),
+            compile_notifications_cleared_at: HashMap::new(),
         }
     }
 }
@@ -510,6 +627,9 @@ struct StoredTerminalSession {
     idle: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// 用户显式关闭该终端的自动压缩；默认 false（开启）。
+    #[serde(default)]
+    auto_compact_disabled: bool,
     #[serde(default)]
     created_at: u64,
     #[serde(default)]
@@ -548,6 +668,7 @@ impl StoredTerminalSession {
             manually_renamed: false,
             idle: false,
             hidden: false,
+            auto_compact_disabled: false,
             created_at: timestamp,
             last_opened_at: timestamp,
         }
@@ -591,6 +712,7 @@ impl StoredTerminalSession {
             last_output_at: activity.last_output_at,
             idle: self.idle,
             hidden: self.hidden,
+            auto_compact_disabled: self.auto_compact_disabled,
             created_at: self.created_at,
             last_opened_at: self.last_opened_at,
             group_token: self.group_token.clone(),
@@ -934,6 +1056,19 @@ pub struct RenameSessionRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct UpdateAutoCompactSettingsRequest {
+    #[serde(default)]
+    pub context_threshold_percent: Option<u32>,
+    #[serde(default)]
+    pub model_thresholds: Option<std::collections::BTreeMap<String, u32>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetSessionAutoCompactRequest {
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct TerminalGroupRoleAssignment {
     session_id: String,
     #[serde(default)]
@@ -963,6 +1098,13 @@ pub struct UpdateSessionOriginRequest {
 #[derive(Debug, Deserialize)]
 pub struct TerminalInputRequest {
     data: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TerminalSlashCommandRequest {
+    pub command: String,
+    #[serde(default)]
+    pub enter_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1260,6 +1402,9 @@ pub struct TerminalSessionInfo {
     idle: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// 该终端是否被用户关闭了自动压缩（默认开启）。
+    #[serde(default)]
+    pub auto_compact_disabled: bool,
     created_at: u64,
     last_opened_at: u64,
     group_token: String,
@@ -1543,6 +1688,12 @@ pub struct TerminalResumeRestoreRecord {
     pub group_fixed_order: bool,
     #[serde(default)]
     pub input_history: Vec<TerminalInputHistoryEntry>,
+    #[serde(default)]
+    pub input_history_cleared_at: Option<u64>,
+    #[serde(default)]
+    pub terminal_messages_cleared_at: Option<u64>,
+    #[serde(default)]
+    pub compile_notifications_cleared_at: Option<u64>,
     pub resume_id: String,
     pub command: String,
     pub program: String,
@@ -1579,6 +1730,9 @@ impl Default for TerminalResumeRestoreRecord {
             group_order: 0,
             group_fixed_order: false,
             input_history: Vec::new(),
+            input_history_cleared_at: None,
+            terminal_messages_cleared_at: None,
+            compile_notifications_cleared_at: None,
             resume_id: String::new(),
             command: String::new(),
             program: String::new(),
@@ -1795,6 +1949,7 @@ pub async fn list_sessions(
     State(state): State<AppState>,
     Query(query): Query<ListSessionsQuery>,
 ) -> ApiResult<Json<TerminalSessionsResponse>> {
+    let terminal_task_timeout_secs = state.workspace_settings.terminal_task_timeout_secs();
     let base_dir = state.workspace_root();
     let display_root = state.workspace_display_root();
     let terminal_manager = state.terminal_manager.clone();
@@ -1842,7 +1997,7 @@ pub async fn list_sessions(
         .terminal_auto_continue_backoff_max_minutes();
 
     if query.all {
-        return run_terminal_task(move || {
+        return run_terminal_task_with_timeout(terminal_task_timeout_secs, move || {
             terminal_manager.update_api_preset_snapshot(api_presets.clone());
             let mut sessions = terminal_manager.list_all_sessions(
                 &base_dir,
@@ -1888,7 +2043,7 @@ pub async fn list_sessions(
         .workspace_settings
         .terminal_auto_continue_backoff_max_minutes();
 
-    run_terminal_task(move || {
+    run_terminal_task_with_timeout(terminal_task_timeout_secs, move || {
         terminal_manager.update_api_preset_snapshot(api_presets.clone());
         let mut sessions = terminal_manager.list_sessions(
             &base_dir,
@@ -2270,6 +2425,53 @@ pub async fn rename_session(
     Ok(Json(session))
 }
 
+pub async fn get_auto_compact_settings(
+    State(state): State<AppState>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let settings = state.terminal_manager.auto_compact_settings_snapshot();
+    Ok(Json(serde_json::json!({
+        "context_threshold_percent": settings.context_threshold_percent,
+        "model_thresholds": settings.model_thresholds,
+    })))
+}
+
+pub async fn update_auto_compact_settings(
+    State(state): State<AppState>,
+    Json(payload): Json<UpdateAutoCompactSettingsRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let manager = state.terminal_manager.clone();
+    let requested_percent = payload.context_threshold_percent;
+    let requested_models = payload.model_thresholds;
+    let settings = run_terminal_task(move || {
+        manager
+            .update_auto_compact_settings(requested_percent, requested_models)
+            .map_err(|error| AppError::bad_request(format!("保存自动压缩设置失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "context_threshold_percent": settings.context_threshold_percent,
+        "model_thresholds": settings.model_thresholds,
+    })))
+}
+
+pub async fn set_session_auto_compact(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(payload): Json<SetSessionAutoCompactRequest>,
+) -> ApiResult<Json<TerminalSessionInfo>> {
+    let base_dir = state.workspace_root();
+    let display_root = state.workspace_display_root();
+    let terminal_manager = state.terminal_manager.clone();
+    let disabled = !payload.enabled;
+    let session = run_terminal_task(move || {
+        terminal_manager
+            .set_session_auto_compact_disabled(&base_dir, &display_root, &session_id, disabled)
+            .map_err(|error| AppError::bad_request(format!("更新自动压缩开关失败: {error}")))
+    })
+    .await?;
+    Ok(Json(session))
+}
+
 pub async fn update_session_group(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -2401,7 +2603,11 @@ pub async fn send_session_enter(
         )
         .await?;
         for delay_ms in TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS {
-            if submitted {
+            if submitted
+                || state
+                    .terminal_manager
+                    .session_message_uses_single_submission(&session_id)
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -2467,6 +2673,32 @@ pub async fn send_session_enter(
     })))
 }
 
+pub async fn send_session_slash_command(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(payload): Json<TerminalSlashCommandRequest>,
+) -> ApiResult<Json<Value>> {
+    let command = payload.command.trim().to_string();
+    if command.is_empty() {
+        return Err(AppError::bad_request("缺少斜杠命令 command"));
+    }
+    let enter_delay_ms = payload.enter_delay_ms.unwrap_or(0);
+    let terminal_manager = state.terminal_manager.clone();
+    let target_id = session_id.clone();
+    let cmd = command.clone();
+    run_terminal_task(move || {
+        terminal_manager
+            .send_terminal_slash_command_with_delay(&target_id, &cmd, enter_delay_ms)
+            .map_err(|error| AppError::bad_request(format!("发送斜杠命令失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "command": command,
+    })))
+}
+
 /// Send Codex `/status` to one terminal and persist the provider reported by
 /// that running Codex process as the session's current preset.
 pub async fn extract_session_preset(
@@ -2495,6 +2727,22 @@ pub async fn send_session_continue(
     })
     .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Explicit recovery also supports the exited shell after a quota failure.
+pub async fn recover_session_balance(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    manager::account_rotation::manual_recover(
+        &state.terminal_manager,
+        &state.codebuddy_manager,
+        &state.agy_manager,
+        &session_id,
+    )
+    .await
+    .map(Json)
+    .map_err(|e| AppError::bad_request(format!("换号恢复失败：{e}")))
 }
 
 pub async fn send_session_auto_continue(
@@ -2649,6 +2897,10 @@ pub async fn create_scheduled_input(
     };
 
     let task_type = payload.task_type.trim().to_string();
+    let debounce_seconds = state.workspace_settings.terminal_report_debounce_seconds();
+    state.terminal_manager.update_report_debounce_seconds(debounce_seconds);
+    let queue_seconds = state.workspace_settings.terminal_message_queue_seconds();
+    state.terminal_manager.update_message_queue_seconds(queue_seconds);
     let terminal_manager = state.terminal_manager.clone();
     let task = run_terminal_task(move || {
         terminal_manager
@@ -2768,6 +3020,7 @@ pub async fn send_auto_typed_input(
     State(state): State<AppState>,
     Json(payload): Json<TerminalAutoTypedInputRequest>,
 ) -> ApiResult<Json<TerminalAutoTypedInputResponse>> {
+    let terminal_task_timeout_secs = state.workspace_settings.terminal_task_timeout_secs();
     let command_line = payload.command_line.trim();
     if command_line.is_empty() {
         return Err(AppError::bad_request("缺少快捷命令内容。"));
@@ -2810,7 +3063,7 @@ pub async fn send_auto_typed_input(
     let session_id_for_send = session_id.clone();
     let command_body = input.trim_end_matches(['\r', '\n']).to_string();
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
+        std::time::Duration::from_secs(terminal_task_timeout_secs),
         tokio::task::spawn_blocking(move || -> Result<()> {
             terminal_manager.send_session_input_silent(&session_id_for_send, command_body)?;
             for _ in 0..=submit_enters {
@@ -2834,7 +3087,7 @@ pub async fn send_auto_typed_input(
         Err(_) => {
             return Err(AppError::internal(format!(
                 "终端任务超时（{} 秒），请检查会话锁等待、磁盘负载及 tmux 响应。",
-                TERMINAL_TASK_TIMEOUT_SECS
+                terminal_task_timeout_secs
             )));
         }
     }
@@ -2857,7 +3110,7 @@ pub async fn send_session_message(
     let message_body = first_nonempty([payload.data.as_str(), payload.message.as_str()])
         .ok_or_else(|| AppError::bad_request("缺少要发送的消息 data/message"))?
         .to_string();
-    let data = message_body.clone();
+    let data = manager::deduplicate_consecutive_sender_tags(&message_body);
     let delivery_id = first_nonempty([payload.delivery_id.as_str()])
         .map(str::to_string)
         .unwrap_or_else(|| data.clone());
@@ -2890,6 +3143,7 @@ pub async fn send_session_message(
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
             tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, bool)> {
+                manager.wait_for_initial_restore(std::time::Duration::from_secs(10));
                 let mut ids = manager.resolve_group_session_ids(&group_target)?;
                 let sender_in_group = !sender_id.is_empty() && ids.iter().any(|id| id == &sender_id);
                 if sender_in_group { ids.retain(|id| id != &sender_id); }
@@ -2967,10 +3221,17 @@ pub async fn send_session_message(
         std::time::Duration::from_secs(TERMINAL_MESSAGE_SEND_TIMEOUT_SECS),
         tokio::task::spawn_blocking(
             move || -> Result<(TerminalMessageDeliveryTarget, usize, bool)> {
+                terminal_manager.wait_for_initial_restore(std::time::Duration::from_secs(10));
                 let (session_id, _) =
                     terminal_manager.resolve_session_target(&target, target_path.as_deref())?;
                 let rollout_history = if verify_submission {
-                    terminal_manager.session_agent_rollout_history(&session_id)?
+                    match terminal_manager.session_agent_rollout_history(&session_id) {
+                        Ok(history) => history,
+                        Err(error) => {
+                            tracing::warn!("receipt baseline unavailable for {session_id}; sending once: {error}");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
@@ -3105,7 +3366,11 @@ pub async fn send_session_message(
             .await?;
 
             for delay_ms in TERMINAL_MESSAGE_SUBMIT_RETRY_DELAYS_MS {
-                if submitted {
+                if submitted
+                    || state
+                        .terminal_manager
+                        .session_message_uses_single_submission(&sent.session_id)
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -3210,9 +3475,10 @@ async fn wait_for_terminal_message_delivery(
         let session_id = session_id.clone();
         let delivery_id = delivery_id.clone();
         let confirmed = run_terminal_task(move || {
-            if terminal_manager
-                .session_message_input_queued(&session_id)
-                .map_err(|error| AppError::internal(format!("读取终端消息队列失败: {error}")))?
+            if !terminal_manager.session_message_uses_single_submission(&session_id)
+                && terminal_manager
+                    .session_message_input_queued(&session_id)
+                    .map_err(|error| AppError::internal(format!("读取终端消息队列失败: {error}")))?
             {
                 return Ok(true);
             }
@@ -3237,6 +3503,40 @@ async fn wait_for_terminal_message_delivery(
     Ok(false)
 }
 
+/// 判断一条历史文本是否属于编译系统回调通知（如 `[from webClx-compile-api] ...` 或带有 `[webclx-callback:...]` 标记）。
+pub fn is_compile_notification(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.contains("[from webClx-compile-api]") || trimmed.contains("[webclx-callback:")
+}
+
+/// 判断一条历史文本是否属于跨终端协作消息（如 `[from stockScreener_80] ...`、
+/// 或带有 `[scheduled:paste-...]` / `[delivery:...]` / `[kind=...]` 前缀的终端消息）。
+/// 注意：编译系统回调通知由 `is_compile_notification` 独立识别并过滤，不归入普通终端消息。
+pub fn is_terminal_inter_agent_message(text: &str) -> bool {
+    if is_compile_notification(text) {
+        return false;
+    }
+    let mut s = text.trim();
+    while s.starts_with('[') {
+        if s.starts_with("[from ") {
+            return true;
+        }
+        if let Some(pos) = s.find(']') {
+            let tag = &s[1..pos];
+            if tag.starts_with("scheduled:")
+                || tag.starts_with("delivery:")
+                || tag.starts_with("kind=")
+                || tag.starts_with("from ")
+            {
+                s = s[pos + 1..].trim();
+                continue;
+            }
+        }
+        break;
+    }
+    s.starts_with("[from ")
+}
+
 pub async fn get_session_input_history(
     State(state): State<AppState>,
     AxumPath(session_id): AxumPath<String>,
@@ -3249,6 +3549,100 @@ pub async fn get_session_input_history(
     })
     .await?;
     Ok(Json(TerminalInputHistoryResponse { entries }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ClearInputHistoryQuery {
+    #[serde(default)]
+    pub r#type: String,
+}
+
+pub async fn clear_session_input_history(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<ClearInputHistoryQuery>,
+) -> ApiResult<Json<Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let target_session_id = session_id.clone();
+    if query.r#type == "terminal_messages" {
+        let removed = run_terminal_task(move || {
+            terminal_manager
+                .clear_session_terminal_messages(&target_session_id)
+                .map_err(|error| AppError::internal(format!("删除终端消息失败: {error}")))
+        })
+        .await?;
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "removed": removed,
+            "message": "已删除全部终端消息。",
+        })));
+    }
+    if query.r#type == "compile_notifications" {
+        let removed = run_terminal_task(move || {
+            terminal_manager
+                .clear_session_compile_notifications(&target_session_id)
+                .map_err(|error| AppError::internal(format!("删除编译通知失败: {error}")))
+        })
+        .await?;
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "session_id": session_id,
+            "removed": removed,
+            "message": "已删除全部编译通知。",
+        })));
+    }
+    run_terminal_task(move || {
+        terminal_manager
+            .clear_session_input_history(&target_session_id)
+            .map_err(|error| AppError::internal(format!("清除终端输入历史失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "message": "已清除所有对话史。",
+    })))
+}
+
+pub async fn clear_session_terminal_messages(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let target_session_id = session_id.clone();
+    let removed = run_terminal_task(move || {
+        terminal_manager
+            .clear_session_terminal_messages(&target_session_id)
+            .map_err(|error| AppError::internal(format!("删除终端消息失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "removed": removed,
+        "message": "已删除全部终端消息。",
+    })))
+}
+
+pub async fn clear_session_compile_notifications(
+    State(state): State<AppState>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let terminal_manager = state.terminal_manager.clone();
+    let target_session_id = session_id.clone();
+    let removed = run_terminal_task(move || {
+        terminal_manager
+            .clear_session_compile_notifications(&target_session_id)
+            .map_err(|error| AppError::internal(format!("删除编译通知失败: {error}")))
+    })
+    .await?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session_id": session_id,
+        "removed": removed,
+        "message": "已删除全部编译通知。",
+    })))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3678,8 +4072,8 @@ fn codex_scan_slots() -> &'static Mutex<HashMap<CodexScanKey, CodexScanSlot>> {
 /// starting a duplicate directory scan. Stale slots (leader exceeded the
 /// terminal task timeout window without completing) are taken over so a lost
 /// leader cannot block later requests forever.
-fn register_codex_scan_slot(key: &CodexScanKey) -> (CodexScanSlot, bool) {
-    let takeover_after = std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2);
+fn register_codex_scan_slot(timeout_secs: u64, key: &CodexScanKey) -> (CodexScanSlot, bool) {
+    let takeover_after = std::time::Duration::from_secs(timeout_secs + 2);
     static NEXT_SLOT_ID: AtomicU64 = AtomicU64::new(1);
     let mut slots = crate::lock_or_recover!(codex_scan_slots().lock());
     if let Some(existing) = slots.get(key)
@@ -3712,11 +4106,11 @@ fn complete_codex_scan_slot(key: &CodexScanKey, slot: &CodexScanSlot, shared: Co
 }
 
 async fn wait_codex_scan_result(
+    timeout_secs: u64,
     mut result_rx: watch::Receiver<Option<CodexScanShared>>,
 ) -> ApiResult<Vec<CodexConversationInfo>> {
-    let wait_result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2),
-        async move {
+    let wait_result =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs + 2), async move {
             loop {
                 if let Some(shared) = result_rx.borrow_and_update().clone() {
                     return Arc::unwrap_or_clone(shared).map_err(AppError::internal);
@@ -3725,15 +4119,14 @@ async fn wait_codex_scan_result(
                     return Err(AppError::internal("Codex 对话扫描任务已终止，请重试。"));
                 }
             }
-        },
-    )
-    .await;
+        })
+        .await;
 
     match wait_result {
         Ok(result) => result,
         Err(_) => Err(AppError::internal(format!(
             "Codex 对话扫描等待超时（{} 秒），请点击“刷新对话”重试。",
-            TERMINAL_TASK_TIMEOUT_SECS + 2
+            timeout_secs + 2
         ))),
     }
 }
@@ -3742,6 +4135,7 @@ pub async fn list_codex_conversations(
     State(state): State<AppState>,
     Query(query): Query<CodexConversationsQuery>,
 ) -> ApiResult<Json<CodexConversationsResponse>> {
+    let terminal_task_timeout_secs = state.workspace_settings.terminal_task_timeout_secs();
     let terminal_user = state
         .workspace_settings
         .terminal_user_profile()
@@ -3765,10 +4159,10 @@ pub async fn list_codex_conversations(
         cwd_filter: cwd_filter.clone(),
         since_ms,
     };
-    let (slot, is_leader) = register_codex_scan_slot(&scan_key);
+    let (slot, is_leader) = register_codex_scan_slot(terminal_task_timeout_secs, &scan_key);
     let conversations = if is_leader {
         let scan_codex_home = codex_home.clone();
-        let scan_result = run_terminal_task(move || {
+        let scan_result = run_terminal_task_with_timeout(terminal_task_timeout_secs, move || {
             scan_codex_conversations_for_cwd_since(
                 &scan_codex_home,
                 cwd_filter.as_deref(),
@@ -3784,7 +4178,7 @@ pub async fn list_codex_conversations(
         complete_codex_scan_slot(&scan_key, &slot, shared);
         scan_result
     } else {
-        wait_codex_scan_result(slot.result_rx).await
+        wait_codex_scan_result(terminal_task_timeout_secs, slot.result_rx).await
     };
 
     conversations.map(|conversations| {
@@ -4396,19 +4790,22 @@ async fn unique_paste_asset_name(
     format!("clipboard-{timestamp}-{ordinal}-fallback.{extension}")
 }
 
-const TERMINAL_TASK_TIMEOUT_SECS: u64 = 10;
+const TERMINAL_TASK_TIMEOUT_SECS: u64 = settings_core::DEFAULT_TERMINAL_TASK_TIMEOUT_SECS;
 const TERMINAL_TASK_QUEUE_WARN_MILLIS: u128 = 1000;
 const TERMINAL_TASK_EXECUTE_WARN_MILLIS: u128 = 2000;
 const TERMINAL_OUTPUT_VIEWED_MARK_INTERVAL_MS: u128 = 1000;
 
-pub(in crate::terminal) async fn run_terminal_task<T, F>(task: F) -> ApiResult<T>
+pub(in crate::terminal) async fn run_terminal_task_with_timeout<T, F>(
+    timeout_secs: u64,
+    task: F,
+) -> ApiResult<T>
 where
     T: Send + 'static,
     F: FnOnce() -> ApiResult<T> + Send + 'static,
 {
     let queued_at = Instant::now();
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS),
+        std::time::Duration::from_secs(timeout_secs),
         tokio::task::spawn_blocking(move || {
             let queue_wait_millis = queued_at.elapsed().as_millis();
             let started_at = Instant::now();
@@ -4434,16 +4831,24 @@ where
         Ok(Err(join_error)) => Err(AppError::internal(format!("终端后台任务失败: {join_error}"))),
         Err(_) => {
             warn!(
-                timeout_secs = TERMINAL_TASK_TIMEOUT_SECS,
+                timeout_secs,
                 elapsed_ms = queued_at.elapsed().as_millis(),
                 "terminal task timed out; blocking work continues in background"
             );
             Err(AppError::internal(format!(
                 "终端任务超时（{} 秒），请检查会话锁等待、磁盘负载及 tmux 响应。",
-                TERMINAL_TASK_TIMEOUT_SECS
+                timeout_secs
             )))
         }
     }
+}
+
+pub(in crate::terminal) async fn run_terminal_task<T, F>(task: F) -> ApiResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> ApiResult<T> + Send + 'static,
+{
+    run_terminal_task_with_timeout(TERMINAL_TASK_TIMEOUT_SECS, task).await
 }
 
 fn sanitize_child_command(command: &mut Command) {

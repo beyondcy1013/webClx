@@ -186,6 +186,13 @@ pub struct StoredAuthPreset {
     pub auth: AuthFile,
     #[serde(default)]
     pub switch_count: u64,
+    /// 最近一次应用/切换到该预设的时间（毫秒）；旧数据没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch_at: Option<i64>,
+    /// 每次切换到该预设的时间戳（毫秒），用于按时间窗口统计使用次数。
+    /// 只保留最近 90 天、最多 500 条；旧数据没有该字段时为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +244,13 @@ pub struct StoredApiPreset {
     pub favorite: bool,
     #[serde(default)]
     pub switch_count: u64,
+    /// 最近一次应用/切换到该预设的时间（毫秒）；旧数据没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch_at: Option<i64>,
+    /// 每次切换到该预设的时间戳（毫秒），用于按时间窗口统计使用次数。
+    /// 只保留最近 90 天、最多 500 条；旧数据没有该字段时为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,6 +291,13 @@ pub struct StoredClaudePreset {
     pub access_mode: Option<ClaudeAccessMode>,
     #[serde(default)]
     pub switch_count: u64,
+    /// 最近一次应用/切换到该预设的时间（毫秒）；旧数据没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch_at: Option<i64>,
+    /// 每次切换到该预设的时间戳（毫秒），用于按时间窗口统计使用次数。
+    /// 只保留最近 90 天、最多 500 条；旧数据没有该字段时为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
 }
 
 /// Abstraction over preset types that have an `id` and `switch_count`.
@@ -285,6 +306,15 @@ pub struct StoredClaudePreset {
 pub trait SwitchCounted {
     fn preset_id(&self) -> &str;
     fn switch_count_mut(&mut self) -> &mut u64;
+    fn last_switch_at_mut(&mut self) -> &mut Option<i64>;
+    fn switch_history_mut(&mut self) -> &mut Vec<i64>;
+
+    /// 记录一次切换事件（递增计数由调用方负责）。拆成独立语句避免同时可变借用多个字段。
+    fn record_switch(&mut self, now: i64) {
+        let previous = *self.last_switch_at_mut();
+        crate::storage::push_switch_event(self.switch_history_mut(), previous, now);
+        *self.last_switch_at_mut() = Some(now);
+    }
 }
 
 impl SwitchCounted for StoredAuthPreset {
@@ -293,6 +323,12 @@ impl SwitchCounted for StoredAuthPreset {
     }
     fn switch_count_mut(&mut self) -> &mut u64 {
         &mut self.switch_count
+    }
+    fn last_switch_at_mut(&mut self) -> &mut Option<i64> {
+        &mut self.last_switch_at
+    }
+    fn switch_history_mut(&mut self) -> &mut Vec<i64> {
+        &mut self.switch_history
     }
 }
 
@@ -303,6 +339,12 @@ impl SwitchCounted for StoredApiPreset {
     fn switch_count_mut(&mut self) -> &mut u64 {
         &mut self.switch_count
     }
+    fn last_switch_at_mut(&mut self) -> &mut Option<i64> {
+        &mut self.last_switch_at
+    }
+    fn switch_history_mut(&mut self) -> &mut Vec<i64> {
+        &mut self.switch_history
+    }
 }
 
 impl SwitchCounted for StoredClaudePreset {
@@ -311,6 +353,12 @@ impl SwitchCounted for StoredClaudePreset {
     }
     fn switch_count_mut(&mut self) -> &mut u64 {
         &mut self.switch_count
+    }
+    fn last_switch_at_mut(&mut self) -> &mut Option<i64> {
+        &mut self.last_switch_at
+    }
+    fn switch_history_mut(&mut self) -> &mut Vec<i64> {
+        &mut self.switch_history
     }
 }
 
@@ -422,6 +470,9 @@ pub struct CodexAccountSummary {
     pub model: Option<String>,
     pub endpoint: Option<String>,
     pub favorite: bool,
+    pub last_switch_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -515,6 +566,7 @@ pub struct AuthPresetSummary {
     pub secondary_config_value: Option<String>,
     pub auth: AuthFile,
     pub switch_count: u64,
+    pub last_switch_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,6 +608,7 @@ pub struct ApiPresetSummary {
     pub active: bool,
     pub favorite: bool,
     pub switch_count: u64,
+    pub last_switch_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -586,6 +639,9 @@ pub struct ClaudePresetSummary {
     pub saved_at: u64,
     pub active: bool,
     pub switch_count: u64,
+    pub last_switch_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
 }
 
 #[derive(Debug, Deserialize)]

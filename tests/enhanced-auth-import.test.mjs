@@ -71,7 +71,7 @@ const terminalLog = `
 › [scheduled:paste-1790013590834-7181] [from stockScreener_1] 本端 s6226 已接用户授权
   刚核对 stockScreener 工作树由多项 dirty 变为 clean，我们暂仅只读核查。
 
-• Ran python3 /home/user/.codex/skills/terminal-notifications/scripts/send_terminal_message.py
+• Ran python3 /home/root/.codex/skills/terminal-message/scripts/send_terminal_message.py
   └ {"accepted": true, "submitted": false, "task_id": "paste-1790013609837-7183"}
 
 已告知日线修复终端。

@@ -587,3 +587,342 @@ fn pruning_completed_occurrences_keeps_queued_parent() {
     assert_eq!(tasks["parent"].status, "");
     assert!(tasks.len() <= 31);
 }
+
+#[test]
+fn test_create_scheduled_input_debounces_and_merges_reports() {
+    let (manager, base_dir) = repeat_test_manager();
+    {
+        let mut state = manager.state.write().unwrap();
+        state
+            .sessions_by_id
+            .insert("s1".to_string(), stored_test_terminal_session("s1"));
+    }
+    manager.update_report_debounce_seconds(120);
+
+    let now = crate::terminal::manager::current_timestamp_millis();
+    let task1 = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 65] kind=progress 进度汇报1".to_string(),
+            now + 1000,
+            "report 1".to_string(),
+            true,
+            "agent_message".to_string(),
+            "".to_string(),
+            0,
+        )
+        .expect("task1 created");
+    assert!(task1.due_at >= now + 119_000);
+
+    let task2 = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 66] kind=progress 进度汇报2".to_string(),
+            now + 2000,
+            "report 2".to_string(),
+            true,
+            "agent_message".to_string(),
+            "".to_string(),
+            0,
+        )
+        .expect("task2 merged");
+
+    assert_eq!(task1.id, task2.id);
+    let tasks = manager.scheduled_input_tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 1);
+    let merged_task = &tasks[&task1.id];
+    assert!(merged_task.text.contains("进度汇报1"));
+    assert!(merged_task.text.contains("进度汇报2"));
+    drop(tasks);
+
+    let task3 = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 65] kind=escalation 发现严重矛盾".to_string(),
+            now + 1000,
+            "escalation".to_string(),
+            true,
+            "agent_message".to_string(),
+            "".to_string(),
+            0,
+        )
+        .expect("task3 created");
+    assert_ne!(task1.id, task3.id);
+    // 紧急消息不进入 2 分钟汇报防抖，但仍受 agent_message 默认 8 秒排队约束。
+    assert!(task3.due_at < now + 120_000);
+    assert!(task3.due_at >= now + 8_000);
+
+    let tasks = manager.scheduled_input_tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 2);
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn test_queue_agent_messages_merge_into_first_pending_task() {
+    let (manager, base_dir) = repeat_test_manager();
+    {
+        let mut state = manager.state.write().unwrap();
+        state
+            .sessions_by_id
+            .insert("s1".to_string(), stored_test_terminal_session("s1"));
+    }
+
+    let now = crate::terminal::manager::current_timestamp_millis();
+    let first = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 10] 排队消息一".to_string(),
+            now + 1000,
+            "q1".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("first queue message");
+    let second = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 11] 排队消息二".to_string(),
+            now + 60_000,
+            "q2".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("second queue message merged");
+
+    assert_eq!(first.id, second.id, "queued message must merge into the first task");
+    assert_eq!(first.due_at, second.due_at, "merged task keeps the first task's send time");
+    let tasks = manager.scheduled_input_tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 1);
+    let merged = &tasks[&first.id];
+    assert_eq!(merged.text, "[from 10] 排队消息一\n[from 11] 排队消息二");
+    assert!(merged.label.contains("q1") && merged.label.contains("q2"));
+    drop(tasks);
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn test_queue_merge_skips_priority_wake_and_scheduled_tasks() {
+    let (manager, base_dir) = repeat_test_manager();
+    {
+        let mut state = manager.state.write().unwrap();
+        state
+            .sessions_by_id
+            .insert("s1".to_string(), stored_test_terminal_session("s1"));
+    }
+
+    let now = crate::terminal::manager::current_timestamp_millis();
+    let queued = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 10] 排队消息".to_string(),
+            now + 1000,
+            "q".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("queue message");
+    let priority = manager
+        .create_scheduled_input(
+            "s1",
+            "[派单] 新任务".to_string(),
+            now + 1000,
+            "p".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("priority message stays independent");
+    assert_ne!(queued.id, priority.id);
+
+    let scheduled = manager
+        .create_scheduled_input(
+            "s1",
+            "定时粘贴内容".to_string(),
+            now + 120_000,
+            "s".to_string(),
+            true,
+            "paste".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("scheduled paste stays independent");
+    assert_ne!(queued.id, scheduled.id);
+    assert_eq!(scheduled.due_at, now + 120_000);
+
+    let wake = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 10] 自唤醒检查".to_string(),
+            now + 1000,
+            "webclx-wake-v1:abc".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("wake stays independent");
+    assert_ne!(queued.id, wake.id);
+
+    let later = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 11] 后续普通消息".to_string(),
+            now + 1000,
+            "q2".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("later queue message merges into the earliest queue task");
+    assert_eq!(later.id, queued.id);
+    assert_ne!(later.id, wake.id);
+
+    let tasks = manager.scheduled_input_tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 4);
+    assert!(tasks[&queued.id].text.contains("后续普通消息"));
+    assert!(!tasks[&queued.id].text.contains("新任务"));
+    assert!(!tasks[&queued.id].text.contains("定时粘贴内容"));
+    drop(tasks);
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn report_debounce_does_not_merge_into_confirmed_history() {
+    let (manager, base_dir) = repeat_test_manager();
+    {
+        let mut state = manager.state.write().unwrap();
+        state
+            .sessions_by_id
+            .insert("s1".to_string(), stored_test_terminal_session("s1"));
+    }
+    manager.update_report_debounce_seconds(120);
+
+    let now = crate::terminal::manager::current_timestamp_millis();
+    let previous = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 74] kind=completed 旧报告 evidence=/tmp/old.md".to_string(),
+            now + 1000,
+            "old report".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("previous report created");
+    manager
+        .scheduled_input_tasks
+        .lock()
+        .unwrap()
+        .get_mut(&previous.id)
+        .expect("previous task remains stored")
+        .status = "confirmed".into();
+
+    let next = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 59] kind=completed 新报告 evidence=/tmp/new.md".to_string(),
+            now + 2000,
+            "new report".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("new report created independently");
+
+    assert_ne!(previous.id, next.id);
+    assert_eq!(next.status, "queued");
+    let tasks = manager.scheduled_input_tasks.lock().unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[&previous.id].status, "confirmed");
+    assert!(tasks[&previous.id].text.contains("旧报告"));
+    assert!(!tasks[&previous.id].text.contains("新报告"));
+    assert!(tasks[&next.id].text.contains("新报告"));
+    let _ = std::fs::remove_dir_all(base_dir);
+}
+
+#[test]
+fn test_scheduled_input_message_queue_and_three_minute_interval() {
+    let base_dir = std::env::temp_dir().join(format!(
+        "webclx-test-msg-queue-{}",
+        crate::terminal::manager::current_timestamp_millis()
+    ));
+    let _ = std::fs::create_dir_all(&base_dir);
+    let state_file = base_dir.join("state.json");
+    let manager = TerminalManager::new(state_file);
+    let mut session = stored_test_terminal_session("s1");
+    session.name = "test-session".to_string();
+    {
+        let mut state = manager.state.write().unwrap();
+        state.sessions_by_id.insert("s1".to_string(), session);
+    }
+
+    // 1. 默认 queue 时间为 8 秒
+    assert_eq!(manager.message_queue_seconds(), 8);
+    let now = crate::terminal::manager::current_timestamp_millis();
+    let task1 = manager
+        .create_scheduled_input(
+            "s1",
+            "[from 10] task 1".to_string(),
+            now + 1000,
+            "t1".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("task1 created");
+    // 未接收过消息时，agent_message 默认排队至少 8 秒
+    assert!(task1.due_at >= now + 8_000);
+
+    // 2. 模拟终端刚接收到消息（10 秒前）
+    manager.record_session_message_received("s1", now - 10_000);
+    assert_eq!(manager.session_last_message_received_at("s1"), now - 10_000);
+
+    // 3. 收到新消息，比较间隔低于 3 分钟（仅相隔 10 秒），则 queue 后者 3 分钟。
+    // 用派单消息验证：重要消息不参与排队合并，能单独观察到 3 分钟间隔规则。
+    let now2 = crate::terminal::manager::current_timestamp_millis();
+    let task2 = manager
+        .create_scheduled_input(
+            "s1",
+            "[派单] task 2".to_string(),
+            now2 + 1000,
+            "t2".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("task2 created");
+    assert!(task2.due_at >= now2 + 180_000);
+
+    // 4. 模拟接收时间已过 4 分钟（240 秒前）
+    manager.record_session_message_received("s1", now2 - 240_000);
+    let now3 = crate::terminal::manager::current_timestamp_millis();
+    let task3 = manager
+        .create_scheduled_input(
+            "s1",
+            "[派单] task 3".to_string(),
+            now3 + 8_000,
+            "t3".to_string(),
+            true,
+            "agent_message".to_string(),
+            String::new(),
+            0,
+        )
+        .expect("task3 created");
+    // 间隔 >= 3 分钟，不被强制延后 3 分钟
+    assert!(task3.due_at < now3 + 180_000);
+    assert!(task3.due_at >= now3 + 8_000);
+
+    let _ = std::fs::remove_dir_all(base_dir);
+}

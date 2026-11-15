@@ -41,8 +41,12 @@ async def check(browser, width, height):
                 await route.fulfill(status=400, json={'error': '测试保存失败'})
             else:
                 members = route.request.post_data_json['member_ids']
+                roles = {r['session_id']: r['role'] for r in route.request.post_data_json.get('group_roles', [])}
+                labels = {'super_admin': '超级管理员', 'manager': '普通管理员', 'executor': '执行者', 'reviewer': '复核者'}
                 for session in sessions:
                     session['group_token'] = 'test-group' if len(members) > 1 and session['id'] in members else ''
+                    if session['id'] in roles:
+                        session['group_role'] = labels[roles[session['id']]]
                 await route.fulfill(json={'ok': True})
         elif path == '/api/terminal/sessions/message':
             message_requests.append((path, route.request.post_data_json))
@@ -238,6 +242,49 @@ async def check(browser, width, height):
     await open_dialog()
     assert await page.evaluate(f"({role_of})('s1')") == 'manager'
     assert await page.evaluate(f"({role_of})('s2')") == 'executor'
+
+    # Role picker dropdown toggle: clicking trigger once opens popup menu,
+    # clicking the same trigger a second time automatically collapses it back
+    # without forcing option selection or changing the role.
+    trigger_s2 = page.locator("#terminal-group-session-list select[data-role-for='s2']").locator("..").locator(".terminal-group-role-trigger")
+    role_menu = page.locator("#terminal-group-role-popup-menu")
+    assert await role_menu.is_hidden()
+
+    # 1st click: opens
+    await trigger_s2.click()
+    assert await role_menu.is_visible()
+    assert await trigger_s2.get_attribute("aria-expanded") == "true"
+    assert await page.evaluate(f"({role_of})('s2')") == 'executor'
+
+    # 2nd click on the same trigger: collapses back
+    await trigger_s2.click()
+    assert await role_menu.is_hidden()
+    assert await trigger_s2.get_attribute("aria-expanded") == "false"
+    assert await page.evaluate(f"({role_of})('s2')") == 'executor'
+
+    # Re-open then click outside to collapse
+    await trigger_s2.click()
+    assert await role_menu.is_visible()
+    await page.locator("#terminal-group-dialog-title").click()
+    assert await role_menu.is_hidden()
+    assert await page.evaluate(f"({role_of})('s2')") == 'executor'
+
+    # Verify clicking trigger did not toggle row checkbox
+    assert await page.locator('#terminal-group-session-list input[value="s2"]').is_checked()
+
+    # Re-open and select reviewer via custom popup menu
+    await trigger_s2.click()
+    assert await role_menu.is_visible()
+    await role_menu.locator("button[data-value='reviewer']").click()
+    assert await role_menu.is_hidden()
+    assert await trigger_s2.get_attribute("aria-expanded") == "false"
+    assert await page.evaluate(f"({role_of})('s2')") == 'reviewer'
+    assert await trigger_s2.locator(".terminal-group-role-trigger-label").text_content() == '复核者'
+
+    # Switch back to executor so subsequent assertions match
+    await trigger_s2.click()
+    await role_menu.locator("button[data-value='executor']").click()
+    assert await page.evaluate(f"({role_of})('s2')") == 'executor'
     # Unchecking the manager row keeps its own group role; promoting s2 must not
     # touch the unchecked row (it belongs to the same persisted group here, but
     # it is no longer part of this edit).
@@ -278,6 +325,32 @@ async def check(browser, width, height):
     await page.locator('#terminal-group-dialog').wait_for(state='hidden')
     for session in sessions:
         session.pop('group_role', None)
+
+    # The user-facing role popup must include super admin; persist it and reopen.
+    await page.evaluate("""() => {
+      for (const s of state.sessions) {
+        s.group_token = 'test-group';
+        s.group_role = s.id === 's1' ? '普通管理员' : '执行者';
+      }
+    }""")
+    for session in sessions:
+        session['group_token'] = 'test-group'
+        session['group_role'] = '普通管理员' if session['id'] == 's1' else '执行者'
+    await open_dialog()
+    await trigger_s2.click()
+    assert await role_menu.locator("button[data-value='super_admin']").text_content() == '👑 超级管理员'
+    await role_menu.locator("button[data-value='super_admin']").click()
+    assert await trigger_s2.locator('.terminal-group-role-trigger-label').text_content() == '👑 超级管理员'
+    assert await page.evaluate(f"({role_of})('s1')") == 'manager'
+    await page.locator('#terminal-group-form [type="submit"]').click()
+    await page.locator('#terminal-group-dialog').wait_for(state='hidden')
+    saved_roles = {r['session_id']: r['role'] for r in requests[-1][1]['group_roles']}
+    assert saved_roles == {'s1': 'manager', 's2': 'super_admin', 's3': 'executor'}, saved_roles
+    await open_dialog()
+    assert await page.evaluate(f"({role_of})('s2')") == 'super_admin'
+    assert await trigger_s2.locator('.terminal-group-role-trigger-label').text_content() == '👑 超级管理员'
+    assert await page.evaluate(f"({switcher_role})('s2')") == 'super_admin'
+    await page.locator('#terminal-group-cancel').click()
 
     assert not errors, errors
     print(f'{width}x{height}: menu, geometry, frozen session, save, failure/retry, unlink, roles passed')

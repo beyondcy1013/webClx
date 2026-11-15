@@ -19,6 +19,7 @@
 
 ### API 与配置
 
+- [本机智能体登录备份](tasks/native-agent-login-backup.md)：LLM_API 各智能体 Tab 读取真实 HOME 凭据、下载备份及核验边界。
 - [登录会话持久化](tasks/login-session-persistence.md)：cookie、签名密钥和登录页恢复跳转的跨重启边界。
 - [FRP 角色管理边界](tasks/frp-role-management.md)：外部配置保存、进程所有权、重复启动和状态锁死锁边界。
 - [API 预设路由边界](tasks/api-preset-routing-boundaries.md)：`direct`、本地中继、协议转换、测试探针和客户端凭据的边界。
@@ -41,6 +42,8 @@
 
 ### 终端会话
 
+- [终端分组角色](tasks/terminal-group-roles.md)：超级管理员、普通管理员、角色下拉、皇冠与角色持久化边界。
+
 - [会话切换与输出](tasks/terminal-session-switch-output.md)：WebSocket、backlog、滚动恢复、输出合并和新会话隔离。
 - [终端按键投递与退格失效](tasks/terminal-input-keystroke-delivery.md)：按读取批次解析按键、退格字节分段投递与间隔。
 - [会话活动状态](tasks/terminal-session-activity.md)：工作、错误、重试、完成、输出和空闲状态。
@@ -57,7 +60,8 @@
 - [移动端触摸选择](tasks/terminal-touch-selection.md)：长按、手柄和原生选择冲突。
 - [移动端滚动稳定](tasks/terminal-mobile-scroll-settle.md)：IME 与 `visualViewport` settle window。
 - [Android 横竖屏切换](tasks/android-orientation-toggle.md)：悬浮按钮三态方向、原生 bridge、持久化与 APK 验证。
-- [Android 客户端可靠性](tasks/android-client-reliability.md)：1.8.21 探测、恢复、更新事务、重连退避与终端上下文缓存边界。
+- [Android 客户端可靠性](tasks/android-client-reliability.md)：系统栏/刘海/IME 安全区域、原生双源更新发布、探测恢复与终端缓存边界。
+- [下载中心 Android 适配](tasks/android-download-center-adaptation.md)：安卓产物到真实项目的映射、别名去重及安全区域适配发布进度。
 - [恢复命令提取](tasks/terminal-resume-hard-wrap.md)：硬换行 UUID 和不完整命令处理。
 - [软键盘项目指令](tasks/terminal-soft-keyboard-deploy.md)：部署动作的项目路径解析，以及项目级 `.webclx.json` Web 入口配置。
 
@@ -75,6 +79,7 @@
 - [工作区文件改名](tasks/workspace-file-rename.md)：重命名 API、安全限制和前端同步。
 - [工作区项目图标](tasks/workspace-project-icons.md)：项目相对图标路径、工作区图标列与活动终端图文选择器。
 - [systemd scope fallback](tasks/terminal-systemd-scope.md)：终端创建时的 scope 回退。
+- [公开发布脱敏与仓库边界](tasks/public-release-sanitization.md)：脱敏快照构建、SKILL.md 禁令、历史抹除与跨仓库治理。
 - [Codex skill 上下文预算](tasks/codex-skills-budget.md)：skill description 预算治理、离线库与 agy/Gemini 技能发现。
 
 ## 文档维护

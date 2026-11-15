@@ -1106,6 +1106,9 @@ async function refreshAuthPresetQuota(presetId, presetName, statusElement = auth
     );
     updateStatus(statusElement, `已刷新额度：${response.preset.name}`, "ok");
     clearAuthPresetRefreshErrors(presetId);
+    if (typeof window.recordAccountRefreshed === "function") {
+      window.recordAccountRefreshed("oauth", presetId, Date.now());
+    }
     await refreshAuthPanels();
     return { ok: true };
   } catch (error) {

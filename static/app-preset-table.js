@@ -739,7 +739,8 @@ const presetTestPopup = (() => {
     try {
       const date = new Date(Number(timestamp));
       if (Number.isNaN(date.getTime())) return "";
-      return date.toLocaleString();
+      const pad = (n) => String(n).padStart(2, "0");
+      return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
     } catch {
       return "";
     }

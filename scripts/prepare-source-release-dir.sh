@@ -18,7 +18,6 @@ fi
 ARCHIVE="$(realpath -e "$1")"
 CHECKSUM_FILE="$ARCHIVE.sha256"
 DESTINATION="${2:-}"
-RELEASE_CACHE_DIR="${WEBCLX_RELEASE_CACHE_DIR:-/home/cache/webclx-release}"
 
 if [ ! -f "$CHECKSUM_FILE" ]; then
   echo "source release checksum is missing: $CHECKSUM_FILE" >&2
@@ -92,8 +91,8 @@ if [ -n "$DESTINATION" ]; then
   CREATED_CONTAINER="$(realpath -m "$DESTINATION")"
   mkdir "$CREATED_CONTAINER"
 else
-  mkdir -p "$RELEASE_CACHE_DIR"
-  CREATED_CONTAINER="$(mktemp -d "$RELEASE_CACHE_DIR/source-release.XXXXXX")"
+  mkdir -p /home/cache/webclx-release
+  CREATED_CONTAINER="$(mktemp -d /home/cache/webclx-release/source-release.XXXXXX)"
 fi
 
 tar -xzf "$ARCHIVE" --no-same-owner --no-same-permissions -C "$CREATED_CONTAINER"

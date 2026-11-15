@@ -24,6 +24,12 @@ assert.match(
   "terminal copy actions should use the Android native clipboard bridge before browser fallbacks",
 );
 
+assert.match(
+  commonSource,
+  /const openDialogs = document\.querySelectorAll\("dialog\[open\]"\);[\s\S]*?const container = openDialogs\.length > 0 \? openDialogs\[openDialogs\.length - 1\] : document\.body;[\s\S]*?container\.appendChild\(textarea\);/,
+  "clipboard fallback helper must be appended inside the active open dialog to prevent inert focus rejection during modal dialogs",
+);
+
 const functionBody = (name) =>
   source.match(new RegExp(`async function ${name}\\(\\) \\{([\\s\\S]*?)\\n\\}`))?.[1] || "";
 
@@ -66,6 +72,43 @@ assert.doesNotMatch(
   extractSessionBody,
   /shortResumeId\(/,
   "advanced-copy feedback must not abbreviate the copied Session ID",
+);
+
+assert.match(
+  source,
+  /function buildSessionQuestionPrompt\(sessionId[\s\S]*?调用codex db维护skill读取\$\{normalizedAgent\} session id为 \$\{id\}并接受指令：/,
+  "buildSessionQuestionPrompt should interpolate normalized agent type before 'session id'",
+);
+
+// 提取并在微环境中执行 buildSessionQuestionPrompt 和 resolveSessionAgentType
+const promptScript = new Function(
+  "state",
+  "activeTerminalContext",
+  "activeSession",
+  `${source}\nreturn { buildSessionQuestionPrompt, resolveSessionAgentType };`,
+);
+const { buildSessionQuestionPrompt, resolveSessionAgentType } = promptScript(
+  { activeSessionId: "s-1", sessions: [] },
+  null,
+  () => null,
+);
+
+const testId = "01a1d546-1928-7291-b3ee-1c6a18b6c6cc";
+assert.equal(
+  buildSessionQuestionPrompt(testId, "codex"),
+  `调用codex db维护skill读取codex session id为 ${testId}并接受指令：`,
+);
+assert.equal(
+  buildSessionQuestionPrompt(testId, "agy"),
+  `调用codex db维护skill读取agy session id为 ${testId}并接受指令：`,
+);
+assert.equal(
+  buildSessionQuestionPrompt(testId, "claude"),
+  `调用codex db维护skill读取claude session id为 ${testId}并接受指令：`,
+);
+assert.equal(
+  buildSessionQuestionPrompt({ resumeId: testId, program: "agy" }),
+  `调用codex db维护skill读取agy session id为 ${testId}并接受指令：`,
 );
 
 console.log("terminal copy feedback tests passed");

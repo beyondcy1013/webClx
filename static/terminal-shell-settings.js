@@ -37,6 +37,12 @@ function applyTerminalScrollbackLines(value = state.terminalScrollbackLines) {
   return normalized;
 }
 
+function persistTerminalSoftKeyboardScale(scale) {
+  try {
+    window.localStorage.setItem("webclx:terminal-soft-keyboard-scale", String(scale));
+  } catch {}
+}
+
 function applyTerminalSoftKeyboardScale(value = state.terminalSoftKeyboardScale) {
   const normalized = normalizeTerminalSoftKeyboardScale(value);
   state.terminalSoftKeyboardScale = normalized;
@@ -67,6 +73,7 @@ function applyTerminalSoftKeyboardScale(value = state.terminalSoftKeyboardScale)
   setPx("--terminal-key-select-caret-size", 4);
   setPx("--terminal-slash-command-width", 52);
   setPx("--terminal-number-select-width", 48);
+  persistTerminalSoftKeyboardScale(normalized);
   syncTerminalHostHeight();
   syncScrollTopButtonOffset();
   updateScrollTopButton();
@@ -203,6 +210,12 @@ function applyDesktopTerminalSoftKeyboardSetting(enabled = state.desktopTerminal
   return normalized;
 }
 
+function persistTypographySettings(tiers) {
+  try {
+    window.localStorage.setItem("webclx:font-size-tiers", JSON.stringify(tiers));
+  } catch {}
+}
+
 function applyTypographySettings(fontSizeTiers = state.fontSizeTiers) {
   const tiers = normalizeFontSizeTiers(fontSizeTiers);
   state.fontSizeTiers = tiers;
@@ -215,6 +228,7 @@ function applyTypographySettings(fontSizeTiers = state.fontSizeTiers) {
     "--terminal-key-font-size",
     `${Math.round(tiers[2] * state.terminalSoftKeyboardScale * 100) / 100}rem`,
   );
+  persistTypographySettings(tiers);
   return tiers;
 }
 
@@ -497,7 +511,7 @@ function restoreCachedTerminalViewport(context) {
   }
   suppressTerminalScrollSaveUntilNextFrame();
   restoreTerminalScrollPositionForSession(context.sessionId, { defaultToBottom: true });
-  if (context.followOutput) {
+  if (context.followOutput !== false) {
     scrollTerminalToBottom();
   }
   const refresh = () => {
@@ -549,20 +563,27 @@ function activateTerminalContext(context, previousContext) {
   activeTerminalContext = context;
   pendingTerminalSize = null;
   if (context !== previousContext && context.sessionId !== TERMINAL_EMPTY_CONTEXT_ID) {
-    // Prepare the logical viewport while still hidden, including sessions
-    // without new background output since their last manual history reading.
+    // Cancel restores from the previous visit without changing this session's
+    // reading/follow intent. Background output already updates that intent.
     noteTerminalUserScrollIntent();
-    context.followOutput = true;
-    terminalScrollPositions.set(context.sessionId, {
-      scrollTop: 0,
-      maxScroll: 0,
-      atBottom: true,
-      scrollIntentRevision: context.scrollIntentRevision,
-    });
+    const saved = terminalScrollPositions.get(context.sessionId);
+    if (saved) {
+      terminalScrollPositions.set(context.sessionId, {
+        ...saved,
+        scrollIntentRevision: context.scrollIntentRevision,
+      });
+    }
     for (const instance of [context.term, context.retainedTerm]) {
       const buffer = instance?.buffer?.active;
-      if (buffer && buffer.viewportY !== buffer.baseY) {
+      if (!buffer) continue;
+      if (context.followOutput !== false && buffer.viewportY !== buffer.baseY) {
         instance.scrollToBottom?.();
+      } else if (context.followOutput === false && saved?.atBottom === false) {
+        const rowHeight = instance._core?.viewport?._currentRowHeight
+          || instance._core?._renderService?.dimensions?.actualCellHeight;
+        if (rowHeight > 0) {
+          instance.scrollToLine?.(Math.round(saved.scrollTop / rowHeight));
+        }
       }
     }
   }

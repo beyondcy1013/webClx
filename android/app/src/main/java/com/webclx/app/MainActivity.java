@@ -20,7 +20,6 @@ import android.content.pm.Signature;
 import android.content.res.TypedArray;
 import android.database.Cursor;
 import android.graphics.Color;
-import android.graphics.Rect;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -34,7 +33,7 @@ import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowInsets;
+import android.view.inputmethod.InputMethodManager;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.RenderProcessGoneDetail;
@@ -166,6 +165,7 @@ public final class MainActivity extends Activity {
             ViewGroup.LayoutParams.MATCH_PARENT
         ));
         setContentView(contentRoot);
+        WindowInsetsLayout.install(this, contentRoot, visible -> systemKeyboardVisible = visible);
 
         registerDownloadCompleteReceiver();
         configureWebView();
@@ -183,26 +183,7 @@ public final class MainActivity extends Activity {
     private WebView createWebView(int backgroundColor) {
         WebView view = new WebView(this);
         view.setBackgroundColor(backgroundColor);
-        bindKeyboardVisibility(view);
         return view;
-    }
-
-    private void bindKeyboardVisibility(WebView view) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            // API 30+ reports the IME window directly; no geometry guessing.
-            view.setOnApplyWindowInsetsListener((target, insets) -> {
-                systemKeyboardVisible = insets.isVisible(WindowInsets.Type.ime());
-                return target.onApplyWindowInsets(insets);
-            });
-            return;
-        }
-        view.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
-            Rect visibleFrame = new Rect();
-            view.getWindowVisibleDisplayFrame(visibleFrame);
-            int rootHeight = view.getRootView().getHeight();
-            int obscuredHeight = Math.max(0, rootHeight - visibleFrame.bottom);
-            systemKeyboardVisible = rootHeight > 0 && obscuredHeight > rootHeight * 0.15;
-        });
     }
 
     private boolean restoreInstanceState(Bundle savedInstanceState) {
@@ -1469,6 +1450,28 @@ public final class MainActivity extends Activity {
         @JavascriptInterface
         public boolean isSystemKeyboardVisible() {
             return systemKeyboardVisible;
+        }
+
+        // Explicit user request to reveal the IME. Old WebView builds do not
+        // raise the keyboard from a scripted element focus alone, so the page
+        // calls this after focusing the terminal helper.
+        @JavascriptInterface
+        public boolean showSystemKeyboard() {
+            if (!isActivityUsable() || webView == null) {
+                return false;
+            }
+            mainHandler.post(() -> {
+                if (!isActivityUsable() || webView == null) {
+                    return;
+                }
+                webView.requestFocus();
+                InputMethodManager imm = getSystemService(InputMethodManager.class);
+                if (imm == null) {
+                    return;
+                }
+                imm.showSoftInput(webView, 0);
+            });
+            return true;
         }
 
         @JavascriptInterface

@@ -110,6 +110,8 @@ async def run_case(browser, *, soft_keyboard, touch=False, launch_dialog=False, 
             f"http://webclx.test/terminal?path=webClx&session={SESSION_ID}",
             wait_until="domcontentloaded",
         )
+        if touch:
+            await page.locator('#webclx-language-welcome button[data-locale="zh-CN"]').click()
         await page.wait_for_function("""() => terminalHelperTextarea()
             && terminalInitialReplaySettled()
             && state.desktopTerminalSoftKeyboardEnabled === %s"""
@@ -163,7 +165,7 @@ async def run_case(browser, *, soft_keyboard, touch=False, launch_dialog=False, 
                 "terminal-permanent-preset-dialog": "terminal-permanent-preset-close",
                 "terminal-in-place-preset-dialog": "terminal-in-place-preset-close",
                 "terminal-quota-dialog": "terminal-quota-close",
-                "terminal-paste-dialog": "terminal-paste-cancel",
+                "terminal-paste-dialog": "terminal-paste-close",
                 "terminal-input-history-dialog": "terminal-input-history-close",
             }
             for dialog_id in dialog_ids:

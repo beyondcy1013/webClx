@@ -11,7 +11,7 @@ function fn(file, name) {
   const asyncEnd = source.indexOf('\nasync function ', start + 1);
   return source.slice(start, Math.min(...[end, asyncEnd, source.length].filter(n => n > start)));
 }
-function harness() {
+function harness({ requestJson = null, state = null } = {}) {
   const context = {
     connectionToken: 1, outputWriteId: 0, outputQueue: [],
     outputWriteInFlight: false, initialReplayPending: false,
@@ -23,7 +23,9 @@ function harness() {
   context.term = { write: (_, cb) => callbacks.push(cb) };
   const sandbox = {
     activeTerminalContext: null, Date: { now: () => now },
-    TERMINAL_TOOL_SESSION_READY_TIMEOUT_MS: 15000,
+    TERMINAL_TOOL_SESSION_READY_TIMEOUT_MS: 30000,
+    TERMINAL_TOOL_SESSION_LIVE_PROBE_INTERVAL_MS: 3000,
+    TERMINAL_TOOL_SESSION_LIVE_PROBE_GRACE_MS: 5000,
     ensureTerminalSessionCache: () => new Map([['target', context]]),
     terminalContextSocketOpen: c => c.socket?.readyState === 1,
     waitForTerminalToolDelay: async ms => { now += ms; },
@@ -34,10 +36,15 @@ function harness() {
     endTerminalBacklogReplay: (_, c) => { c.backlogReplayActive = false; c.backlogReplayEndQueued = false; },
     handleTerminalBacklogReplayControl: () => false,
     resetTerminalBacklogReplay() {}, resetTerminalOutputQueue() {},
+    terminalScrollPositions: new Map(),
   };
+  if (typeof requestJson === "function") sandbox.requestJson = requestJson;
+  if (state) sandbox.state = state;
   for (const [file, name] of [
     ['terminal-input-transport.js', 'terminalInitialReplaySettled'],
+    ['terminal-tool-actions.js', 'probeTerminalToolSessionMissing'],
     ['terminal-tool-actions.js', 'waitForTerminalToolSessionReady'],
+    ['terminal-output-scroll.js', 'followBackgroundTerminalOutput'],
     ['terminal-output-scroll.js', 'drainTerminalOutputQueue'],
     ['terminal-layout-connection.js', 'handleServerControlMessage'],
   ]) vm.runInNewContext(fn(file, name), sandbox);
@@ -105,4 +112,40 @@ test('timeout reports actual blocked phase and disposed context exits early', as
   await assert.rejects(s.waitForTerminalToolSessionReady('target', 200), /等待连接/);
   c.disposed = true;
   await assert.rejects(s.waitForTerminalToolSessionReady('target'), /已释放/);
+});
+
+test('a target session deleted on the server fails fast instead of burning the timeout', async () => {
+  const { context: c, sandbox: s } = harness({
+    requestJson: async () => ({ sessions: [{ id: 'other' }] }),
+    state: { pendingCreatedSessionIds: new Set() },
+  });
+  c.disconnected = true;
+  await assert.rejects(s.waitForTerminalToolSessionReady('target', 30000), /已被删除/);
+});
+
+test('a target session still listed by the server keeps waiting until the timeout', async () => {
+  const { context: c, sandbox: s } = harness({
+    requestJson: async () => ({ sessions: [{ id: 'target' }] }),
+    state: { pendingCreatedSessionIds: new Set() },
+  });
+  c.disconnected = true;
+  await assert.rejects(s.waitForTerminalToolSessionReady('target', 6000), /等待连接/);
+});
+
+test('a freshly created session missing from the list is not treated as deleted', async () => {
+  const { context: c, sandbox: s } = harness({
+    requestJson: async () => ({ sessions: [{ id: 'other' }] }),
+    state: { pendingCreatedSessionIds: new Set(['target']) },
+  });
+  c.disconnected = true;
+  await assert.rejects(s.waitForTerminalToolSessionReady('target', 6000), /等待连接/);
+});
+
+test('a failed session-list probe never proves the target was deleted', async () => {
+  const { context: c, sandbox: s } = harness({
+    requestJson: async () => { throw new Error('probe failed'); },
+    state: { pendingCreatedSessionIds: new Set() },
+  });
+  c.disconnected = true;
+  await assert.rejects(s.waitForTerminalToolSessionReady('target', 6000), /等待连接/);
 });

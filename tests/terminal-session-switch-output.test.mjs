@@ -276,12 +276,18 @@ const selectSessionStart = terminalJs.indexOf("function selectSession(sessionId,
 assert.ok(
   selectSessionStart >= 0 &&
     terminalJs.indexOf("saveTerminalScrollPositionForSession(state.activeSessionId);", selectSessionStart) > selectSessionStart &&
-    terminalJs.indexOf("const pageScrollRestore = beginSessionPageScrollRestore(session.id);", selectSessionStart) > selectSessionStart &&
+    terminalJs.indexOf("beginSessionPageScrollRestore(session.id)", selectSessionStart) > selectSessionStart &&
     terminalJs.indexOf("state.activeSessionId = session.id;", selectSessionStart) > selectSessionStart &&
     terminalJs.indexOf("renderSessions();", selectSessionStart) > selectSessionStart &&
     terminalJs.indexOf("restoreSessionPageScrollIfActive(pageScrollRestore);", selectSessionStart) > selectSessionStart &&
     terminalJs.indexOf("connectTerminal();", selectSessionStart) > selectSessionStart,
   "session dropdown switches should restore the page bottom only after the active session has changed",
+);
+
+assert.match(
+  layoutConnectionJs,
+  /function selectSession\(sessionId,[\s\S]*const isSameSession = Boolean\([\s\S]*!isSameSession[\s\S]*beginSessionPageScrollRestore/,
+  "selecting the currently active session should not trigger a fake session switch or unwanted page-bottom restore",
 );
 
 const connectTerminalStart = terminalJs.indexOf("function connectTerminal(targetContext = null)");

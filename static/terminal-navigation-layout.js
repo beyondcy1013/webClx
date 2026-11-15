@@ -372,7 +372,10 @@ function noteTerminalUserScrollIntent() {
   cancelTerminalBottomAnchor();
 }
 
-function saveTerminalScrollPositionForSession(sessionId, { userIntent = false } = {}) {
+function saveTerminalScrollPositionForSession(
+  sessionId,
+  { userIntent = false, switchingSession = false } = {},
+) {
   if (!sessionId || sessionId !== state.activeSessionId || activeTerminalContext?.sessionId !== sessionId) {
     return;
   }
@@ -386,9 +389,9 @@ function saveTerminalScrollPositionForSession(sessionId, { userIntent = false } 
   const saved = terminalScrollPositions.get(sessionId);
   // Layout and an unfinished write can temporarily move the viewport away
   // from the bottom. A dropdown switch must save the intent, not that frame.
-  const preserveIntent = !userIntent && context && (
+  const preserveIntent = (!userIntent && context && (
     terminalScrollSaveSuppressed() || context.outputWriteInFlight || context.backlogReplayActive
-  );
+  )) || (switchingSession && context?.followOutput !== false);
   const atBottom = preserveIntent ? context.followOutput !== false : metrics.atBottom;
   const preserveReadingPosition = preserveIntent && saved?.atBottom === false &&
     saved.scrollIntentRevision === context.scrollIntentRevision;
@@ -416,10 +419,17 @@ function captureTerminalScrollSnapshotForSession(sessionId) {
     return null;
   }
 
+  // A recreated/evicted xterm is still empty before replay starts. Layout
+  // callbacks captured now may run after replay and must not restore row 0
+  // over the reading position saved from the previous instance.
+  const saved = activeTerminalContext?.hasLoadedOutput === false
+    ? terminalScrollPositions.get(sessionId)
+    : null;
+  const following = activeTerminalContext?.followOutput;
   return {
     sessionId,
-    scrollTop: metrics.scrollTop,
-    atBottom: activeTerminalContext?.followOutput ?? metrics.atBottom,
+    scrollTop: saved?.scrollTop ?? metrics.scrollTop,
+    atBottom: saved?.atBottom ?? (following !== undefined ? following : metrics.atBottom),
     scrollIntentRevision: activeTerminalContext?.scrollIntentRevision,
   };
 }

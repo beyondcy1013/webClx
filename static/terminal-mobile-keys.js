@@ -51,6 +51,7 @@ function sendSlashCommand(command, { enterDelayMs = 0, sessionId = "" } = {}) {
   }
   const compactCommand = commandLine.split(/\s+/)[0] === "/compact";
   const targetSessionId = String(sessionId || (compactCommand ? state.activeSessionId : "") || "").trim();
+  const requestSessionId = String(targetSessionId || state.activeSessionId || "").trim();
   if (typeof terminalCompactCommandAllowed === "function"
     && !terminalCompactCommandAllowed(commandLine, targetSessionId)) return false;
   const requestedEnterDelayMs = mobileKeyDelayMs(enterDelayMs, 0);
@@ -66,6 +67,26 @@ function sendSlashCommand(command, { enterDelayMs = 0, sessionId = "" } = {}) {
     .then(async () => {
       if (typeof terminalCompactCommandAllowed === "function"
         && !terminalCompactCommandAllowed(commandLine, targetSessionId)) return;
+      if (typeof requestJson === "function" && requestSessionId) {
+        try {
+          const res = await requestJson(
+            `/api/terminal/sessions/${encodeURIComponent(requestSessionId)}/slash-command`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                command: commandLine,
+                enter_delay_ms: effectiveEnterDelayMs,
+              }),
+            },
+          );
+          if (res?.ok) {
+            return;
+          }
+        } catch (error) {
+          console.warn("sendSlashCommand endpoint failed, falling back to direct PTY input", error);
+        }
+      }
       const sendInput = (data) => {
         if (!targetSessionId
           || (compactCommand && !sessionId && targetSessionId === state.activeSessionId)) {
@@ -335,6 +356,21 @@ function triggerMobileKey(button) {
     return;
   }
 
+  if (button.dataset.action === "open_terminal_image_paste_dialog") {
+    openTerminalImagePasteDialog();
+    return;
+  }
+
+  if (button.dataset.action === "open_terminal_paste_dialog") {
+    openTerminalPasteDialogFromClipboard();
+    return;
+  }
+
+  if (button.dataset.action === "upload_terminal_file" || button.dataset.action === "upload_terminal_image") {
+    openTerminalFileUploadPicker();
+    return;
+  }
+
   if (button.dataset.action === "sort_directory_sessions_by_path") {
     runTerminalFunctionCommand({ action: button.dataset.action });
     return;
@@ -571,6 +607,21 @@ function runTerminalFunctionCommand(command, options = {}) {
     return true;
   }
 
+  if (command.action === "open_paste_dialog" || command.action === "open_terminal_paste_dialog") {
+    openTerminalPasteDialogFromClipboard();
+    return true;
+  }
+
+  if (command.action === "open_image_paste_dialog" || command.action === "open_terminal_image_paste_dialog") {
+    openTerminalImagePasteDialog();
+    return true;
+  }
+
+  if (command.action === "upload_terminal_file" || command.action === "upload_terminal_image") {
+    openTerminalFileUploadPicker();
+    return true;
+  }
+
   if (command.action === "send_sequence") {
     if (command.command === "ctrl_v") {
       pasteFromClipboard();
@@ -628,9 +679,19 @@ function handleTerminalFunctionCommandMenuAction(event) {
     restoreTerminalPortraitOrientation();
     return;
   }
-  if (button.dataset.action === "upload_terminal_image") {
+  if (button.dataset.action === "upload_terminal_file" || button.dataset.action === "upload_terminal_image") {
     closeTerminalFunctionCommandMenu();
-    openTerminalImageUploadPicker();
+    openTerminalFileUploadPicker();
+    return;
+  }
+  if (button.dataset.action === "open_terminal_paste_dialog") {
+    closeTerminalFunctionCommandMenu();
+    openTerminalPasteDialogFromClipboard();
+    return;
+  }
+  if (button.dataset.action === "open_terminal_image_paste_dialog") {
+    closeTerminalFunctionCommandMenu();
+    openTerminalImagePasteDialog();
     return;
   }
   const command = state.terminalFunctionCommands.find((item) => item.key === button.dataset.key) || null;
@@ -757,6 +818,8 @@ function runTerminalProjectCommandAction(action) {
     openTerminalServerSwitchDialog();
   } else if (action === "deploy_project") {
     triggerProjectDeploy();
+  } else if (action === "precompile_project") {
+    triggerProjectPrecompile();
   } else if (action === "open_project_url") {
     openProjectUrl();
   } else if (action === "open_artifact_downloads") {
@@ -1079,7 +1142,7 @@ function suppressSystemImeForSoftKeyboardControl(event) {
   const helperWasFocused =
     !isMainSoftKey && now < softKeyboardMenuImeFocusUntil && softKeyboardMenuImeFocus !== null
       ? softKeyboardMenuImeFocus
-      : (terminalHelperTextareaFocused() || (terminalSystemImeEnabled && terminalNativeKeyboardVisible()));
+      : (terminalSystemImeEnabled && terminalNativeKeyboardVisible());
   softKeyboardImeGestureSequence += 1;
   if (isMainSoftKey) {
     softKeyboardMenuImeFocus = helperWasFocused;

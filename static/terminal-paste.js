@@ -251,7 +251,7 @@ async function terminalPastePartsToText(parts, { collectDialogAssets = false } =
   for (const part of parts) {
     if (part.type === "text") {
       text = appendTerminalPasteTextValue(text, part.text);
-    } else if (part.type === "images" && part.blobs?.length) {
+    } else if ((part.type === "images" || part.type === "files") && part.blobs?.length) {
       const assets = await uploadTerminalPasteImages(part.blobs);
       imageCount += assets.length;
       if (collectDialogAssets) {
@@ -324,24 +324,31 @@ async function pasteTerminalPartsDirectly(parts, options = {}) {
   }
 }
 
-function openTerminalImageUploadPicker() {
+function openTerminalFileUploadPicker() {
   cancelNewSessionQuickStart();
   if (!ensureTerminalReadyForInput()) {
     return false;
   }
-  if (!terminalImageUploadInputEl) {
-    updateStatus("当前页面不支持选择图片。", "warn");
+  const input = typeof terminalFileUploadInputEl !== "undefined" && terminalFileUploadInputEl
+    ? terminalFileUploadInputEl
+    : terminalImageUploadInputEl;
+  if (!input) {
+    updateStatus("当前页面不支持选择文件。", "warn");
     return false;
   }
-  terminalImageUploadInputEl.value = "";
-  terminalImageUploadInputEl.click();
+  input.value = "";
+  input.click();
   return true;
 }
 
-async function handleTerminalImageUploadSelection() {
-  const files = Array.from(terminalImageUploadInputEl?.files || []);
-  if (terminalImageUploadInputEl) {
-    terminalImageUploadInputEl.value = "";
+function openTerminalImageUploadPicker() {
+  return openTerminalFileUploadPicker();
+}
+
+async function handleTerminalFileUploadSelection() {
+  const files = Array.from(terminalFileUploadInputEl?.files || []);
+  if (terminalFileUploadInputEl) {
+    terminalFileUploadInputEl.value = "";
   }
   if (files.length === 0) {
     return;
@@ -349,15 +356,152 @@ async function handleTerminalImageUploadSelection() {
 
   try {
     await pasteTerminalPartsDirectly(
-      [{ type: "images", blobs: files }],
+      [{ type: "files", blobs: files }],
       {
-        emptyMessage: "未选择图片。",
-        progressMessage: "正在上传所选图片…",
+        emptyMessage: "未选择文件。",
+        progressMessage: "正在上传所选文件…",
       },
     );
   } catch (error) {
+    updateStatus(error?.message || "上传文件失败。", "warn");
+  }
+}
+
+async function handleTerminalImageUploadSelection() {
+  return handleTerminalFileUploadSelection();
+}
+
+async function openTerminalImagePasteDialog() {
+  cancelNewSessionQuickStart();
+  if (!ensureTerminalReadyForInput()) {
+    return false;
+  }
+
+  if (typeof terminalImagePasteTextEl !== "undefined" && terminalImagePasteTextEl) {
+    terminalImagePasteTextEl.value = "";
+  }
+  revokeTerminalImagePasteAssetPreviews();
+  terminalImagePasteAssetEntries = [];
+  renderTerminalImagePasteAssets();
+
+  if (typeof terminalImagePasteDialogEl !== "undefined" && terminalImagePasteDialogEl) {
+    if (typeof terminalImagePasteDialogEl.showModal === "function") {
+      if (!terminalImagePasteDialogEl.open) {
+        terminalImagePasteDialogEl.showModal();
+      }
+    } else {
+      terminalImagePasteDialogEl.setAttribute("open", "");
+    }
+  }
+
+  if (navigator.clipboard?.read) {
+    try {
+      const items = await navigator.clipboard.read();
+      const parts = await clipboardItemsToPasteParts(items);
+      const imageParts = parts.filter((part) => part.type === "images");
+      if (imageParts.length > 0) {
+        await applyTerminalImagePasteBlobs(imageParts.flatMap((p) => p.blobs));
+      }
+    } catch (_) {}
+  }
+
+  return true;
+}
+
+async function applyTerminalImagePasteBlobs(blobs) {
+  if (!blobs || blobs.length === 0) {
+    return;
+  }
+  updateStatus("正在上传图片…", "info");
+  try {
+    const assets = await uploadTerminalPasteImages(blobs);
+    assets.forEach((asset, index) => {
+      const blob = blobs[index];
+      terminalImagePasteAssetEntries.push({
+        asset,
+        name: asset.name,
+        type: asset.mime || blob?.type,
+        size: asset.size || blob?.size,
+        previewUrl: blob ? URL.createObjectURL(blob) : "",
+      });
+    });
+    renderTerminalImagePasteAssets();
+    const promptText = terminalPasteAssetsPromptText(assets);
+    if (typeof terminalImagePasteTextEl !== "undefined" && terminalImagePasteTextEl) {
+      if (!terminalImagePasteTextEl.value) {
+        terminalImagePasteTextEl.value = promptText;
+      } else {
+        terminalImagePasteTextEl.value = appendTerminalPasteTextValue(terminalImagePasteTextEl.value, promptText);
+      }
+      terminalImagePasteTextEl.focus();
+    }
+    updateStatus(`已上传 ${assets.length} 张图片。`, "ok");
+  } catch (error) {
     updateStatus(error?.message || "上传图片失败。", "warn");
   }
+}
+
+function submitTerminalImagePasteDialog({ enter = false } = {}) {
+  let text = typeof terminalImagePasteTextEl !== "undefined" && terminalImagePasteTextEl
+    ? terminalImagePasteTextEl.value.trim()
+    : "";
+  if (!text && terminalImagePasteAssetEntries.length > 0) {
+    const assets = terminalImagePasteAssetEntries.map((e) => e.asset).filter(Boolean);
+    text = terminalPasteAssetsPromptText(assets);
+  }
+
+  if (!text) {
+    updateStatus("请先选择图片或输入提示词。", "warn");
+    return false;
+  }
+
+  const payload = enter ? `${text}\r` : text;
+  const sent = sendPastedText(payload, "请先选择图片或输入内容。", {
+    forceBracketedPaste: !enter,
+  });
+  if (sent) {
+    closeTerminalImagePasteDialog();
+    focusTerminalAfterSoftKeyboardInput();
+  }
+  return sent;
+}
+
+async function openTerminalPasteDialogFromClipboard() {
+  cancelNewSessionQuickStart();
+  if (!ensureTerminalReadyForInput()) {
+    return false;
+  }
+
+  openTerminalPasteDialog();
+
+  if (navigator.clipboard?.read) {
+    try {
+      const items = await navigator.clipboard.read();
+      const parts = await clipboardItemsToPasteParts(items);
+      if (parts.length > 0) {
+        await applyTerminalPasteParts(parts, { openDialog: false });
+      }
+    } catch (_) {
+      if (navigator.clipboard?.readText) {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text) {
+            appendTerminalPasteText(text);
+          }
+        } catch (_) {}
+      }
+    }
+  } else if (navigator.clipboard?.readText) {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text) {
+        appendTerminalPasteText(text);
+      }
+    } catch (_) {}
+  }
+
+  terminalPasteTextEl?.focus();
+  return true;
 }
 
 function sendPastedText(text, emptyMessage = "剪贴板为空。", options = {}) {
@@ -439,8 +583,11 @@ function normalizeTerminalPasteScheduledTask(task) {
     sessionId: String(task.sessionId || task.session_id || ""),
     terminalName: String(task.terminalName || task.terminal_name || ""),
     at: dueAt,
+    type: task.task_type || task.type || "paste",
+    status: String(task.status || "queued"),
     label: String(task.label || ""),
     preview: String(task.preview || ""),
+    text: String(task.text || task.preview || ""),
   };
 }
 
@@ -611,11 +758,20 @@ async function refreshTerminalPasteScheduledTasks() {
   notifyNewTerminalAutoContinueScheduledTasks(newlyDetectedAutoContinueTasks);
 }
 
+let terminalPasteScheduledSecondTickTimer = null;
+
 function ensureTerminalPasteScheduledRefreshTimer() {
-  if (terminalPasteScheduledCountdownTimer) {
-    return;
+  if (!terminalPasteScheduledCountdownTimer) {
+    terminalPasteScheduledCountdownTimer = window.setInterval(refreshTerminalPasteScheduledTasks, 3000);
   }
-  terminalPasteScheduledCountdownTimer = window.setInterval(refreshTerminalPasteScheduledTasks, 10000);
+  if (!terminalPasteScheduledSecondTickTimer && typeof window !== "undefined") {
+    terminalPasteScheduledSecondTickTimer = window.setInterval(() => {
+      const counts = terminalScheduledTaskCounts();
+      if (counts.total > 0) {
+        tickTerminalPasteScheduledCountdown();
+      }
+    }, 1000);
+  }
 }
 
 // Remove one pending task by id from the local server-list cache.
@@ -634,6 +790,13 @@ function removeTerminalPasteScheduledTask(taskId, options = {}) {
 // Cancel all pending server-side tasks from the compact chip.
 async function clearAllTerminalPasteScheduledTasks() {
   const taskIds = Array.from(terminalPasteScheduledTasks.keys());
+  if (!taskIds.length) {
+    return;
+  }
+  const hasConfirm = typeof window !== "undefined" && typeof window.confirm === "function";
+  if (hasConfirm && !window.confirm(`确定要取消全部 ${taskIds.length} 个排队/定时输入任务吗？\n\n⚠️ 取消后到期将不会发送，无法撤销！`)) {
+    return;
+  }
   for (const taskId of taskIds) {
     try {
       await requestJson(`/api/terminal/scheduled-inputs/${encodeURIComponent(taskId)}`, {
@@ -691,6 +854,26 @@ function terminalScheduledTaskCounts() {
 
 function terminalScheduledTaskChipText() {
   const counts = terminalScheduledTaskCounts();
+  if (counts.total === 0) {
+    return "定时 0/0";
+  }
+  const allTasks = [
+    ...Array.from(terminalPasteScheduledTasks.values()),
+    ...Array.from(terminalAutoContinueScheduledTasks.values()),
+  ];
+  const now = Date.now();
+  // 优先取当前终端的最早未到期排队/定时任务；若当前终端无，则取全部终端的最早
+  const currentTasks = allTasks.filter(terminalScheduledTaskMatchesActiveSession);
+  const candidates = currentTasks.length > 0 ? currentTasks : allTasks;
+  const upcomingSecs = candidates
+    .map((t) => Math.max(0, Math.ceil((Number(t.at) - now) / 1000)))
+    .filter((sec) => sec >= 0 && Number.isFinite(sec))
+    .sort((a, b) => a - b);
+
+  const earliestSec = upcomingSecs[0];
+  if (earliestSec !== undefined && earliestSec <= 300) {
+    return `定时 ${counts.current}/${counts.total} (${earliestSec}s)`;
+  }
   return `定时 ${counts.current}/${counts.total}`;
 }
 

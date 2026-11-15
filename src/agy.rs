@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock, RwLock,
         atomic::{AtomicU64, Ordering},
@@ -344,6 +344,8 @@ fn apply_oauth_login(
         default_account_name(email)
     };
     let mut account = Account {
+        switch_count: 0,
+        switch_history: Vec::new(),
         id: fresh_account_id(accounts, email),
         name,
         email: email.to_string(),
@@ -351,6 +353,7 @@ fn apply_oauth_login(
         settings: Value::Null,
         current: false,
         saved_at: now_secs,
+        last_switch_at: None,
         quota_cache: Value::Null,
         quota_cached_at: 0,
     };
@@ -375,6 +378,14 @@ struct Account {
     current: bool,
     saved_at: i64,
     #[serde(default)]
+    switch_count: u64,
+    /// 最近一次切换到该账号的时间（毫秒）；旧数据没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_switch_at: Option<i64>,
+    /// 每次切换到该账号的时间戳（毫秒），用于按时间窗口统计使用次数。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    switch_history: Vec<i64>,
+    #[serde(default)]
     quota_cache: Value,
     #[serde(default)]
     quota_cached_at: i64,
@@ -385,6 +396,368 @@ pub(crate) struct Manager {
     home: PathBuf,
     accounts: Arc<RwLock<Vec<Account>>>,
 }
+fn has_argon_group(summary: &Value) -> bool {
+    summary
+        .get("groups")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups.iter().any(|g| {
+                let name = g
+                    .get("displayName")
+                    .or_else(|| g.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let desc = g.get("description").and_then(Value::as_str).unwrap_or("");
+                let mut label = format!("{name} {desc}").to_ascii_lowercase();
+                if let Some(buckets) = g.get("buckets").and_then(Value::as_array) {
+                    for bucket in buckets {
+                        label.push_str(
+                            bucket
+                                .get("bucketId")
+                                .or_else(|| bucket.get("id"))
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        );
+                        label.push_str(
+                            bucket
+                                .get("displayName")
+                                .or_else(|| bucket.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        );
+                    }
+                }
+                label.contains("argon")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn has_gemini_group(summary: &Value) -> bool {
+    summary
+        .get("groups")
+        .and_then(Value::as_array)
+        .map(|groups| {
+            groups.iter().any(|g| {
+                let name = g
+                    .get("displayName")
+                    .or_else(|| g.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let desc = g.get("description").and_then(Value::as_str).unwrap_or("");
+                let mut label = format!("{name} {desc}").to_ascii_lowercase();
+                if let Some(buckets) = g.get("buckets").and_then(Value::as_array) {
+                    for bucket in buckets {
+                        label.push_str(
+                            bucket
+                                .get("bucketId")
+                                .or_else(|| bucket.get("id"))
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        );
+                        label.push_str(
+                            bucket
+                                .get("displayName")
+                                .or_else(|| bucket.get("name"))
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        );
+                    }
+                }
+                label.contains("gemini") && !label.contains("argon")
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn extract_gemini_quota(models: &Value) -> Option<(f64, String)> {
+    let models_obj = models.as_object()?;
+    let mut min_fraction: Option<f64> = None;
+    let mut reset_time: Option<String> = None;
+
+    for (name, model) in models_obj {
+        let lower = name.to_ascii_lowercase();
+        if !lower.contains("gemini") || lower.contains("argon") {
+            continue;
+        }
+        if model.get("disabled") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        if let Some(qi) = model.get("quotaInfo") {
+            if let Some(frac) = qi.get("remainingFraction").and_then(Value::as_f64) {
+                if frac.is_finite() && frac >= 0.0 {
+                    min_fraction = Some(match min_fraction {
+                        Some(cur) => cur.min(frac),
+                        None => frac,
+                    });
+                }
+            }
+            if let Some(rt) = qi.get("resetTime").and_then(Value::as_str) {
+                if !rt.is_empty() && reset_time.is_none() {
+                    reset_time = Some(rt.to_string());
+                }
+            }
+        }
+    }
+
+    min_fraction.map(|frac| (frac, reset_time.unwrap_or_default()))
+}
+
+fn extract_argon_quota(models: &Value) -> Option<(f64, String)> {
+    let models_obj = models.as_object()?;
+    let mut min_fraction: Option<f64> = None;
+    let mut reset_time: Option<String> = None;
+
+    for (name, model) in models_obj {
+        if !name.to_ascii_lowercase().contains("argon") {
+            continue;
+        }
+        if model.get("disabled") == Some(&Value::Bool(true)) {
+            continue;
+        }
+        if let Some(qi) = model.get("quotaInfo") {
+            if let Some(frac) = qi.get("remainingFraction").and_then(Value::as_f64) {
+                if frac.is_finite() && frac >= 0.0 {
+                    min_fraction = Some(match min_fraction {
+                        Some(cur) => cur.min(frac),
+                        None => frac,
+                    });
+                }
+            }
+            if let Some(rt) = qi.get("resetTime").and_then(Value::as_str) {
+                if !rt.is_empty() && reset_time.is_none() {
+                    reset_time = Some(rt.to_string());
+                }
+            }
+        }
+    }
+
+    min_fraction.map(|frac| (frac, reset_time.unwrap_or_default()))
+}
+
+fn find_weekly_reset_time(quota_summary: &Value) -> Option<String> {
+    let groups = quota_summary.get("groups").and_then(Value::as_array)?;
+    for group in groups {
+        if let Some(buckets) = group.get("buckets").and_then(Value::as_array) {
+            for bucket in buckets {
+                let window = bucket.get("window").and_then(Value::as_str).unwrap_or("");
+                let bucket_id = bucket
+                    .get("bucketId")
+                    .or_else(|| bucket.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if window == "weekly" || bucket_id.contains("weekly") {
+                    if let Some(rt) = bucket
+                        .get("resetTime")
+                        .or_else(|| bucket.get("reset_time"))
+                        .and_then(Value::as_str)
+                    {
+                        if !rt.is_empty() {
+                            return Some(rt.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn fetch_cli_usage_quota() -> Option<Value> {
+    let output = std::process::Command::new("agy")
+        .args(["-p", "/usage", "--output-format", "json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let val: Value = serde_json::from_slice(&output.stdout).ok()?;
+    let groups = val.get("command")?.get("data")?.get("groups")?.as_array()?;
+    if groups.is_empty() {
+        return None;
+    }
+    let mut normalized_groups = Vec::new();
+    for g in groups {
+        let name = g
+            .get("name")
+            .or_else(|| g.get("displayName"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let desc = g.get("description").and_then(Value::as_str).unwrap_or("");
+        let mut buckets = Vec::new();
+        if let Some(arr) = g.get("buckets").and_then(Value::as_array) {
+            for b in arr {
+                let id = b
+                    .get("id")
+                    .or_else(|| b.get("bucketId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let b_name = b
+                    .get("name")
+                    .or_else(|| b.get("displayName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let b_desc = b.get("description").and_then(Value::as_str).unwrap_or("");
+                let window = b.get("window").and_then(Value::as_str).unwrap_or("");
+                let frac = b
+                    .get("remaining_fraction")
+                    .or_else(|| b.get("remainingFraction"))
+                    .and_then(Value::as_f64)
+                    .unwrap_or(1.0);
+                let rt = b
+                    .get("reset_time")
+                    .or_else(|| b.get("resetTime"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                buckets.push(json!({
+                    "bucketId": id,
+                    "id": id,
+                    "displayName": b_name,
+                    "name": b_name,
+                    "description": b_desc,
+                    "window": window,
+                    "remainingFraction": frac,
+                    "remaining_fraction": frac,
+                    "resetTime": rt,
+                    "reset_time": rt,
+                }));
+            }
+        }
+        normalized_groups.push(json!({
+            "displayName": name,
+            "name": name,
+            "description": desc,
+            "buckets": buckets,
+        }));
+    }
+    Some(json!({
+        "description": "Within each group, models share limits.",
+        "groups": normalized_groups,
+    }))
+}
+
+pub(crate) fn synthesize_gemini_quota_summary(quota_summary: &mut Value, models: &Value) -> bool {
+    let mut modified = false;
+
+    if quota_summary.is_null() {
+        *quota_summary = json!({
+            "description": "Within each group, models share limits.",
+            "groups": [],
+        });
+        modified = true;
+    }
+
+    let weekly_reset_time = find_weekly_reset_time(quota_summary);
+
+    // 1. Gemini Models synthesis
+    if !has_gemini_group(quota_summary) {
+        if let Some((frac, reset_time)) = extract_gemini_quota(models) {
+            let weekly_rt = weekly_reset_time
+                .clone()
+                .unwrap_or_else(|| reset_time.clone());
+            let gemini_group = json!({
+                "displayName": "Gemini Models",
+                "description": "Models within this group: Gemini 2.5 Pro, Gemini 3 Flash, Gemini 3.5 Flash Lite",
+                "buckets": [
+                    {
+                        "bucketId": "gemini-weekly",
+                        "window": "weekly",
+                        "displayName": "Weekly Limit Remaining",
+                        "remainingFraction": 1.0,
+                        "resetTime": weekly_rt,
+                    },
+                    {
+                        "bucketId": "gemini-5h",
+                        "window": "5h",
+                        "displayName": "Five Hour Limit Remaining",
+                        "remainingFraction": frac,
+                        "resetTime": reset_time,
+                    }
+                ],
+            });
+            if let Some(obj) = quota_summary.as_object_mut() {
+                let groups_entry = obj.entry("groups").or_insert_with(|| json!([]));
+                if let Some(arr) = groups_entry.as_array_mut() {
+                    arr.push(gemini_group);
+                    modified = true;
+                }
+            }
+        }
+    } else if let Some(groups) = quota_summary
+        .get_mut("groups")
+        .and_then(Value::as_array_mut)
+    {
+        // If Gemini group already exists, make sure gemini-weekly is present
+        for g in groups.iter_mut() {
+            let name = g.get("displayName").and_then(Value::as_str).unwrap_or("");
+            let desc = g.get("description").and_then(Value::as_str).unwrap_or("");
+            let full = format!("{name} {desc}").to_ascii_lowercase();
+            if full.contains("gemini") && !full.contains("argon") {
+                if let Some(buckets) = g.get_mut("buckets").and_then(Value::as_array_mut) {
+                    let has_weekly = buckets.iter().any(|b| {
+                        let w = b.get("window").and_then(Value::as_str).unwrap_or("");
+                        let id = b.get("bucketId").and_then(Value::as_str).unwrap_or("");
+                        w == "weekly" || id.contains("weekly")
+                    });
+                    if !has_weekly {
+                        let rt = buckets
+                            .first()
+                            .and_then(|b| b.get("resetTime"))
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string)
+                            .or_else(|| weekly_reset_time.clone())
+                            .unwrap_or_default();
+                        buckets.insert(
+                            0,
+                            json!({
+                                "bucketId": "gemini-weekly",
+                                "window": "weekly",
+                                "displayName": "Weekly Limit Remaining",
+                                "remainingFraction": 1.0,
+                                "resetTime": rt,
+                            }),
+                        );
+                        modified = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Gemini 4 Argon synthesis (for Pro plans)
+    if !has_argon_group(quota_summary) {
+        if let Some((argon_frac, argon_rt)) = extract_argon_quota(models) {
+            let weekly_rt = if !argon_rt.is_empty() {
+                argon_rt
+            } else {
+                weekly_reset_time.unwrap_or_default()
+            };
+            let argon_group = json!({
+                "displayName": "Gemini 4 Argon",
+                "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra",
+                "buckets": [
+                    {
+                        "bucketId": "argon-weekly",
+                        "window": "weekly",
+                        "displayName": "Gemini 4 Argon Weekly Limit",
+                        "remainingFraction": argon_frac,
+                        "resetTime": weekly_rt,
+                    }
+                ],
+            });
+            if let Some(obj) = quota_summary.as_object_mut() {
+                let groups_entry = obj.entry("groups").or_insert_with(|| json!([]));
+                if let Some(arr) = groups_entry.as_array_mut() {
+                    arr.push(argon_group);
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    modified
+}
+
 impl Manager {
     pub(crate) fn load(app_dir: PathBuf, home: PathBuf) -> Self {
         let file = app_dir.join("webclx-agy-accounts.json");
@@ -409,6 +782,10 @@ impl Manager {
             .map_err(|e| e.to_string())?;
         fs::rename(t, &self.file).map_err(|e| e.to_string())
     }
+    pub(crate) fn manages_home(&self, home: &Path) -> bool {
+        self.home == home
+    }
+
     pub(crate) fn list(&self) -> Vec<Value> {
         let token_path = self
             .home
@@ -421,6 +798,14 @@ impl Manager {
             .unwrap()
             .iter()
             .map(|a| {
+                let mut quota_cache = a.quota_cache.clone();
+                if let Some(qc_obj) = quota_cache.as_object_mut() {
+                    let models = qc_obj.get("models").cloned().unwrap_or(Value::Null);
+                    let mut qs = qc_obj.get("quotaSummary").cloned().unwrap_or(Value::Null);
+                    if synthesize_gemini_quota_summary(&mut qs, &models) {
+                        qc_obj.insert("quotaSummary".to_string(), qs);
+                    }
+                }
                 json!({
                     "id": a.id,
                     "name": a.name,
@@ -428,7 +813,10 @@ impl Manager {
                     "current": a.current,
                     "valid": !a.token.is_null(),
                     "saved_at": a.saved_at,
-                    "quota_cache": a.quota_cache,
+                    "switch_count": a.switch_count,
+                    "last_switch_at": a.last_switch_at,
+                    "switch_history": auth_core::effective_switch_history(&a.switch_history, a.last_switch_at),
+                    "quota_cache": quota_cache,
                     "quota_cached_at": a.quota_cached_at,
                 })
             })
@@ -458,121 +846,49 @@ impl Manager {
             return json!({ "ok": true, "matched": false, "logged_in": false });
         };
 
-        let mut email = token_json
-            .get("email")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                token_json
-                    .get("token")
-                    .and_then(|t| t.get("email"))
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or("")
-            .trim()
-            .to_string();
-
-        if email.is_empty() {
-            if let Some(jwt) = token_json.get("id_token").and_then(Value::as_str) {
-                let parts: Vec<&str> = jwt.split('.').collect();
-                if parts.len() >= 2 {
-                    use base64::Engine;
-                    if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                        .decode(parts[1])
-                        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
-                    {
-                        if let Ok(payload) = serde_json::from_slice::<Value>(&bytes) {
-                            if let Some(em) = payload.get("email").and_then(Value::as_str) {
-                                email = em.trim().to_string();
-                            }
-                        }
-                    }
-                }
+        let Ok((idx, imported)) = upsert_token_into_accounts(&mut a, &token_json, None, true)
+        else {
+            for y in a.iter_mut() {
+                y.current = false;
             }
-        }
-
-        let refresh_token = token_json
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                token_json
-                    .get("token")
-                    .and_then(|t| t.get("refresh_token"))
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or("")
-            .trim();
-
-        let access_token = token_json
-            .get("access_token")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                token_json
-                    .get("token")
-                    .and_then(|t| t.get("access_token"))
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or("")
-            .trim();
-
-        let matched_idx = a.iter().position(|acc| {
-            if !email.is_empty() && acc.email.eq_ignore_ascii_case(&email) {
-                return true;
-            }
-            let acc_rt = acc
-                .token
-                .get("refresh_token")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    acc.token
-                        .get("token")
-                        .and_then(|t| t.get("refresh_token"))
-                        .and_then(Value::as_str)
-                })
-                .unwrap_or("")
-                .trim();
-            if !refresh_token.is_empty() && !acc_rt.is_empty() && acc_rt == refresh_token {
-                return true;
-            }
-            let acc_at = acc
-                .token
-                .get("access_token")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    acc.token
-                        .get("token")
-                        .and_then(|t| t.get("access_token"))
-                        .and_then(Value::as_str)
-                })
-                .unwrap_or("")
-                .trim();
-            if !access_token.is_empty() && !acc_at.is_empty() && acc_at == access_token {
-                return true;
-            }
-            false
-        });
-
-        for (idx, y) in a.iter_mut().enumerate() {
-            y.current = Some(idx) == matched_idx;
-        }
+            let _ = self.persist(&a);
+            return json!({ "ok": true, "matched": false, "logged_in": false });
+        };
         let _ = self.persist(&a);
 
-        if let Some(idx) = matched_idx {
-            let matched = &a[idx];
-            json!({
-                "ok": true,
-                "matched": true,
-                "id": matched.id,
-                "name": matched.name,
-                "email": matched.email,
-            })
-        } else {
-            json!({
-                "ok": true,
-                "matched": false,
-                "email": email,
-                "logged_in": true,
-            })
+        let matched = &a[idx];
+        json!({
+            "ok": true,
+            "matched": true,
+            "imported": imported,
+            "logged_in": true,
+            "id": matched.id,
+            "name": matched.name,
+            "email": matched.email,
+        })
+    }
+    pub(crate) fn import_current(&self) -> Result<Value, String> {
+        let res = self.detect_current();
+        if res.get("logged_in").and_then(Value::as_bool) != Some(true) {
+            return Err("未检测到本机 AGY 登录凭据，请先在原生客户端登录".into());
         }
+        Ok(res)
+    }
+    pub(crate) fn save_preset(&self, body: &Value) -> Result<Value, String> {
+        let custom_name = body.get("name").and_then(Value::as_str);
+        let token = body.get("token").unwrap_or(body);
+        let mut a = self.accounts.write().unwrap();
+        let (idx, imported) = upsert_token_into_accounts(&mut a, token, custom_name, false)?;
+        a[idx].saved_at = now();
+        self.persist(&a)?;
+        let saved = &a[idx];
+        Ok(json!({
+            "ok": true,
+            "imported": imported,
+            "id": saved.id,
+            "name": saved.name,
+            "email": saved.email,
+        }))
     }
     pub(crate) fn import_snapshots(&self) -> (usize, usize) {
         let root = self.home.join(".gemini/account_backups");
@@ -620,6 +936,8 @@ impl Manager {
                 continue;
             }
             a.push(Account {
+                switch_count: 0,
+                switch_history: Vec::new(),
                 id,
                 name: n,
                 email,
@@ -627,6 +945,7 @@ impl Manager {
                 settings: set,
                 current: false,
                 saved_at: now(),
+                last_switch_at: None,
                 quota_cache: Value::Null,
                 quota_cached_at: 0,
             });
@@ -718,8 +1037,15 @@ impl Manager {
         fs::write(d.join("antigravity-oauth-token"), serde_json::to_vec_pretty(&x.token).unwrap())
             .map_err(|e| e.to_string())?;
         // Settings (including trusted workspaces) belong to the user, not the account.
+        let switched_at = now_ms();
         for y in a.iter_mut() {
-            y.current = y.id == id
+            y.current = y.id == id;
+            if y.current {
+                y.switch_count = y.switch_count.saturating_add(1);
+                let previous = y.last_switch_at;
+                auth_core::push_switch_event(&mut y.switch_history, previous, switched_at);
+                y.last_switch_at = Some(switched_at);
+            }
         }
         self.persist(&a)
     }
@@ -750,11 +1076,23 @@ impl Manager {
             .iter()
             .find(|account| account.id == id)
             .map(|account| {
+                let models = account
+                    .quota_cache
+                    .get("models")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let mut quota_summary = account
+                    .quota_cache
+                    .get("quotaSummary")
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                synthesize_gemini_quota_summary(&mut quota_summary, &models);
                 json!({
                     "ok": true,
                     "cached": true,
                     "updatedAt": account.quota_cached_at,
-                    "quotaSummary": account.quota_cache.get("quotaSummary").cloned().unwrap_or(Value::Null),
+                    "models": models,
+                    "quotaSummary": quota_summary,
                 })
             })
             .unwrap_or(json!({"ok": false, "error": "找不到 AGY 账号"}))
@@ -777,18 +1115,20 @@ impl Manager {
                 errors.push(format!("{label}不是对象"));
                 continue;
             }
-            let email = match non_empty_str(item, &["email"])
-                .as_deref()
-                .map(normalize_email)
+            let email_candidate = non_empty_str(item, &["email", "id_token_email"])
+                .unwrap_or_else(|| extract_token_email(item));
+            let email =
+                match (!email_candidate.is_empty()).then(|| normalize_email(&email_candidate)) {
+                    Some(Ok(email)) => email,
+                    _ => {
+                        skipped += 1;
+                        errors.push(format!("{label}缺少有效 email"));
+                        continue;
+                    }
+                };
+            let refresh = match non_empty_str(item, &["refresh_token", "refreshToken"])
+                .or_else(|| oauth_material(item).1)
             {
-                Some(Ok(email)) => email,
-                _ => {
-                    skipped += 1;
-                    errors.push(format!("{label}缺少有效 email"));
-                    continue;
-                }
-            };
-            let refresh = match non_empty_str(item, &["refresh_token", "refreshToken"]) {
                 Some(token) if valid_refresh_token(&token) => token,
                 Some(_) => {
                     skipped += 1;
@@ -820,6 +1160,8 @@ impl Manager {
                 updated += 1;
             } else {
                 let mut account = Account {
+                    switch_count: 0,
+                    switch_history: Vec::new(),
                     id: fresh_account_id(&accounts, &email),
                     name: default_account_name(&email),
                     email: email.clone(),
@@ -827,6 +1169,7 @@ impl Manager {
                     settings: Value::Null,
                     current: false,
                     saved_at: now(),
+                    last_switch_at: None,
                     quota_cache: Value::Null,
                     quota_cached_at: 0,
                 };
@@ -1154,23 +1497,116 @@ impl Manager {
             Some(project) => json!({"project": project}),
             None => json!({}),
         };
-        let summary_response = c
-            .post("https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary")
-            .bearer_auth(&token)
-            .header("user-agent", "antigravity/1.20.5 linux/amd64")
-            .json(&payload)
-            .send()
-            .await;
-        let quota_summary = match summary_response {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json::<Value>().await.unwrap_or(Value::Null)
-            }
-            _ => Value::Null,
+        let is_current = {
+            let a = self.accounts.read().unwrap();
+            a.iter()
+                .find(|x| x.id == id)
+                .map(|x| x.current)
+                .unwrap_or(false)
         };
+        let mut quota_summary = if is_current {
+            let token_val = {
+                let a = self.accounts.read().unwrap();
+                a.iter().find(|x| x.id == id).map(|x| x.token.clone())
+            };
+            if let Some(tok) = token_val {
+                let token_file = self
+                    .home
+                    .join(".gemini/antigravity-cli/antigravity-oauth-token");
+                if let Ok(content) = serde_json::to_string(&tok) {
+                    let _ = fs::write(token_file, content);
+                }
+            }
+            fetch_cli_usage_quota().unwrap_or(Value::Null)
+        } else {
+            Value::Null
+        };
+        if quota_summary.is_null() {
+            let summary_response = c
+                .post(
+                    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+                )
+                .bearer_auth(&token)
+                .header("user-agent", "antigravity/1.20.5 linux/amd64")
+                .json(&payload)
+                .send()
+                .await;
+            quota_summary = match summary_response {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.json::<Value>().await.unwrap_or(Value::Null)
+                }
+                _ => Value::Null,
+            };
+        }
+        let models_val = body.get("models").cloned().unwrap_or(body);
+        synthesize_gemini_quota_summary(&mut quota_summary, &models_val);
+        if !has_argon_group(&quota_summary) {
+            let prev_argon = {
+                let a = self.accounts.read().unwrap();
+                a.iter()
+                    .find(|x| x.id == id)
+                    .and_then(|x| x.quota_cache.get("quotaSummary"))
+                    .and_then(|qs| qs.get("groups"))
+                    .and_then(Value::as_array)
+                    .and_then(|grps| {
+                        grps.iter()
+                            .find(|g| {
+                                let name = g
+                                    .get("displayName")
+                                    .or_else(|| g.get("name"))
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("");
+                                name.to_ascii_lowercase().contains("argon")
+                            })
+                            .cloned()
+                    })
+            };
+            if let Some(argon_grp) = prev_argon {
+                if let Some(groups) = quota_summary
+                    .get_mut("groups")
+                    .and_then(Value::as_array_mut)
+                {
+                    groups.push(argon_grp);
+                }
+            } else {
+                let is_paid_pro = load
+                    .get("paidTier")
+                    .and_then(|pt| pt.get("id"))
+                    .and_then(Value::as_str)
+                    .map(|tid| tid.contains("pro") || tid.contains("ultra") || tid.contains("paid"))
+                    .unwrap_or(false);
+                if is_paid_pro {
+                    let weekly_rt = find_weekly_reset_time(&quota_summary).unwrap_or_default();
+                    if let Some(groups) = quota_summary
+                        .get_mut("groups")
+                        .and_then(Value::as_array_mut)
+                    {
+                        groups.push(json!({
+                            "displayName": "Gemini 4 Argon",
+                            "name": "Gemini 4 Argon",
+                            "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra",
+                            "buckets": [
+                                {
+                                    "bucketId": "gemini-argon-wtu-weekly",
+                                    "id": "gemini-argon-wtu-weekly",
+                                    "displayName": "Gemini 4 Argon Weekly Limit",
+                                    "name": "Gemini 4 Argon Weekly Limit",
+                                    "window": "weekly",
+                                    "remainingFraction": 1.0,
+                                    "remaining_fraction": 1.0,
+                                    "resetTime": weekly_rt,
+                                    "reset_time": weekly_rt,
+                                }
+                            ]
+                        }));
+                    }
+                }
+            }
+        }
         let result = json!({
             "ok":true,
             "updatedAt":now(),
-            "models":body.get("models").cloned().unwrap_or(body),
+            "models":models_val,
             "quotaSummary":quota_summary,
             "plan":load.get("planInfo").cloned()
         });
@@ -1180,6 +1616,7 @@ impl Manager {
                 account.quota_cache = json!({
                     "ok": true,
                     "updatedAt": result.get("updatedAt").cloned().unwrap_or(Value::Null),
+                    "models": result.get("models").cloned().unwrap_or(Value::Null),
                     "quotaSummary": result.get("quotaSummary").cloned().unwrap_or(Value::Null),
                 });
                 account.quota_cached_at = result
@@ -1419,6 +1856,198 @@ fn export_id_filter(body: &Value) -> Option<HashSet<String>> {
     if set.is_empty() { None } else { Some(set) }
 }
 
+fn extract_token_email(token_json: &Value) -> String {
+    let nested = token_json.get("token").filter(|v| v.is_object());
+    if let Some(email) = non_empty_str(token_json, &["email", "id_token_email"])
+        .or_else(|| nested.and_then(|t| non_empty_str(t, &["email", "id_token_email"])))
+    {
+        return email;
+    }
+    let jwt_opt = non_empty_str(token_json, &["id_token"])
+        .or_else(|| nested.and_then(|t| non_empty_str(t, &["id_token"])));
+    if let Some(jwt) = jwt_opt {
+        let parts: Vec<&str> = jwt.split('.').collect();
+        if parts.len() >= 2 {
+            use base64::Engine;
+            if let Ok(bytes) = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(parts[1]))
+            {
+                if let Ok(payload) = serde_json::from_slice::<Value>(&bytes) {
+                    if let Some(em) = non_empty_str(&payload, &["email"]) {
+                        return em;
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+fn normalize_token_for_storage(existing: Option<&Value>, token_json: &Value, email: &str) -> Value {
+    let (access, refresh) = oauth_material(token_json);
+    let (old_access, old_refresh) = existing.map(oauth_material).unwrap_or((None, None));
+    let nested = token_json.get("token").filter(|v| v.is_object());
+    let primary = nested.unwrap_or(token_json);
+
+    let mut out = existing
+        .filter(|v| v.is_object())
+        .cloned()
+        .or_else(|| token_json.is_object().then(|| token_json.clone()))
+        .unwrap_or_else(|| json!({}));
+    if !out.is_object() {
+        out = json!({});
+    }
+    if out.get("auth_method").and_then(Value::as_str).is_none() {
+        let method =
+            non_empty_str(token_json, &["auth_method"]).unwrap_or_else(|| "consumer".into());
+        out["auth_method"] = Value::String(method);
+    }
+    if !out.get("token").map(Value::is_object).unwrap_or(false) {
+        out["token"] = json!({});
+    }
+    if let Some(at) = access.or(old_access) {
+        out["token"]["access_token"] = Value::String(at);
+    }
+    if let Some(rt) = refresh.or(old_refresh) {
+        out["token"]["refresh_token"] = Value::String(rt);
+    }
+    if let Some(token_type) = non_empty_str(primary, &["token_type"])
+        .or_else(|| non_empty_str(token_json, &["token_type"]))
+    {
+        out["token"]["token_type"] = Value::String(token_type);
+    } else if out["token"]
+        .get("token_type")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        out["token"]["token_type"] = json!("Bearer");
+    }
+    if let Some(expiry) =
+        non_empty_str(primary, &["expiry"]).or_else(|| non_empty_str(token_json, &["expiry"]))
+    {
+        out["token"]["expiry"] = Value::String(expiry);
+    }
+    if let Some(expires_in) = primary
+        .get("expires_in")
+        .or_else(|| token_json.get("expires_in"))
+    {
+        out["token"]["expires_in"] = expires_in.clone();
+    }
+    if let Some(id_token) = non_empty_str(token_json, &["id_token"])
+        .or_else(|| nested.and_then(|t| non_empty_str(t, &["id_token"])))
+    {
+        out["id_token"] = Value::String(id_token);
+    }
+    if !email.is_empty() {
+        out["id_token_email"] = Value::String(email.to_string());
+    }
+    out
+}
+
+fn upsert_token_into_accounts(
+    accounts: &mut Vec<Account>,
+    token_json: &Value,
+    custom_name: Option<&str>,
+    mark_current: bool,
+) -> Result<(usize, bool), String> {
+    let (access, refresh) = oauth_material(token_json);
+    if access.is_none() && refresh.is_none() {
+        return Err("缺少有效的 OAuth access_token 或 refresh_token".into());
+    }
+    let email = extract_token_email(token_json);
+    let matched_idx = accounts.iter().position(|acc| {
+        if !email.is_empty() && acc.email.eq_ignore_ascii_case(&email) {
+            return true;
+        }
+        let (acc_at, acc_rt) = oauth_material(&acc.token);
+        if let (Some(rt), Some(acc_rt)) = (refresh.as_deref(), acc_rt.as_deref()) {
+            if !rt.is_empty() && rt == acc_rt {
+                return true;
+            }
+        }
+        if let (Some(at), Some(acc_at)) = (access.as_deref(), acc_at.as_deref()) {
+            if !at.is_empty() && at == acc_at {
+                return true;
+            }
+        }
+        false
+    });
+
+    if let Some(idx) = matched_idx {
+        let (old_access, old_refresh) = oauth_material(&accounts[idx].token);
+        let effective_email = if !email.is_empty() {
+            email.clone()
+        } else {
+            accounts[idx].email.clone()
+        };
+        let changed = (refresh.is_some() && refresh != old_refresh)
+            || (access.is_some() && access != old_access)
+            || (!email.is_empty() && !accounts[idx].email.eq_ignore_ascii_case(&email));
+        accounts[idx].token =
+            normalize_token_for_storage(Some(&accounts[idx].token), token_json, &effective_email);
+        if !email.is_empty()
+            && (accounts[idx].email.trim().is_empty()
+                || !accounts[idx].email.eq_ignore_ascii_case(&email))
+        {
+            accounts[idx].email = email;
+        }
+        if let Some(name) = custom_name.map(str::trim).filter(|s| !s.is_empty()) {
+            accounts[idx].name = name.to_string();
+        } else if accounts[idx].name.trim().is_empty() && !accounts[idx].email.is_empty() {
+            accounts[idx].name = default_account_name(&accounts[idx].email);
+        }
+        if changed {
+            accounts[idx].saved_at = now();
+        }
+        if mark_current {
+            for (i, y) in accounts.iter_mut().enumerate() {
+                y.current = i == idx;
+            }
+        }
+        return Ok((idx, false));
+    }
+
+    let name = custom_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if email.is_empty() {
+                "AGY 本机账号".to_string()
+            } else {
+                default_account_name(&email)
+            }
+        });
+    let id_seed = if !email.is_empty() {
+        email.as_str()
+    } else {
+        refresh.as_deref().or(access.as_deref()).unwrap_or("local")
+    };
+    let id = fresh_account_id(accounts, id_seed);
+    let token = normalize_token_for_storage(None, token_json, &email);
+    if mark_current {
+        for y in accounts.iter_mut() {
+            y.current = false;
+        }
+    }
+    accounts.push(Account {
+        switch_count: 0,
+        switch_history: Vec::new(),
+        id,
+        name,
+        email,
+        token,
+        settings: Value::Null,
+        current: mark_current,
+        saved_at: now(),
+        last_switch_at: None,
+        quota_cache: Value::Null,
+        quota_cached_at: 0,
+    });
+    Ok((accounts.len() - 1, true))
+}
+
 fn collect_import_items(body: &Value) -> Result<Vec<Value>, String> {
     if let Some(text) = body.as_str() {
         let parsed: Value = serde_json::from_str(text.trim().trim_start_matches('\u{feff}'))
@@ -1426,11 +2055,36 @@ fn collect_import_items(body: &Value) -> Result<Vec<Value>, String> {
         return collect_import_items(&parsed);
     }
     if let Some(items) = body.as_array() {
-        return Ok(items.clone());
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            if item.get("format").and_then(Value::as_str) == Some("webclx-native-login") {
+                out.extend(collect_import_items(item)?);
+            } else {
+                out.push(item.clone());
+            }
+        }
+        return Ok(out);
+    }
+    if body.get("format").and_then(Value::as_str) == Some("webclx-native-login") {
+        if let Some(encoded) = body
+            .get("files")
+            .and_then(|files| files.get(".gemini/antigravity-cli/antigravity-oauth-token"))
+            .and_then(Value::as_str)
+        {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded.trim())
+                .map_err(|_| "登录备份文件 Base64 解码失败".to_string())?;
+            let token_val: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "登录备份中的 antigravity-oauth-token JSON 格式无效".to_string())?;
+            return Ok(vec![token_val]);
+        }
     }
     if body.get("email").is_some()
+        || body.get("id_token_email").is_some()
         || body.get("refresh_token").is_some()
         || body.get("refreshToken").is_some()
+        || body.get("token").map(Value::is_object).unwrap_or(false)
     {
         return Ok(vec![body.clone()]);
     }
@@ -1448,6 +2102,13 @@ fn now() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 pub(crate) fn routes() -> axum::Router<crate::AppState> {
     use axum::{
         Json,
@@ -1457,7 +2118,28 @@ pub(crate) fn routes() -> axum::Router<crate::AppState> {
     axum::Router::new()
         .route(
             "/api/agy/presets",
-            get(|State(s): State<crate::AppState>| async move { Json(s.agy_manager.list()) }),
+            get(|State(s): State<crate::AppState>| async move { Json(s.agy_manager.list()) })
+                .post(|State(s): State<crate::AppState>, Json(body): Json<Value>| async move {
+                    match s.agy_manager.save_preset(&body) {
+                        Ok(value) => (axum::http::StatusCode::OK, Json(value)),
+                        Err(error) => (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            Json(json!({"ok": false, "error": error})),
+                        ),
+                    }
+                }),
+        )
+        .route(
+            "/api/agy/current/import",
+            post(|State(s): State<crate::AppState>| async move {
+                match s.agy_manager.import_current() {
+                    Ok(value) => (axum::http::StatusCode::OK, Json(value)),
+                    Err(error) => (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(json!({"ok": false, "error": error})),
+                    ),
+                }
+            }),
         )
         .route(
             "/api/agy/presets/detect-current",
@@ -1800,6 +2482,8 @@ mod tests {
     #[test]
     fn oauth_login_creates_updates_and_relogs_accounts() {
         let mut accounts: Vec<Account> = vec![Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-existing".to_string(),
             name: "已有".to_string(),
             email: "kept@example.com".to_string(),
@@ -1810,6 +2494,7 @@ mod tests {
             settings: json!({"model": "gemini"}),
             current: true,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: json!({"ok": true}),
             quota_cached_at: 9,
         }];
@@ -1956,6 +2641,8 @@ mod tests {
     fn quota_cache_survives_reload_and_old_accounts_remain_compatible() {
         let app_dir = temp_app_dir("reload");
         let account = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-test".to_string(),
             name: "Test".to_string(),
             email: "test@example.com".to_string(),
@@ -1963,6 +2650,7 @@ mod tests {
             settings: Value::Null,
             current: false,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: json!({
                 "ok": true,
                 "quotaSummary": {"groups": [{"displayName": "Gemini Models"}]}
@@ -1984,9 +2672,144 @@ mod tests {
     }
 
     #[test]
+    fn quota_cache_synthesizes_gemini_models_when_summary_groups_missing() {
+        let app_dir = temp_app_dir("gemini-synth");
+        let account = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
+            id: "agy-synth-test".to_string(),
+            name: "SynthTest".to_string(),
+            email: "synth@example.com".to_string(),
+            token: json!({"access_token": "valid"}),
+            settings: Value::Null,
+            current: false,
+            saved_at: 1,
+            last_switch_at: None,
+            quota_cache: json!({
+                "ok": true,
+                "models": {
+                    "gemini-2.5-pro": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.85,
+                            "resetTime": "2026-11-12T18:00:00Z"
+                        }
+                    },
+                    "claude-opus-4-6-thinking": {
+                        "quotaInfo": {
+                            "resetTime": "2026-11-18T23:42:21Z"
+                        }
+                    }
+                },
+                "quotaSummary": {
+                    "groups": [
+                        {
+                            "displayName": "Claude and GPT models",
+                            "buckets": [
+                                {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.5},
+                                {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.5}
+                            ]
+                        }
+                    ]
+                }
+            }),
+            quota_cached_at: 200,
+        };
+        fs::write(
+            app_dir.join("webclx-agy-accounts.json"),
+            serde_json::to_vec(&vec![account]).unwrap(),
+        )
+        .unwrap();
+
+        let manager = Manager::load(app_dir.clone(), std::env::temp_dir());
+        let listed = manager.list();
+        let listed_groups = listed[0]["quota_cache"]["quotaSummary"]["groups"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listed_groups.len(), 2);
+        assert_eq!(listed_groups[1]["displayName"], "Gemini Models");
+        assert_eq!(listed_groups[1]["buckets"][0]["bucketId"], "gemini-weekly");
+        assert_eq!(listed_groups[1]["buckets"][0]["remainingFraction"], 1.0);
+        assert_eq!(listed_groups[1]["buckets"][1]["bucketId"], "gemini-5h");
+        assert_eq!(listed_groups[1]["buckets"][1]["remainingFraction"], 0.85);
+        assert_eq!(listed_groups[1]["buckets"][1]["resetTime"], "2026-11-12T18:00:00Z");
+
+        let cached = manager.cached_quota("agy-synth-test");
+        let cached_groups = cached["quotaSummary"]["groups"].as_array().unwrap();
+        assert_eq!(cached_groups.len(), 2);
+        assert_eq!(cached_groups[1]["displayName"], "Gemini Models");
+        assert_eq!(cached_groups[1]["buckets"][0]["bucketId"], "gemini-weekly");
+        assert_eq!(cached_groups[1]["buckets"][1]["bucketId"], "gemini-5h");
+    }
+
+    #[test]
+    fn quota_cache_synthesizes_argon_when_argon_model_present() {
+        let app_dir = temp_app_dir("argon-synth");
+        let account = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
+            id: "agy-argon-test".to_string(),
+            name: "ArgonTest".to_string(),
+            email: "argon@example.com".to_string(),
+            token: json!({"access_token": "valid"}),
+            settings: Value::Null,
+            current: false,
+            saved_at: 1,
+            last_switch_at: None,
+            quota_cache: json!({
+                "ok": true,
+                "models": {
+                    "gemini-2.5-pro": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.85,
+                            "resetTime": "2026-11-12T18:00:00Z"
+                        }
+                    },
+                    "gemini-4-argon": {
+                        "quotaInfo": {
+                            "remainingFraction": 0.4054,
+                            "resetTime": "2026-11-19T07:24:00Z"
+                        }
+                    }
+                },
+                "quotaSummary": {
+                    "groups": [
+                        {
+                            "displayName": "Claude and GPT models",
+                            "buckets": [
+                                {"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.99, "resetTime": "2026-11-19T07:35:00Z"},
+                                {"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.98}
+                            ]
+                        }
+                    ]
+                }
+            }),
+            quota_cached_at: 200,
+        };
+        fs::write(
+            app_dir.join("webclx-agy-accounts.json"),
+            serde_json::to_vec(&vec![account]).unwrap(),
+        )
+        .unwrap();
+
+        let manager = Manager::load(app_dir.clone(), std::env::temp_dir());
+        let listed = manager.list();
+        let listed_groups = listed[0]["quota_cache"]["quotaSummary"]["groups"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listed_groups.len(), 3);
+        assert_eq!(listed_groups[1]["displayName"], "Gemini Models");
+        assert_eq!(listed_groups[2]["displayName"], "Gemini 4 Argon");
+        assert_eq!(listed_groups[2]["buckets"][0]["bucketId"], "argon-weekly");
+        assert_eq!(listed_groups[2]["buckets"][0]["remainingFraction"], 0.4054);
+        assert_eq!(listed_groups[2]["buckets"][0]["resetTime"], "2026-11-19T07:24:00Z");
+    }
+
+    #[test]
     fn import_refresh_accounts_creates_updates_and_skips_invalid_rows() {
         let app_dir = temp_app_dir("import");
         let existing = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-existing".to_string(),
             name: "已有账号".to_string(),
             email: "kept@example.com".to_string(),
@@ -2001,6 +2824,7 @@ mod tests {
             settings: json!({"model": "gemini"}),
             current: true,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: json!({"ok": true}),
             quota_cached_at: 9,
         };
@@ -2052,6 +2876,8 @@ mod tests {
     fn export_refresh_accounts_matches_antigravity_file_and_roundtrips() {
         let app_dir = temp_app_dir("export");
         let ready = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-ready".to_string(),
             name: "Ready".to_string(),
             email: "ready.user@gmail.com".to_string(),
@@ -2066,10 +2892,13 @@ mod tests {
             settings: Value::Null,
             current: true,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: Value::Null,
             quota_cached_at: 0,
         };
         let no_refresh = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-access-only".to_string(),
             name: "Access".to_string(),
             email: "access.only@gmail.com".to_string(),
@@ -2077,6 +2906,7 @@ mod tests {
             settings: Value::Null,
             current: false,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: Value::Null,
             quota_cached_at: 0,
         };
@@ -2134,7 +2964,7 @@ mod tests {
             "refresh_token": "1//06flat-refresh-token",
             "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
             "token_uri": "https://oauth2.googleapis.com/token",
-            "project_id": "test-project",
+            "project_id": "aicode-consumers",
             "expiry": "2026-09-21T14:13:56.509535+00:00"
         }));
         assert_eq!(access.as_deref(), Some("ya29.flat-access-token"));
@@ -2225,6 +3055,8 @@ mod tests {
         let app_dir = temp_app_dir("persist-concurrent");
         let manager = Manager::load(app_dir.clone(), std::env::temp_dir());
         let account = Account {
+            switch_count: 0,
+            switch_history: Vec::new(),
             id: "agy-concurrent".to_string(),
             name: "Concurrent".to_string(),
             email: "concurrent@example.com".to_string(),
@@ -2232,6 +3064,7 @@ mod tests {
             settings: Value::Null,
             current: false,
             saved_at: 1,
+            last_switch_at: None,
             quota_cache: Value::Null,
             quota_cached_at: 0,
         };
@@ -2297,5 +3130,70 @@ mod tests {
                 "expiry": future
             }
         })));
+    }
+
+    #[test]
+    fn detect_and_import_current_backs_up_native_id_token_email_login() {
+        let app_dir = temp_app_dir("detect-import-native-app");
+        let home_dir = temp_app_dir("detect-import-native-home");
+        let token_dir = home_dir.join(".gemini/antigravity-cli");
+        fs::create_dir_all(&token_dir).unwrap();
+
+        let manager = Manager::load(app_dir.clone(), home_dir.clone());
+        assert!(manager.import_current().is_err());
+
+        fs::write(
+            token_dir.join("antigravity-oauth-token"),
+            serde_json::to_vec(&json!({
+                "auth_method": "consumer",
+                "id_token_email": "native.user@gmail.com",
+                "token": {
+                    "access_token": "ya29.native-access-token",
+                    "refresh_token": "1//native-refresh-token-value",
+                    "token_type": "Bearer",
+                    "expires_in": 3599,
+                    "expiry": "2026-11-12T08:22:08Z"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let detected = manager.detect_current();
+        assert_eq!(detected["ok"], true);
+        assert_eq!(detected["matched"], true);
+        assert_eq!(detected["imported"], true);
+        assert_eq!(detected["logged_in"], true);
+        assert_eq!(detected["email"], "native.user@gmail.com");
+        assert_eq!(detected["name"], "native.user");
+
+        let list = manager.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["email"], "native.user@gmail.com");
+        assert_eq!(list[0]["current"], true);
+
+        let exported = manager.export_refresh_accounts(&json!({})).unwrap();
+        assert_eq!(exported["accounts"][0]["email"], "native.user@gmail.com");
+        assert_eq!(exported["accounts"][0]["refresh_token"], "1//native-refresh-token-value");
+
+        let saved = manager
+            .save_preset(&json!({
+                "name": "自定义名称",
+                "token": {
+                    "auth_method": "consumer",
+                    "id_token_email": "preset.user@gmail.com",
+                    "token": {
+                        "access_token": "ya29.preset-access",
+                        "refresh_token": "1//preset-refresh-token-val"
+                    }
+                }
+            }))
+            .unwrap();
+        assert_eq!(saved["imported"], true);
+        assert_eq!(saved["name"], "自定义名称");
+        assert_eq!(saved["email"], "preset.user@gmail.com");
+
+        let _ = fs::remove_dir_all(app_dir);
+        let _ = fs::remove_dir_all(home_dir);
     }
 }

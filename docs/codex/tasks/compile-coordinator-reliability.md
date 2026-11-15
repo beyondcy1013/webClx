@@ -196,8 +196,9 @@ node tests/compile-deploy-target-path.test.mjs
 - 动作分类：`/api/build/compile` 恢复为真正的纯编译入口，清除遗留安装字段，只推断
   Cargo、npm 或 make 构建命令，绝不推断 `rebuild-and-deploy.sh`。纯编译 wrapper 和
   两阶段 wrapper 的第一阶段均使用该入口，不再以 deploy + noop 模拟编译。
-- 入队校验：deploy 入口使用 shell argv 解析部署脚本路径，并在项目目录中验证相对路径
-  或验证绝对路径；脚本不存在时立即返回 4xx，不再生成一个必然以 127 失败的队列任务。
+- 入队校验：deploy 入口使用 argv 解析部署脚本路径，识别项目内显式提交的
+  `.sh` / `.bash` / `.py` 文件及 `scripts/` 下脚本，并在项目目录中验证相对路径或验证
+  绝对路径；脚本不存在时立即返回 4xx，不再生成一个必然以 127 失败的队列任务。
 - 诊断语义：三个 wrapper 在解析来源终端前先检查 webClx API；连接失败明确报告 API
   unavailable，只有 API 可用但身份确实无法定位时才报告来源终端名错误。
 - shell argv 防错：stockOne 请求 `111849-18c41d6fffa0fea1` 把命令提交为

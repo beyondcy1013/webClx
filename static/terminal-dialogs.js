@@ -198,7 +198,8 @@ function closeTerminalPasteDialog() {
 function setTerminalPasteBusy(disabled) {
   terminalPasteBusy = Boolean(disabled);
   setClipboardPasteBusy(disabled);
-  [terminalPasteTextEl, terminalPasteSubmitButton, terminalPasteSubmitEnterButton].forEach((element) => {
+  const uploadButton = typeof terminalPasteUploadImageButtonEl !== "undefined" ? terminalPasteUploadImageButtonEl : null;
+  [terminalPasteTextEl, terminalPasteSubmitButton, terminalPasteSubmitEnterButton, uploadButton].forEach((element) => {
     if (element) {
       element.disabled = disabled;
     }
@@ -224,6 +225,10 @@ function formatTerminalInputHistoryTime(value) {
   }
 }
 
+function filterTerminalInputHistoryDisplay() {
+  renderTerminalInputHistory(terminalInputHistoryEntries);
+}
+
 function renderTerminalInputHistory(entries = terminalInputHistoryEntries) {
   terminalInputHistoryEntries = Array.isArray(entries) ? entries : [];
   if (!terminalInputHistoryListEl) {
@@ -247,7 +252,28 @@ function renderTerminalInputHistory(entries = terminalInputHistoryEntries) {
     return;
   }
 
-  terminalInputHistoryEntries.forEach((entry, index) => {
+  const hideMessages = Boolean(document.getElementById("terminal-input-history-hide-messages")?.checked);
+  const hideCompile = Boolean(document.getElementById("terminal-input-history-hide-compile")?.checked);
+
+  const displayedEntries = terminalInputHistoryEntries.filter((entry) => {
+    if (hideMessages && isTerminalInterAgentMessage(entry?.text)) {
+      return false;
+    }
+    if (hideCompile && isCompileNotification(entry?.text)) {
+      return false;
+    }
+    return true;
+  });
+
+  if (displayedEntries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "terminal-input-history-empty";
+    empty.textContent = "已按筛选条件隐藏全部对话项";
+    terminalInputHistoryListEl.appendChild(empty);
+    return;
+  }
+
+  displayedEntries.forEach((entry, index) => {
     const item = document.createElement("article");
     item.className = "terminal-input-history-item";
 
@@ -258,6 +284,17 @@ function renderTerminalInputHistory(entries = terminalInputHistoryEntries) {
     const order = document.createElement("span");
     order.textContent = String(index + 1).padStart(3, "0");
     metaInfo.appendChild(order);
+    if (isCompileNotification(entry?.text)) {
+      const badge = document.createElement("span");
+      badge.className = "terminal-input-history-badge compile-badge";
+      badge.textContent = "编译通知";
+      metaInfo.appendChild(badge);
+    } else if (isTerminalInterAgentMessage(entry?.text)) {
+      const badge = document.createElement("span");
+      badge.className = "terminal-input-history-badge inter-agent-badge";
+      badge.textContent = "终端消息";
+      metaInfo.appendChild(badge);
+    }
     const timeText = formatTerminalInputHistoryTime(entry?.created_at ?? entry?.createdAt);
     if (timeText) {
       const time = document.createElement("time");
@@ -844,6 +881,15 @@ async function showTerminalInputHistory() {
     return;
   }
 
+  const hideMessagesCheckbox = document.getElementById("terminal-input-history-hide-messages");
+  if (hideMessagesCheckbox) {
+    hideMessagesCheckbox.checked = false;
+  }
+  const hideCompileCheckbox = document.getElementById("terminal-input-history-hide-compile");
+  if (hideCompileCheckbox) {
+    hideCompileCheckbox.checked = false;
+  }
+
   updateTerminalInputHistoryStatus("", "info");
   terminalInputHistoryLoading = true;
   renderTerminalInputHistory([]);
@@ -863,7 +909,20 @@ async function showTerminalInputHistory() {
 }
 
 async function copyTerminalInputHistory() {
-  const text = terminalInputHistoryEntries
+  const hideMessages = Boolean(document.getElementById("terminal-input-history-hide-messages")?.checked);
+  const hideCompile = Boolean(document.getElementById("terminal-input-history-hide-compile")?.checked);
+
+  const sourceEntries = terminalInputHistoryEntries.filter((entry) => {
+    if (hideMessages && isTerminalInterAgentMessage(entry?.text)) {
+      return false;
+    }
+    if (hideCompile && isCompileNotification(entry?.text)) {
+      return false;
+    }
+    return true;
+  });
+
+  const text = sourceEntries
     .map((entry) => String(entry?.text || "").trim())
     .filter(Boolean)
     .join("\n");
@@ -879,12 +938,208 @@ async function copyTerminalInputHistory() {
   );
 }
 
+async function clearTerminalInputHistory() {
+  if (!state.activeSessionId) {
+    updateTerminalInputHistoryStatus("请先选择一个终端会话。", "warn");
+    return;
+  }
+  if (!terminalInputHistoryEntries || terminalInputHistoryEntries.length === 0) {
+    updateTerminalInputHistoryStatus("暂无可清除的对话历史。", "warn");
+    return;
+  }
+  if (!window.confirm("确定要清除本终端的所有对话史吗？清除后不可恢复。")) {
+    return;
+  }
+
+  updateTerminalInputHistoryStatus("正在清除对话历史…", "info");
+  try {
+    await requestJson(
+      `/api/terminal/sessions/${encodeURIComponent(state.activeSessionId)}/input-history`,
+      { method: "DELETE" },
+    );
+    terminalInputHistoryEntries = [];
+    renderTerminalInputHistory([]);
+    updateTerminalInputHistoryStatus("已清除所有对话史。", "ok");
+    if (typeof loadSessionRenameFirstConversation === "function" && state.renamingSessionId === state.activeSessionId) {
+      loadSessionRenameFirstConversation();
+    }
+  } catch (error) {
+    updateTerminalInputHistoryStatus(error?.message || "清除对话历史失败。", "warn");
+  }
+}
+
+function isCompileNotification(text) {
+  const s = String(text || "").trim();
+  return s.includes("[from webClx-compile-api]") || s.includes("[webclx-callback:");
+}
+
+function isTerminalInterAgentMessage(text) {
+  if (isCompileNotification(text)) {
+    return false;
+  }
+  let s = String(text || "").trim();
+  while (s.startsWith("[")) {
+    if (s.startsWith("[from ")) {
+      return true;
+    }
+    const end = s.indexOf("]");
+    if (end > 0) {
+      const tag = s.slice(1, end);
+      if (
+        tag.startsWith("scheduled:") ||
+        tag.startsWith("delivery:") ||
+        tag.startsWith("kind=") ||
+        tag.startsWith("from ")
+      ) {
+        s = s.slice(end + 1).trim();
+        continue;
+      }
+    }
+    break;
+  }
+  return s.startsWith("[from ");
+}
+
+async function clearTerminalInterAgentMessages() {
+  if (!state.activeSessionId) {
+    updateTerminalInputHistoryStatus("请先选择一个终端会话。", "warn");
+    return;
+  }
+  const hasMessages = (terminalInputHistoryEntries || []).some((entry) =>
+    isTerminalInterAgentMessage(entry?.text),
+  );
+  if (!hasMessages) {
+    updateTerminalInputHistoryStatus("对话史中暂无终端消息。", "warn");
+    return;
+  }
+  if (!window.confirm("确定要删除本终端对话史中的全部终端消息吗？（保留普通用户对话）")) {
+    return;
+  }
+
+  updateTerminalInputHistoryStatus("正在删除终端消息…", "info");
+  try {
+    const payload = await requestJson(
+      `/api/terminal/sessions/${encodeURIComponent(state.activeSessionId)}/input-history?type=terminal_messages`,
+      { method: "DELETE" },
+    );
+    terminalInputHistoryEntries = terminalInputHistoryEntries.filter(
+      (entry) => !isTerminalInterAgentMessage(entry?.text),
+    );
+    renderTerminalInputHistory(terminalInputHistoryEntries);
+    updateTerminalInputHistoryStatus(payload?.message || "已删除全部终端消息。", "ok");
+    if (typeof loadSessionRenameFirstConversation === "function" && state.renamingSessionId === state.activeSessionId) {
+      loadSessionRenameFirstConversation();
+    }
+  } catch (error) {
+    updateTerminalInputHistoryStatus(error?.message || "删除终端消息失败。", "warn");
+  }
+}
+
+async function clearTerminalCompileNotifications() {
+  if (!state.activeSessionId) {
+    updateTerminalInputHistoryStatus("请先选择一个终端会话。", "warn");
+    return;
+  }
+  const hasNotifications = (terminalInputHistoryEntries || []).some((entry) =>
+    isCompileNotification(entry?.text),
+  );
+  if (!hasNotifications) {
+    updateTerminalInputHistoryStatus("对话史中暂无编译通知。", "warn");
+    return;
+  }
+  if (!window.confirm("确定要删除本终端对话史中的全部编译通知吗？（保留普通用户对话与终端消息）")) {
+    return;
+  }
+
+  updateTerminalInputHistoryStatus("正在删除编译通知…", "info");
+  try {
+    const payload = await requestJson(
+      `/api/terminal/sessions/${encodeURIComponent(state.activeSessionId)}/input-history?type=compile_notifications`,
+      { method: "DELETE" },
+    );
+    terminalInputHistoryEntries = terminalInputHistoryEntries.filter(
+      (entry) => !isCompileNotification(entry?.text),
+    );
+    renderTerminalInputHistory(terminalInputHistoryEntries);
+    updateTerminalInputHistoryStatus(payload?.message || "已删除全部编译通知。", "ok");
+    if (typeof loadSessionRenameFirstConversation === "function" && state.renamingSessionId === state.activeSessionId) {
+      loadSessionRenameFirstConversation();
+    }
+  } catch (error) {
+    updateTerminalInputHistoryStatus(error?.message || "删除编译通知失败。", "warn");
+  }
+}
+
 function revokeTerminalPasteAssetPreviews() {
   terminalPasteAssetEntries.forEach((entry) => {
     if (entry.previewUrl) {
       URL.revokeObjectURL(entry.previewUrl);
     }
   });
+}
+
+function revokeTerminalImagePasteAssetPreviews() {
+  if (typeof terminalImagePasteAssetEntries === "undefined" || !Array.isArray(terminalImagePasteAssetEntries)) {
+    return;
+  }
+  terminalImagePasteAssetEntries.forEach((entry) => {
+    if (entry.previewUrl) {
+      URL.revokeObjectURL(entry.previewUrl);
+    }
+  });
+}
+
+function renderTerminalImagePasteAssets() {
+  const container = typeof terminalImagePasteAssetsEl !== "undefined" ? terminalImagePasteAssetsEl : null;
+  if (!container) {
+    return;
+  }
+  const entries = typeof terminalImagePasteAssetEntries !== "undefined" && Array.isArray(terminalImagePasteAssetEntries)
+    ? terminalImagePasteAssetEntries
+    : [];
+  container.textContent = "";
+  container.hidden = entries.length === 0;
+  entries.forEach((entry, index) => {
+    const item = document.createElement("div");
+    item.className = "terminal-paste-asset";
+
+    if (entry.previewUrl) {
+      const image = document.createElement("img");
+      image.src = entry.previewUrl;
+      image.alt = entry.name || `image ${index + 1}`;
+      item.appendChild(image);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "terminal-paste-asset-meta";
+    const title = document.createElement("strong");
+    title.textContent = entry.asset?.relative_path || entry.name || `图片 ${index + 1}`;
+    const detail = document.createElement("span");
+    detail.textContent = `${entry.type || entry.asset?.mime || "image"} · ${formatBytes(entry.size || entry.asset?.size || 0)}`;
+    meta.append(title, detail);
+    item.appendChild(meta);
+
+    container.appendChild(item);
+  });
+}
+
+function closeTerminalImagePasteDialog() {
+  const dialog = typeof terminalImagePasteDialogEl !== "undefined" ? terminalImagePasteDialogEl : null;
+  if (!dialog) {
+    return;
+  }
+  revokeTerminalImagePasteAssetPreviews();
+  if (typeof terminalImagePasteAssetEntries !== "undefined" && Array.isArray(terminalImagePasteAssetEntries)) {
+    terminalImagePasteAssetEntries = [];
+  }
+  renderTerminalImagePasteAssets();
+  if (typeof dialog.close === "function") {
+    if (dialog.open) {
+      dialog.close();
+    }
+  } else {
+    dialog.removeAttribute("open");
+  }
 }
 
 function renderTerminalPasteAssets() {
@@ -972,7 +1227,8 @@ function terminalMessageGroups(sessions) {
 
 function terminalMessageGroupRoleKey(role) {
   const normalized = String(role || "").trim().toLowerCase();
-  if (["manager", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
+  if (["super_admin", "超级管理员"].includes(normalized)) return "super_admin";
+  if (["manager", "普通管理员", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
   if (["executor", "执行者", "执行", "worker"].includes(normalized)) return "executor";
   if (["reviewer", "复核者", "复核"].includes(normalized)) return "reviewer";
   return "";
@@ -980,12 +1236,13 @@ function terminalMessageGroupRoleKey(role) {
 
 function terminalMessageGroupRoles(group) {
   const members = Array.isArray(group?.members) ? group.members : [];
-  // 优先使用用户在分组对话框里指定的角色；没有人被指定为管理者时，
-  // 才按成员顺序把第一个成员当作管理者。
+  // 保留显式角色，负责人优先超级管理员，其次普通管理员；
+  // 两者均未指定时才按成员顺序兜底。
   const designated = members.find(
     (member) => terminalMessageGroupRoleKey(member.group_role) === "manager",
   );
-  const manager = designated || members[0] || null;
+  const highest = members.find((member) => terminalMessageGroupRoleKey(member.group_role) === "super_admin");
+  const manager = highest || designated || members[0] || null;
   return new Map(members.map((member) => [
     terminalMessageSessionId(member),
     terminalMessageGroupRoleKey(member.group_role)
@@ -1087,6 +1344,26 @@ function terminalMessageBatchId() {
   return `message-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function deduplicateConsecutiveSenderTags(text) {
+  const str = String(text || "");
+  return str.replace(/(\[from\s+[^\]]+\])(?:\s+\1)+/gi, "$1");
+}
+
+function formatTerminalMessageWithSender(senderName, message, identify = true) {
+  const text = deduplicateConsecutiveSenderTags(String(message || "").trim());
+  if (!identify) return text;
+  const name = String(senderName || "").trim();
+  if (!name) return text;
+  const tag = `[from ${name}]`;
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^(?:\\[from\\s+${escaped}\\]\\s*)+`, "i");
+  if (pattern.test(text)) {
+    const rest = text.replace(pattern, "").trim();
+    return rest ? `${tag} ${rest}` : tag;
+  }
+  return text ? `${tag} ${text}` : tag;
+}
+
 function terminalMessageSenderTag(senderName) {
   const name = String(senderName || "").trim();
   return name ? `[from ${name}] ` : "";
@@ -1131,18 +1408,25 @@ function terminalCollaborationBrief({
 } = {}) {
   const managerName = String(manager?.name || manager || "").trim();
   const normalizedExecutors = (Array.isArray(executors) ? executors : [])
-    .map((executor) => String(executor?.name || executor || "").trim())
-    .filter(Boolean);
+    .map((executor) => ({
+      name: String(executor?.name || executor || "").trim(),
+      role: terminalGroupRoleLabel(executor?.role) || "执行者",
+    }))
+    .filter((member) => member.name);
   const normalizedTask = String(task || "").trim();
   const normalizedSkill = String(skillName || "").trim();
   if (!managerName || normalizedExecutors.length === 0 || !normalizedTask) return "";
-  const targetList = normalizedExecutors.map((name) => `「${name}」`).join("、");
+  const managerRole = terminalGroupRoleLabel(manager?.role) || "普通管理员";
+  const targetList = normalizedExecutors.map((member) => `「${member.name}」（${member.role}）`).join("、");
   const lines = [
-    `[系统消息][群组:${groupName || "terminal-group"}] 已建立协作分组。发起终端：「${managerName}」。`,
-    `你当前角色是执行者；本组执行者：${targetList}。这是系统配置通知，不是新任务授权。`,
+    `[系统消息][群组:${groupName || "terminal-group"}] 已建立协作分组。负责终端：「${managerName}」（${managerRole}）。`,
+    `本组其他成员及角色：${targetList}。请按自己的终端名称核对角色。这是系统配置通知，不是新任务授权。`,
   ];
+  if (terminalMessageGroupRoleKey(manager?.role) === "super_admin") {
+    lines.push("超级管理员为组内最高负责人，负责统筹计划、任务分派及最终裁决；普通管理员负责日常管理并服从其协调。超级管理员原则上只与管理员联系而不越级接收执行者汇报（执行者向普通管理员汇报），除非超级管理员主动联系执行者。");
+  }
   if (normalizedSkill) {
-    lines.push(`先用 $${normalizedSkill} 技能加载工作须知，再用终端定时消息流程回报。协作消息一律通过 /api/terminal/scheduled-inputs 设置未来短延时发送（实时消息也延迟数秒），不得同步等待投递返回；排程成功不等于接收，以对方定时 ACK 或原生记录确认，不重复发送正文。`);
+    lines.push(`先用 $${normalizedSkill} 技能加载工作须知，再用 webclx-terminal-message 技能的定时消息流程回报。协作消息一律通过 /api/terminal/scheduled-inputs 设置未来短延时发送（实时消息也延迟数秒），不得同步等待投递返回；排程成功不等于接收，以对方定时 ACK 或原生记录确认，不重复发送正文。`);
   }
   lines.push(`系统说明：${normalizedTask}`);
   return lines.filter(Boolean).join(" ");
@@ -1370,7 +1654,8 @@ async function submitTerminalMessage(event) {
   }
   const identify = refs.identify?.checked !== false;
   const verifySubmission = refs.verify?.checked !== false;
-  const prefix = identify ? terminalMessageSenderTag(activeSession()?.name || "") : "";
+  const senderName = activeSession()?.name || "";
+  const payloadMessage = formatTerminalMessageWithSender(senderName, message, identify);
   const batchId = terminalMessageBatchId();
   refs.result.hidden = true;
   setTerminalMessageStatus(`正在向 ${recipients.length} 个终端发送消息…`);
@@ -1379,7 +1664,7 @@ async function submitTerminalMessage(event) {
   });
   try {
     const results = await Promise.all(recipients.map(
-      (target) => sendTerminalMessageToTarget(target, `${prefix}${message}`, batchId, verifySubmission),
+      (target) => sendTerminalMessageToTarget(target, payloadMessage, batchId, verifySubmission),
     ));
     const summary = terminalMessageSummary(results);
     setTerminalMessageStatus(
@@ -1433,6 +1718,8 @@ if (typeof module === "object" && module.exports) {
     terminalMessageBody,
     terminalMessageBatchId,
     terminalMessageSenderTag,
+    deduplicateConsecutiveSenderTags,
+    formatTerminalMessageWithSender,
     terminalMessageDeliveryState,
     terminalMessageSummary,
   };
@@ -1440,7 +1727,8 @@ if (typeof module === "object" && module.exports) {
 
 function terminalGroupRoleLabel(role) {
   const normalized = String(role || "").trim();
-  if (normalized === "manager" || normalized === "管理者") return "管理者";
+  if (["super_admin", "超级管理员"].includes(normalized)) return "超级管理员";
+  if (["manager", "普通管理员", "管理者"].includes(normalized)) return "普通管理员";
   if (normalized === "reviewer" || normalized === "复核者") return "复核者";
   if (normalized === "executor" || normalized === "执行者") return "执行者";
   return "";

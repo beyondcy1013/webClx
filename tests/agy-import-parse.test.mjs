@@ -21,14 +21,14 @@ vm.runInNewContext(managerSource, context);
 const { parseImportText } = context.window.agyManager;
 assert.equal(typeof parseImportText, "function", "parseImportText 应暴露在 window.agyManager 上供测试");
 
-const deliveryText = `buyer.one@gmail.com----pw-real-1----xxxx xxxx xxxx xxxx xxxx xxxx xxxx xxxx 订阅成功 2026-09-21 21:13:20 账号凭证获取成功 {"client_id": "000000000000-testclientid.apps.googleusercontent.com", "client_secret": "GOCSPX-test", "token": "ya29.test-access", "refresh_token": "1//06flat-refresh", "scopes": ["https://www.googleapis.com/auth/cloud-platform"], "token_uri": "https://oauth2.googleapis.com/token", "project_id": "test-project", "expiry": "2026-09-21T14:13:56.509535+00:00"} 反重力验证成功 12345|https://sms.example.invalid/record?key=test-key`;
+const deliveryText = `SonstroemSancken@gmail.com----fhxomo0y9mi----lgel ssvf q67h fxan j7ev jf5q zx2c 4jmc 订阅成功 2026-09-21 21:13:20 账号凭证获取成功 {"client_id": "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com", "client_secret": "GOCSPX-test", "token": "ya29.test-access", "refresh_token": "1//06flat-refresh", "scopes": ["https://www.googleapis.com/auth/cloud-platform"], "token_uri": "https://oauth2.googleapis.com/token", "project_id": "aicode-consumers", "expiry": "2026-09-21T14:13:56.509535+00:00"} 反重力验证成功 5483794059|https://card.sms991.top/api/sms/record?key=c426ef7cae14fab55b605f1c21508082`;
 
 const mixed = parseImportText(deliveryText);
 assert.equal(mixed.length, 1);
-assert.equal(mixed[0].email, "buyer.one@gmail.com");
+assert.equal(mixed[0].email, "SonstroemSancken@gmail.com");
 assert.equal(mixed[0].refresh_token, "1//06flat-refresh");
 assert.equal(mixed[0].token, "ya29.test-access");
-assert.equal(mixed[0].project_id, "test-project");
+assert.equal(mixed[0].project_id, "aicode-consumers");
 
 // 无 email 的凭证 JSON 单独出现时按原样透传，由后端按条报"缺少有效 email"
 const noEmail = parseImportText('{"refresh_token": "1//no-email-refresh"}');

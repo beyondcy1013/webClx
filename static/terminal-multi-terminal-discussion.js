@@ -55,11 +55,11 @@ function terminalMultiTerminalDiscussionPrompt(options) {
     ? [
       `你是协调终端 ${terminalMultiTerminalDiscussionParticipantLabel(coordinator)}。`,
       "收集各参与终端的独立意见；对证据薄弱、假设未证实或结论冲突处发起至多一轮追问；在硬截止时间到达时形成最终结论。",
-      "使用终端消息向参与终端追问或宣布结论，并要求可验证的回复确认。",
+      "使用 $webclx-terminal-message 向参与终端追问或宣布结论，并要求可验证的回复确认。",
     ]
     : [
       `你是参与终端 ${terminalMultiTerminalDiscussionParticipantLabel(recipient)}。`,
-      "先独立分析，不等待也不迎合其他终端；完成后使用终端消息回复协调终端 "
+      "先独立分析，不等待也不迎合其他终端；完成后使用 $webclx-terminal-message 回复协调终端 "
         + `${terminalMultiTerminalDiscussionParticipantLabel(coordinator)}，仅在被追问时再补充一轮。`,
     ];
 

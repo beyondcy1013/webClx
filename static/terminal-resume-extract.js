@@ -21,6 +21,9 @@
   const GROK_RESUME_INVOKE_PATTERN = /\bgrok\s+--resume\s+/gi;
   const CLINE_RESUME_INVOKE_PATTERN = /\bcline\s+(?:--id|--taskId|-T)(?:=|\s+)/gi;
   const OPENCODE_RESUME_INVOKE_PATTERN = /\bopencode\s+(?:--session|-s)(?:=|\s+)/gi;
+  const CODEARTS_RESUME_INVOKE_PATTERN = /\bcodearts\s+(?:--session|-s)(?:=|\s+)/gi;
+  const QODER_RESUME_INVOKE_PATTERN =
+    /\b(?:qodercli|qoderclicn|qoder)\s+(?:--resume|-r)(?:=|\s+)/gi;
   const DEVIN_RESUME_INVOKE_PATTERN = /\bdevin[ \t]+(?:-r|--resume)[ \t]+/gi;
   const DEVIN_RESUME_SLUG_PATTERN = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
   const CODEX_RESUME_ID_PATTERN = /^[A-Za-z0-9._-]{1,160}$/;
@@ -35,7 +38,7 @@
   const CODEX_RESUME_FRAGMENT_WHITESPACE_LIMIT = 16;
   const RESUME_UUID_CONTEXT_SCAN_LIMIT = 1024;
   const NEXT_RESUME_INVOKE_PATTERN =
-    /\b(?:codex\s+resume|cdx\s+resume|claude\s+--resume|agy\s+--conversation|codebuddy\s+--resume|kiro-cli\s+--resume-id|grok\s+--resume|cline\s+(?:--id|--taskId|-T)|opencode\s+(?:--session|-s)|devin\s+(?:-r|--resume))\b/i;
+    /\b(?:codex\s+resume|cdx\s+resume|claude\s+--resume|agy\s+--conversation|codebuddy\s+--resume|kiro-cli\s+--resume-id|grok\s+--resume|cline\s+(?:--id|--taskId|-T)|(?:opencode|codearts)\s+(?:--session|-s)|(?:qodercli|qoderclicn|qoder)\s+(?:--resume|-r)|devin\s+(?:-r|--resume))\b/i;
 
   // Codex/Claude startup banner prints the active session id in a labelled
   // box, e.g.:
@@ -101,6 +104,15 @@
     }
     if (program === "opencode") {
       return `opencode --session ${resumeId}`;
+    }
+    if (program === "codearts") {
+      return `codearts --session ${resumeId}`;
+    }
+    if (program === "qoder" || program === "qodercli") {
+      return `qodercli --resume ${resumeId}`;
+    }
+    if (program === "qoderclicn") {
+      return `qoderclicn --resume ${resumeId}`;
     }
     if (program === "claude") {
       return `claude --resume ${resumeId}`;
@@ -370,6 +382,28 @@
       rememberCandidate(resumeId, "opencode", match.index);
     }
 
+    CODEARTS_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(CODEARTS_RESUME_INVOKE_PATTERN)) {
+      const resumeId = exactResumeTokenAfterInvoke(
+        text.slice(match.index + match[0].length),
+        { allowNonUuid: true },
+      );
+      rememberCandidate(resumeId, "codearts", match.index);
+    }
+
+    QODER_RESUME_INVOKE_PATTERN.lastIndex = 0;
+    for (const match of text.matchAll(QODER_RESUME_INVOKE_PATTERN)) {
+      const resumeId = exactResumeTokenAfterInvoke(
+        text.slice(match.index + match[0].length),
+        { allowNonUuid: true },
+      );
+      rememberCandidate(
+        resumeId,
+        match[0].toLowerCase().includes("qoderclicn") ? "qoderclicn" : "qoder",
+        match.index,
+      );
+    }
+
     DEVIN_RESUME_INVOKE_PATTERN.lastIndex = 0;
     for (const match of text.matchAll(DEVIN_RESUME_INVOKE_PATTERN)) {
       const slug = devinResumeSlugAfterInvoke(
@@ -379,6 +413,14 @@
         latestDevinId = slug;
         latestDevinIndex = match.index;
       }
+    }
+
+    if (
+      (latestProgram === "codearts" || latestProgram === "qoder" || latestProgram === "qoderclicn") &&
+      latestIndex > latestUuidIndex &&
+      latestIndex > latestDevinIndex
+    ) {
+      return { id: latestId, program: latestProgram };
     }
 
     if (latestDevinId && latestDevinIndex > latestUuidIndex) {

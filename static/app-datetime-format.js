@@ -178,3 +178,67 @@ function formatQuotaWindow(percentage, resetTimeSeconds) {
 function textOrDash(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "—";
 }
+
+function formatAccountRefreshedTime(value) {
+  if (!value) return "—";
+  let date = null;
+  if (value instanceof Date) {
+    date = value;
+  } else if (typeof value === "number") {
+    if (!Number.isFinite(value) || value <= 0) return "—";
+    const ms = value < 1e11 ? value * 1000 : value;
+    date = new Date(ms);
+  } else if (typeof value === "string" && value.trim()) {
+    const num = Number(value.trim());
+    if (Number.isFinite(num) && num > 0) {
+      const ms = num < 1e11 ? num * 1000 : num;
+      date = new Date(ms);
+    } else {
+      date = new Date(value.trim());
+    }
+  }
+  if (!date || Number.isNaN(date.getTime()) || date.getTime() <= 0) {
+    return "—";
+  }
+
+  const diffMs = Math.max(0, Date.now() - date.getTime());
+  const totalSeconds = Math.floor(diffMs / 1000);
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const totalHours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  const minutes = totalMinutes % 60;
+
+  let rel = "";
+  if (days > 0) {
+    if (hours > 0 && minutes > 0) {
+      rel = `${days}天${hours}小时${minutes}分钟前`;
+    } else if (hours > 0) {
+      rel = `${days}天${hours}小时前`;
+    } else if (minutes > 0) {
+      rel = `${days}天${minutes}分钟前`;
+    } else {
+      rel = `${days}天前`;
+    }
+  } else if (totalHours > 0) {
+    if (minutes > 0) {
+      rel = `${totalHours}小时${minutes}分钟前`;
+    } else {
+      rel = `${totalHours}小时前`;
+    }
+  } else if (totalMinutes > 0) {
+    rel = `${totalMinutes}分钟前`;
+  } else {
+    rel = "刚刚";
+  }
+
+  const pad = (n) => String(n).padStart(2, "0");
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const h = pad(date.getHours());
+  const m = pad(date.getMinutes());
+  const s = pad(date.getSeconds());
+  const absolute = `${month}-${day} ${h}:${m}:${s}`;
+
+  return `${rel} ${absolute}`;
+}

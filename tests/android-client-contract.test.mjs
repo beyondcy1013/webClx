@@ -6,6 +6,10 @@ const activity = readFileSync(
   new URL("../android/app/src/main/java/com/webclx/app/MainActivity.java", import.meta.url),
   "utf8",
 );
+const windowInsetsLayout = readFileSync(
+  new URL("../android/app/src/main/java/com/webclx/app/WindowInsetsLayout.java", import.meta.url),
+  "utf8",
+);
 const sourceRegistry = readFileSync(
   new URL("../android/app/src/main/java/com/webclx/app/SourceRegistry.java", import.meta.url),
   "utf8",
@@ -77,13 +81,13 @@ const serverProbeSource = readFileSync(
 
 test("Android client races every configured source and selects the fastest healthy result", () => {
   for (const source of [
-    "http://HOST:PORT/",
-    "http://PUBLIC_DOMAIN:PORT/",
+    "http://192.168.3.2:11111/",
+    "http://fpsq.xyz:11112/",
   ]) {
     assert.match(sourceRegistry, new RegExp(`"${source.replaceAll(".", "\\.")}"`));
   }
   assert.doesNotMatch(sourceRegistry, /"http:\/\/fpsq\.xyz:11111\/"/);
-  assert.doesNotMatch(sourceRegistry, /webclx\.example\.invalid/);
+  assert.doesNotMatch(sourceRegistry, /webclx\.739964\.xyz/);
   assert.match(sourceRegistry, /PROBE_PATH = "api\/auth\/session"/);
   assert.match(activity, /Executors\.newFixedThreadPool\(SourceRegistry\.URLS\.length\)/);
   assert.match(activity, /CompletionService<Integer>/);
@@ -172,8 +176,8 @@ test("Android WebView keeps navigation and cleartext access on known data source
   assert.match(activity, /CookieManager\.getInstance\(\)[\s\S]*setAcceptCookie\(true\)/);
   assert.match(activity, /Intent\.ACTION_VIEW/);
   assert.match(networkPolicy, /<base-config cleartextTrafficPermitted="false"/);
-  assert.match(networkPolicy, />HOST</);
-  assert.match(networkPolicy, />PUBLIC_DOMAIN</);
+  assert.match(networkPolicy, />192\.168\.3\.2</);
+  assert.match(networkPolicy, />fpsq\.xyz</);
   assert.doesNotMatch(manifest, /android:usesCleartextTraffic="true"/);
   assert.match(manifest, /android\.permission\.INTERNET/);
   assert.match(manifest, /android:networkSecurityConfig="@xml\/network_security_config"/);
@@ -206,18 +210,38 @@ test("Android exposes the real system-keyboard visibility to terminal focus poli
   assert.match(activity, /private volatile boolean systemKeyboardVisible;/);
   assert.match(
     activity,
-    /VERSION_CODES\.R[\s\S]*setOnApplyWindowInsetsListener[\s\S]*WindowInsets\.Type\.ime\(\)/,
-    "API 30+ should read IME visibility from WindowInsets",
+    /WindowInsetsLayout\.install\(this, contentRoot, visible -> systemKeyboardVisible = visible\)/,
+    "the root must publish IME visibility before consuming child insets",
   );
   assert.match(
-    activity,
-    /getViewTreeObserver\(\)\.addOnGlobalLayoutListener[\s\S]*getWindowVisibleDisplayFrame\(visibleFrame\)[\s\S]*rootHeight - visibleFrame\.bottom[\s\S]*systemKeyboardVisible = rootHeight > 0 && obscuredHeight > rootHeight \* 0\.15/,
-    "older APIs keep the geometry-based keyboard fallback",
+    windowInsetsLayout,
+    /insets\.isVisible\(WindowInsetsCompat\.Type\.ime\(\)\)/,
+    "AndroidX should adapt IME visibility across supported Android APIs",
   );
   assert.match(
     activity,
     /@JavascriptInterface\s+public boolean isSystemKeyboardVisible\(\) \{\s*return systemKeyboardVisible;\s*\}/,
   );
+  assert.doesNotMatch(activity, /bindKeyboardVisibility|getWindowVisibleDisplayFrame/);
+});
+
+test("Android exposes a native system-keyboard reveal for the selection menu", () => {
+  assert.match(activity, /import android\.view\.inputmethod\.InputMethodManager;/);
+  assert.match(
+    activity,
+    /@JavascriptInterface\s+public boolean showSystemKeyboard\(\)\s*\{[\s\S]*?if \(!isActivityUsable\(\) \|\| webView == null\) \{\s*return false;\s*\}[\s\S]*?mainHandler\.post\([\s\S]*?webView\.requestFocus\(\);[\s\S]*?imm\.showSoftInput\(webView, 0\);/,
+    "old WebView builds need InputMethodManager.showSoftInput because a scripted focus alone does not raise the IME",
+  );
+});
+
+test("Android main and settings screens share one system-bar, cutout and IME inset owner", () => {
+  assert.match(settingsActivity, /WindowInsetsLayout\.install\(this, root, null\)/);
+  assert.match(windowInsetsLayout, /setDecorFitsSystemWindows\(activity\.getWindow\(\), false\)/);
+  for (const type of ["systemBars", "displayCutout", "ime"]) {
+    assert.ok(windowInsetsLayout.includes(`WindowInsetsCompat.Type.${type}()`));
+  }
+  assert.match(windowInsetsLayout, /return WindowInsetsCompat\.CONSUMED/);
+  assert.match(manifest, /android:windowSoftInputMode="adjustResize"/);
 });
 
 test("Android recreates the WebView after a render process crash", () => {

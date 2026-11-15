@@ -342,6 +342,7 @@ async fn api_preset_verification_reads_back_auth_config_and_model() {
     )
     .unwrap();
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-verify".to_string(),
         name: "Verify API".to_string(),
@@ -368,6 +369,7 @@ async fn api_preset_verification_reads_back_auth_config_and_model() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let config_targets = vec![ResolvedConfigTarget {
         key: "model".to_string(),
@@ -456,6 +458,7 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
     )
     .unwrap();
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-relay".to_string(),
         name: "Claude Relay".to_string(),
@@ -476,6 +479,7 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
         use_local_proxy: true,
         access_mode: Some(ClaudeAccessMode::AnthropicRelay),
         switch_count: 0,
+        last_switch_at: None,
     };
 
     write_claude_preset_to_targets(&targets, &preset)
@@ -504,6 +508,7 @@ async fn claude_proxy_apply_updates_onboarding_without_replacing_claude_json() {
 #[tokio::test]
 async fn api_preset_test_total_timeout_returns_a_visible_failure() {
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-timeout".to_string(),
         name: "Timeout API".to_string(),
@@ -527,6 +532,7 @@ async fn api_preset_test_total_timeout_returns_a_visible_failure() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
 
     let result = await_api_preset_test_with_timeout(
@@ -548,6 +554,7 @@ async fn api_preset_test_total_timeout_returns_a_visible_failure() {
 async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
     let (base_url, paths) = spawn_preset_test_server(2).await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test-env".to_string(),
         name: "API Test Env".to_string(),
@@ -571,6 +578,7 @@ async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let invalid_proxy_env = vec![
         ("HTTP_PROXY".to_string(), "http://127.0.0.1:9".to_string()),
@@ -602,6 +610,7 @@ async fn api_preset_test_client_honors_terminal_proxy_and_no_proxy_env() {
 async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
     let (base_url, paths) = spawn_preset_test_server(2).await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
@@ -625,6 +634,7 @@ async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -649,6 +659,7 @@ async fn api_preset_test_sends_responses_probe_for_legacy_chat_wire_api() {
 async fn api_preset_test_rejects_responses_stream_without_completion_event() {
     let base_url = spawn_incomplete_responses_preset_test_server(false).await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test-incomplete-sse".to_string(),
         name: "API Test Incomplete SSE".to_string(),
@@ -672,6 +683,7 @@ async fn api_preset_test_rejects_responses_stream_without_completion_event() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -691,6 +703,7 @@ async fn api_preset_test_rejects_responses_stream_without_completion_event() {
 async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
     let base_url = spawn_incomplete_responses_preset_test_server(true).await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test-disconnected-sse".to_string(),
         name: "API Test Disconnected SSE".to_string(),
@@ -714,6 +727,7 @@ async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -733,6 +747,7 @@ async fn api_preset_test_rejects_responses_body_disconnect_after_http_200() {
 async fn auth_preset_test_uses_saved_oauth_account_for_responses() {
     let (endpoint, request) = spawn_codex_oauth_test_server().await;
     let preset = StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "auth-test".to_string(),
         name: "OAuth Test".to_string(),
@@ -745,6 +760,7 @@ async fn auth_preset_test_uses_saved_oauth_account_for_responses() {
         legacy_secondary_config_value: None,
         auth: sample_auth_file(),
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::new();
 
@@ -770,6 +786,7 @@ async fn auth_preset_test_uses_saved_oauth_account_for_responses() {
 async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
     let (endpoint, request) = spawn_codex_oauth_test_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-oauth-test".to_string(),
         name: "Imported OAuth".to_string(),
@@ -793,6 +810,7 @@ async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
         access_mode: Some(ApiAccessMode::ChatgptOauth),
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::new();
 
@@ -813,6 +831,7 @@ async fn chatgpt_oauth_api_preset_test_reuses_oauth_probe_contract() {
 async fn api_preset_test_uses_model_override_for_responses_when_models_is_missing() {
     let (base_url, paths) = spawn_responses_preset_test_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
@@ -839,6 +858,7 @@ async fn api_preset_test_uses_model_override_for_responses_when_models_is_missin
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -873,6 +893,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
     )
     .await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
@@ -899,6 +920,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -924,6 +946,7 @@ async fn api_preset_test_uses_default_model_when_preset_has_no_model_override() 
 #[test]
 fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test".to_string(),
         name: "Zhipu 5.1".to_string(),
@@ -950,6 +973,7 @@ fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
 
     let base_url = api_provider_base_url_for_mode(
@@ -968,6 +992,7 @@ fn api_preset_test_uses_local_proxy_chat_probe_when_explicitly_enabled() {
 async fn claude_preset_test_uses_preset_model_when_models_endpoint_is_missing() {
     let (base_url, paths) = spawn_claude_models_404_preset_test_server().await;
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-test".to_string(),
         name: "DeepSeek Claude 官方 Anthropic".to_string(),
@@ -988,6 +1013,7 @@ async fn claude_preset_test_uses_preset_model_when_models_endpoint_is_missing() 
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1027,6 +1053,7 @@ async fn claude_preset_test_uses_preset_model_when_models_endpoint_is_missing() 
 async fn claude_preset_test_uses_inherited_env_model_when_model_fields_are_empty() {
     let (base_url, paths) = spawn_claude_models_404_preset_test_server().await;
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-global-test".to_string(),
         name: "Claude inherited model".to_string(),
@@ -1050,6 +1077,7 @@ async fn claude_preset_test_uses_inherited_env_model_when_model_fields_are_empty
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1071,6 +1099,7 @@ async fn claude_preset_test_uses_inherited_env_model_when_model_fields_are_empty
 #[test]
 fn claude_preset_test_target_uses_local_proxy_credentials_when_enabled() {
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-local-test".to_string(),
         name: "Claude Local Test".to_string(),
@@ -1091,6 +1120,7 @@ fn claude_preset_test_target_uses_local_proxy_credentials_when_enabled() {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
 
     let target = super::claude_preset_test_target(&preset, true);
@@ -1125,6 +1155,7 @@ fn claude_preset_test_target_uses_local_proxy_credentials_when_enabled() {
 #[test]
 fn claude_preset_test_target_keeps_minimax_anthropic_direct_when_account_proxy_disabled() {
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-minimax-direct".to_string(),
         name: "MiniMax Claude Direct".to_string(),
@@ -1145,6 +1176,7 @@ fn claude_preset_test_target_keeps_minimax_anthropic_direct_when_account_proxy_d
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
 
     let target = super::claude_preset_test_target(&preset, preset.use_local_proxy);
@@ -1178,6 +1210,7 @@ fn claude_preset_test_target_keeps_minimax_anthropic_direct_when_account_proxy_d
 async fn api_preset_test_retries_v1_when_root_models_is_not_json_models() {
     let (base_url, paths) = spawn_v1_fallback_preset_test_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test".to_string(),
         name: "API Test".to_string(),
@@ -1201,6 +1234,7 @@ async fn api_preset_test_retries_v1_when_root_models_is_not_json_models() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1287,6 +1321,7 @@ Connection: close
     auth_core::set_local_webclx_origin(format!("http://{addr}"));
 
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test-zhipu".to_string(),
         name: "智谱5.1".to_string(),
@@ -1313,6 +1348,7 @@ Connection: close
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1831,6 +1867,7 @@ fn capture_test_auth(
 
 fn stored_auth_preset(id: &str, name: &str, auth: AuthFile) -> StoredAuthPreset {
     StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: id.to_string(),
         name: name.to_string(),
@@ -1843,6 +1880,7 @@ fn stored_auth_preset(id: &str, name: &str, auth: AuthFile) -> StoredAuthPreset 
         legacy_secondary_config_value: None,
         auth,
         switch_count: 0,
+        last_switch_at: None,
     }
 }
 

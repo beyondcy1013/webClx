@@ -287,6 +287,10 @@ async function cancelPasteScheduledTask(taskId) {
   if (!taskId) {
     return;
   }
+  const hasConfirm = typeof window !== "undefined" && typeof window.confirm === "function";
+  if (hasConfirm && !window.confirm("确定要取消该服务端排队/定时输入任务吗？\n\n⚠️ 取消后到期将不会发送，无法撤销！")) {
+    return;
+  }
   try {
     await requestJson(`/api/terminal/scheduled-inputs/${encodeURIComponent(taskId)}`, {
       method: "DELETE",

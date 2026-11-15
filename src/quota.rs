@@ -919,6 +919,7 @@ mod tests {
         // plan is exhausted, so the shared reset schedule must stay empty and
         // the scanner must fall back to the normal 429 retry policy.
         let presets = [auth_core::StoredApiPreset {
+            switch_history: Vec::new(),
             interchange_source: None,
             id: "api-official-unavailable".to_string(),
             name: "official unavailable".to_string(),
@@ -942,6 +943,7 @@ mod tests {
             access_mode: None,
             favorite: false,
             switch_count: 0,
+            last_switch_at: None,
         }];
 
         let runtime = tokio::runtime::Builder::new_current_thread()

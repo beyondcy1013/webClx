@@ -70,7 +70,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /async function copyCurrentSessionIdAndAsk\(\)[\s\S]*?const sourceSessionId = state\.activeSessionId;[\s\S]*?detectAgentResumeIdComplete\(sourceSessionId, sourceContext\)[\s\S]*?const prompt = buildSessionQuestionPrompt\(detected\.resumeId\);[\s\S]*?copyTextToClipboard\(prompt\)/,
+  /async function copyCurrentSessionIdAndAsk\(\)[\s\S]*?const sourceSessionId = state\.activeSessionId;[\s\S]*?detectAgentResumeIdComplete\(sourceSessionId, sourceContext\)[\s\S]*?const prompt = buildSessionQuestionPrompt\(detected\.resumeId(?:,\s*[^)]+)?\);[\s\S]*?copyTextToClipboard\(prompt\)/,
   "copy-ID-and-ask should freeze the source terminal and copy the complete prompt like copy-terminal-name",
 );
 
@@ -354,8 +354,14 @@ assert.match(
 
 assert.match(
   terminalToolsMenu,
-  /id="terminal-codex-full-access-toggle"[\s\S]*id="terminal-quick-command-buttons"[\s\S]*id="terminal-copy-all"[\s\S]*id="session-detail-toggle"[\s\S]*>\s*api[\s\S]*id="session-agent-toggle"[\s\S]*>\s*智能体[\s\S]*id="session-auto-continue-toggle"/,
-  "terminal tools should order full access, commands, copy-all, and session toggles",
+  /id="terminal-quick-command-buttons"[\s\S]*id="terminal-copy-all"[\s\S]*id="session-detail-toggle"[\s\S]*>\s*api[\s\S]*id="session-agent-toggle"[\s\S]*>\s*智能体[\s\S]*id="session-auto-continue-toggle"/,
+  "terminal tools should order commands, copy-all, and session toggles",
+);
+
+assert.doesNotMatch(
+  terminalToolsMenu,
+  /id="terminal-codex-full-access-toggle"/,
+  "terminal tools should not contain codex full access toggle",
 );
 
 assert.doesNotMatch(

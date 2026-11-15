@@ -2,13 +2,13 @@
 
 ## Current contract
 
-- Last verified: 2026-08-14.
-- The authoritative runtime files are `static/i18n.js`, `static/styles-base.css`, and `static/styles-responsive.css`. The tracked `static` entry is a symlink to `/home/bin/webclx/static`.
+- Last verified: 2026-10-25.
+- The authoritative runtime files are `static/i18n.js`, `static/styles-base.css`, and `static/styles-responsive.css`. The tracked `static` directory is the source; `/home/bin/webclx/static` is an absolute symlink to it.
 - With no saved `webclx:locale`, locale initialization uses `navigator.language` first, then `navigator.languages[0]`, and falls back to `zh-CN` for unsupported languages.
 - A manual Chinese or English choice is stored in `webclx:locale` and overrides later system-language detection.
-- On application pages, `.browser-topbar` remains a two-column grid at desktop and mobile widths: horizontally scrollable navigation on the left and `#webclx-language-control` on the far upper-right.
+- On desktop application pages, `.browser-topbar` remains a two-column grid at desktop and mobile widths: horizontally scrollable navigation on the left and `#webclx-language-control` on the far upper-right.
 - The terminal page's legacy `.browser-topbar-spacer` is replaced by the language control so the selector cannot wrap onto a second row.
-- The login page keeps the same control at the upper-right of `.login-card`.
+- The desktop login page keeps the same control at the upper-right of `.login-card`.
 
 ## Verification
 
@@ -31,3 +31,9 @@ Verified live hashes on 2026-08-14:
 - The top navigation structure or responsive breakpoint changes.
 - The locale storage key, supported locale list, or browser language detection order changes.
 - A release archive contains different static hashes; regenerate and audit its static asset manifest rather than mutating an already published version.
+
+## Android: choose once
+
+Android browsers and the native `WebClxAndroid` bridge use a first-use language dialog instead of a persistent language selector. Choosing either 中文 or English writes the existing `webclx:locale` key and closes the dialog. A previously saved locale also skips onboarding. Later navigation and reloads retain the language without creating `#webclx-language-control`; desktop behavior is unchanged. Storage is per site/origin; clearing site data starts onboarding again.
+
+Verification: `python3 tests/android-language-once.browser.py` exercises both initial choices, subsequent terminal/LLM_API navigation, existing saved choices, absence of Android overlay controls, desktop selector retention, and browser errors. This uses Android browser simulation and the actual i18n script, not an installed APK. All i18n and shared base-CSS HTML loader cache versions are updated to `20261025-android-language-once`; changes are served immediately through the static symlink without APK compilation or service restart.

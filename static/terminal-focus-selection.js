@@ -53,6 +53,21 @@ function terminalNativeKeyboardVisible() {
   return false;
 }
 
+// Revealing the IME is an explicit user action (selection-menu button). Old
+// Android WebView builds ignore a scripted focus, so ask the native shell to
+// raise the keyboard when its bridge is present. Returns false on the web and
+// on older APKs so callers keep their focus-based fallback.
+function showTerminalSystemKeyboardNatively() {
+  try {
+    if (typeof window.WebClxAndroid?.showSystemKeyboard !== "function") {
+      return false;
+    }
+    return window.WebClxAndroid.showSystemKeyboard() === true;
+  } catch {
+    return false;
+  }
+}
+
 function terminalEditableFocusTarget(target) {
   if (target instanceof HTMLTextAreaElement) {
     return true;
@@ -92,6 +107,14 @@ function terminalActionControlTarget(target) {
 
 function guardTerminalActionEditableFocus(event) {
   const target = event.target;
+  if (target instanceof Element && target.closest(".terminal-selection-handle")) {
+    // Selection handles belong to the same selection gesture. In particular,
+    // leave Android's retained helper focus alone after Back dismisses IME.
+    if (event.type === "pointerdown" || event.type === "mousedown") {
+      event.preventDefault();
+    }
+    return;
+  }
   if (terminalEditableFocusTarget(target)) {
     if (event.isTrusted || event.type === "pointerdown") {
       terminalActionKeyboardPolicyActive = false;
@@ -113,9 +136,8 @@ function guardTerminalActionEditableFocus(event) {
   terminalActionKeyboardPolicyActive = true;
   terminalActionEditableFocusBlocked = !terminalActionNativeKeyboardWasVisible;
   if (terminalActionEditableFocusBlocked) {
-    if (!(typeof softKeyboardFocusPreservingControl === "function" && softKeyboardFocusPreservingControl(target))) {
-      blurTerminalHelperTextarea();
-    }
+    // Android can retain helper focus after Back dismisses the native IME.
+    blurTerminalHelperTextarea();
   }
   if (event.type === "pointerdown" || event.type === "mousedown") {
     event.preventDefault();
@@ -585,6 +607,28 @@ function terminalSystemImeFocusSuppressed() {
   );
 }
 
+// Only an explicit system-IME action may arm the native keyboard: a direct
+// terminal tap-to-type, the 系统输入法 checkbox, or the selection menu's
+// 打开输入法. Long-press, selection handles, soft keys and other menus must
+// leave the IME untouched, so the guarantee is enforced on the input
+// connection itself instead of on each event path: an unfocused helper is
+// inputmode=none, and no stray native or scripted focus can raise the keyboard.
+let terminalSystemImeArmed = false;
+const terminalSystemImeBlurGuardedHelpers = new WeakSet();
+
+function installTerminalSystemImeBlurGuard(helper) {
+  if (terminalSystemImeBlurGuardedHelpers.has(helper)) {
+    return;
+  }
+  terminalSystemImeBlurGuardedHelpers.add(helper);
+  helper.addEventListener("blur", () => {
+    // Losing focus ends the explicit grant; the next keyboard request has to
+    // be explicit again instead of silently reopening on the next focus.
+    terminalSystemImeArmed = false;
+    syncTerminalImePolicy();
+  });
+}
+
 function syncTerminalImePolicy() {
   const helper = terminalHelperTextarea();
   if (!helper) {
@@ -594,16 +638,33 @@ function syncTerminalImePolicy() {
   }
 
   installTerminalCursorCorrectionImeAnchor(helper);
+  installTerminalSystemImeBlurGuard(helper);
 
-  helper.setAttribute(
-    "inputmode",
-    terminalSystemImeSuppressedBySoftKeyboardMode() ? "none" : "text",
-  );
-  helper.setAttribute("enterkeyhint", "enter");
-  helper.setAttribute("autocomplete", "off");
-  helper.setAttribute("autocapitalize", "none");
-  helper.setAttribute("autocorrect", "off");
-  helper.spellcheck = false;
+  // Rewriting IME attributes on a focused textarea can restart the native
+  // input connection even when the value is unchanged.
+  const helperFocused = document.activeElement === helper;
+  const attributes = {
+    inputmode:
+      terminalSystemImeArmed && !terminalSystemImeSuppressedBySoftKeyboardMode()
+        ? "text"
+        : "none",
+    enterkeyhint: "enter",
+    autocomplete: "off",
+    autocapitalize: "none",
+    autocorrect: "off",
+    spellcheck: "false",
+  };
+  for (const [name, value] of Object.entries(attributes)) {
+    if (helperFocused && name === "inputmode" && value === "none") {
+      // Never disarm a live input connection: that would hide the keyboard in
+      // the middle of a selection gesture. Arming (none -> text) still goes
+      // through, because only the explicit IME actions set the armed flag.
+      continue;
+    }
+    if (helper.getAttribute(name) !== value) {
+      helper.setAttribute(name, value);
+    }
+  }
   syncTerminalImeToggleButton();
   syncTerminalSoftKeyboardCursor();
 }
@@ -621,6 +682,8 @@ function syncTerminalImeToggleButton() {
 }
 
 function blurTerminalHelperTextarea() {
+  clearTerminalSingleTapTimer();
+  clearTerminalLastTouchTap();
   const helper = terminalHelperTextarea();
   if (!helper) {
     return;
@@ -649,6 +712,9 @@ function setTerminalSystemImeEnabled(enabled, { suppressMs = 0, clearSuppression
 }
 
 function focusTerminalForDirectInput() {
+  // The one place that arms the native keyboard, before focusing, so the
+  // helper already accepts an IME when the input connection is created.
+  terminalSystemImeArmed = true;
   setTerminalSystemImeEnabled(true, { clearSuppression: true });
   term.focus();
   syncTerminalImePolicy();
@@ -701,6 +767,38 @@ function isTerminalEventTarget(target) {
 }
 
 let terminalTouchScrollGesture = null;
+let terminalTouchSelectionConsumesClick = false;
+let terminalLastTouchTap = null;
+let terminalSingleTapTimer = null;
+
+function clearTerminalSingleTapTimer() {
+  if (terminalSingleTapTimer !== null) {
+    window.clearTimeout(terminalSingleTapTimer);
+    terminalSingleTapTimer = null;
+  }
+}
+
+function clearTerminalLastTouchTap() {
+  terminalLastTouchTap = null;
+}
+
+function guardTerminalTouchPointerFocus(event) {
+  terminalTouchSelectionConsumesClick = false;
+  if (event.pointerType === "touch" && isTerminalEventTarget(event.target)) {
+    // Defer input focus until an actual tap. Browser pointer defaults and
+    // compatibility mousedown otherwise change IME state before we can tell
+    // a tap from a long press. Do not blur/refocus or rewrite IME attributes.
+    event.preventDefault();
+  }
+}
+
+function guardTerminalTouchSelectionClick(event) {
+  if (!terminalTouchSelectionConsumesClick) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 function rememberTerminalTouchScrollGesture(event) {
   const touch = event.touches?.[0];
@@ -717,6 +815,7 @@ function rememberTerminalTouchScrollGesture(event) {
     identifier: touch.identifier,
     lastY: touch.clientY,
     remainderPixels: 0,
+    nativeTouchStartPrevented: false,
   };
 }
 
@@ -771,6 +870,14 @@ function handleTerminalTouchScrollMove(event) {
       : terminalCanScrollTouchLines(intendedLines);
   if (!canConsumeGesture) {
     terminalTouchScrollGesture.remainderPixels = 0;
+    if (terminalTouchScrollGesture.nativeTouchStartPrevented) {
+      // Cancelling touchstart also disables native page panning. Preserve
+      // boundary scrolling explicitly without re-enabling WebView's IME tap.
+      window.scrollBy({ top: deltaPixels, behavior: "auto" });
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
     // At the boundary, let the browser continue page scrolling. Consuming the
     // gesture here strands the page whenever the terminal itself cannot move.
     return false;
@@ -782,6 +889,8 @@ function handleTerminalTouchScrollMove(event) {
     term.scrollLines(step.lines);
     saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
     clearTerminalTouchSelectionCandidate(touch.identifier);
+    clearTerminalSingleTapTimer();
+    clearTerminalLastTouchTap();
   }
   event.preventDefault();
   event.stopPropagation();
@@ -803,6 +912,18 @@ function rememberTerminalTouchSelectionCandidate(event) {
     return;
   }
 
+  if (terminalLastTouchTap) {
+    const isPotentialSecondTap = terminalTouchSelectionPolicy.terminalTouchSelectionIsDoubleTap(
+      terminalLastTouchTap,
+      { clientX: touch.clientX, clientY: touch.clientY, time: Date.now() },
+    );
+    if (isPotentialSecondTap) {
+      clearTerminalSingleTapTimer();
+    } else {
+      clearTerminalLastTouchTap();
+    }
+  }
+
   clearTerminalTouchSelectionCandidate();
 
   const candidate = {
@@ -814,14 +935,25 @@ function rememberTerminalTouchSelectionCandidate(event) {
     lastX: touch.clientX,
     lastY: touch.clientY,
     longPressTimer: null,
+    longPressFired: false,
   };
   candidate.longPressTimer = window.setTimeout(() => {
     if (terminalTouchSelectionCandidate !== candidate || terminalTouchSelection) {
       return;
     }
+    candidate.longPressFired = true;
+    clearTerminalSingleTapTimer();
+    clearTerminalLastTouchTap();
     beginTerminalTouchSelection(candidate.identifier, candidate.lastX, candidate.lastY);
   }, state.terminalTouchSelectionLongPressMs);
   terminalTouchSelectionCandidate = candidate;
+  // Android WebView can activate its editor and native long-press handling
+  // from touchstart even when pointerdown was cancelled. Own that default
+  // here, before either native IME activation or gesture cancellation occurs.
+  event.preventDefault();
+  if (terminalTouchScrollGesture?.identifier === touch.identifier) {
+    terminalTouchScrollGesture.nativeTouchStartPrevented = event.defaultPrevented;
+  }
 }
 
 function clearTerminalTouchSelectionCandidate(identifier = null) {
@@ -877,7 +1009,10 @@ function updateTerminalTouchSelectionCandidateFromMove(event) {
     longPressMs: state.terminalTouchSelectionLongPressMs,
   });
   if (action !== "keep") {
+    clearTerminalSingleTapTimer();
+    clearTerminalLastTouchTap();
     if (action === "select") {
+      terminalTouchSelectionCandidate.longPressFired = true;
       beginTerminalTouchSelection(
         terminalTouchSelectionCandidate.identifier,
         terminalTouchSelectionCandidate.startX,
@@ -932,6 +1067,28 @@ function dispatchSyntheticTerminalMouseEvent(type, eventInit) {
   );
 }
 
+function clearNativeTerminalTextSelection() {
+  // WebView shares native selection state with its active editor/IME. Even
+  // clearing an empty DOM selection can disturb that input connection.
+  // Suppress new selection with preventDefault; never clear an active editor.
+  if (terminalEditableFocusTarget(document.activeElement)) {
+    return;
+  }
+  try {
+    const selection = document.getSelection();
+    if (
+      selection?.rangeCount > 0 &&
+      !selection.isCollapsed &&
+      isTerminalEventTarget(selection.anchorNode) &&
+      isTerminalEventTarget(selection.focusNode)
+    ) {
+      selection.removeAllRanges();
+    }
+  } catch {
+    // Some embedded browsers reject selection access while a menu is opening.
+  }
+}
+
 function preventNativeTerminalTouchSelection(event) {
   if (
     !terminalTouchSelection &&
@@ -949,11 +1106,7 @@ function preventNativeTerminalTouchSelection(event) {
     return;
   }
 
-  try {
-    document.getSelection()?.removeAllRanges();
-  } catch {
-    // Some embedded browsers can reject selection access while the touch menu is opening.
-  }
+  clearNativeTerminalTextSelection();
   event.preventDefault();
   event.stopPropagation();
 }
@@ -1038,11 +1191,45 @@ function currentTerminalSelectionMetrics() {
   };
 }
 
-function resetTerminalSelectionCopyButtonPosition() {
-  terminalSelectionCopyButton?.style.removeProperty("left");
-  terminalSelectionCopyButton?.style.removeProperty("top");
-  terminalSelectionCopyButton?.style.removeProperty("bottom");
-  terminalSelectionCopyButton?.style.removeProperty("visibility");
+const TERMINAL_SELECTION_MENU_GAP = 6;
+
+// Copy-selection / copy-all / open-IME form one menu and this is their
+// left-to-right order. Laying out and hiding must go through this list so a new
+// entry cannot be left visible at stale coordinates.
+function terminalSelectionMenuButtons() {
+  return [
+    terminalSelectionCopyButton,
+    terminalSelectionCopyAllButton,
+    terminalSelectionOpenImeButton,
+  ].filter(Boolean);
+}
+
+function resetTerminalSelectionMenuButtonPosition(button) {
+  button?.style.removeProperty("left");
+  button?.style.removeProperty("top");
+  button?.style.removeProperty("bottom");
+  button?.style.removeProperty("visibility");
+}
+
+function hideTerminalSelectionMenu() {
+  for (const button of terminalSelectionMenuButtons()) {
+    button.hidden = true;
+    resetTerminalSelectionMenuButtonPosition(button);
+  }
+}
+
+// With no selection metrics (selection scrolled out of the viewport) the menu
+// falls back to the host's top-left corner as one row, not stacked on 8,8.
+function showTerminalSelectionMenuAtHostCorner() {
+  let cursor = 8;
+  for (const button of terminalSelectionMenuButtons()) {
+    resetTerminalSelectionMenuButtonPosition(button);
+    button.hidden = false;
+    button.style.left = `${Math.round(cursor)}px`;
+    button.style.top = "8px";
+    button.style.bottom = "auto";
+    cursor += button.offsetWidth + TERMINAL_SELECTION_MENU_GAP;
+  }
 }
 
 function positionTerminalSelectionHandle(handle, point, metrics) {
@@ -1090,15 +1277,14 @@ function syncTerminalSelectionCopyButton() {
     (typeof term.hasSelection === "function" && term.hasSelection()) ||
     Boolean(typeof term.getSelection === "function" && term.getSelection());
   if (!hasSelection) {
-    terminalSelectionCopyButton.hidden = true;
+    hideTerminalSelectionMenu();
     return;
   }
 
   const selection = currentTerminalSelectionPosition();
   const metrics = currentTerminalSelectionMetrics();
   if (!selection || !metrics) {
-    resetTerminalSelectionCopyButtonPosition();
-    terminalSelectionCopyButton.hidden = false;
+    showTerminalSelectionMenuAtHostCorner();
     return;
   }
 
@@ -1111,8 +1297,7 @@ function syncTerminalSelectionCopyButton() {
   const visibleFirstRow = Math.max(firstRow, metrics.viewportY);
   const visibleLastRow = Math.min(lastRow, metrics.viewportY + metrics.rows - 1);
   if (visibleFirstRow > visibleLastRow) {
-    resetTerminalSelectionCopyButtonPosition();
-    terminalSelectionCopyButton.hidden = false;
+    showTerminalSelectionMenuAtHostCorner();
     return;
   }
 
@@ -1127,14 +1312,21 @@ function syncTerminalSelectionCopyButton() {
   const selectionBottom = lowerSelectionTop + cellHeight;
   const gap = 8;
 
-  // Measure after showing the button, then keep it inside the terminal host.
-  terminalSelectionCopyButton.hidden = false;
-  terminalSelectionCopyButton.style.visibility = "hidden";
+  // Measure the whole menu while invisible so the group stays centered on the
+  // selection, then place the buttons left to right in menu order.
+  const buttons = terminalSelectionMenuButtons();
+  for (const button of buttons) {
+    button.hidden = false;
+    button.style.visibility = "hidden";
+  }
   const buttonWidth = terminalSelectionCopyButton.offsetWidth;
   const buttonHeight = terminalSelectionCopyButton.offsetHeight;
+  const menuWidth =
+    buttons.reduce((sum, button) => sum + button.offsetWidth, 0) +
+    TERMINAL_SELECTION_MENU_GAP * Math.max(buttons.length - 1, 0);
   const minLeft = 8;
-  const maxLeft = Math.max(minLeft, metrics.shellWidth - buttonWidth - 8);
-  const centeredLeft = (selectionLeft + selectionRight - buttonWidth) / 2;
+  const maxLeft = Math.max(minLeft, metrics.shellWidth - menuWidth - 8);
+  const centeredLeft = (selectionLeft + selectionRight - menuWidth) / 2;
   const left = Math.min(Math.max(centeredLeft, minLeft), maxLeft);
   const belowTop = selectionBottom + gap;
   const maxTop = Math.max(8, metrics.shellHeight - buttonHeight - 8);
@@ -1146,6 +1338,15 @@ function syncTerminalSelectionCopyButton() {
   terminalSelectionCopyButton.style.top = `${Math.round(Math.min(top, maxTop))}px`;
   terminalSelectionCopyButton.style.bottom = "auto";
   terminalSelectionCopyButton.style.visibility = "";
+
+  let cursor = left + buttonWidth + TERMINAL_SELECTION_MENU_GAP;
+  for (const button of buttons.slice(1)) {
+    button.style.left = `${Math.round(cursor)}px`;
+    button.style.top = terminalSelectionCopyButton.style.top;
+    button.style.bottom = "auto";
+    button.style.visibility = "";
+    cursor += button.offsetWidth + TERMINAL_SELECTION_MENU_GAP;
+  }
 }
 
 function syncTerminalSelectionControls() {
@@ -1272,6 +1473,7 @@ function beginTerminalTouchSelection(identifier, clientX, clientY) {
         cell,
         metrics.columns,
       );
+      terminalTouchSelectionConsumesClick = true;
       terminalTouchSelection = {
         identifier,
         anchor: {
@@ -1279,28 +1481,58 @@ function beginTerminalTouchSelection(identifier, clientX, clientY) {
           row: range.row,
         },
       };
-      try {
-        document.getSelection()?.removeAllRanges();
-      } catch {
-        // xterm selection should be the only active selection surface.
-      }
+      clearNativeTerminalTextSelection();
       term.select(range.column, range.row, range.length);
       syncTerminalSelectionControls();
       return true;
     }
   }
 
-  terminalTouchSelection = {
-    identifier,
-  };
+  // Synthesizing a mouse selection here invokes xterm's focus handler. Wait
+  // for usable cell metrics instead of altering the native input connection.
+  return false;
+}
 
-  dispatchSyntheticTerminalMouseEvent("mousedown", {
-    button: 0,
-    buttons: 1,
-    clientX,
-    clientY,
-  });
-  return true;
+function beginTerminalTouchWordSelection(identifier, clientX, clientY) {
+  if (terminalTouchSelectionDisabled) {
+    return false;
+  }
+
+  if (terminalSelectionHandlesReady()) {
+    const metrics = currentTerminalSelectionMetrics();
+    if (metrics) {
+      const cell = terminalTouchSelectionCellFromClient({ clientX, clientY }, metrics);
+      let lineText = "";
+      try {
+        const line = term.buffer?.active?.getLine(cell.row);
+        if (line && typeof line.translateToString === "function") {
+          lineText = line.translateToString(false);
+        }
+      } catch {}
+
+      const range = terminalTouchSelectionPolicy.terminalTouchSelectionWordRange(
+        cell,
+        lineText,
+        metrics.columns,
+      );
+      if (range && range.length > 0) {
+        terminalTouchSelectionConsumesClick = true;
+        terminalTouchSelection = {
+          identifier,
+          anchor: {
+            column: range.column,
+            row: range.row,
+          },
+        };
+        clearNativeTerminalTextSelection();
+        term.select(range.column, range.row, range.length);
+        syncTerminalSelectionControls();
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function handleTerminalContextMenuSelection(event) {
@@ -1527,6 +1759,88 @@ function handleTerminalTouchSelectionMove(event) {
 }
 
 function handleTerminalTouchSelectionEnd(event) {
+  const candidate = terminalTouchSelectionCandidate;
+  if (
+    candidate &&
+    (event.type === "touchend" || event.type === "touchcancel") &&
+    terminalTouchByIdentifier(event.changedTouches, candidate.identifier)
+  ) {
+    clearTerminalTouchScrollGesture(candidate.identifier);
+    clearTerminalTouchSelectionCandidate(candidate.identifier);
+    terminalTouchSelectionConsumesClick = true;
+
+    if (event.type === "touchcancel") {
+      clearTerminalSingleTapTimer();
+      clearTerminalLastTouchTap();
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    // 1. 长按松手（或拖选松手）：手指抬起绝对零干扰输入法，保持选区与把手
+    if (candidate.longPressFired) {
+      clearTerminalSingleTapTimer();
+      clearTerminalLastTouchTap();
+      if (endTerminalTouchSelection(candidate.identifier)) {
+        window.requestAnimationFrame(syncTerminalSelectionControls);
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+
+    const wasShortTap =
+      Date.now() - candidate.startedAt < state.terminalTouchSelectionLongPressMs;
+    const tapPoint = {
+      clientX: candidate.lastX,
+      clientY: candidate.lastY,
+      time: Date.now(),
+      keyboardWasVisible: terminalNativeKeyboardVisible(),
+    };
+
+    if (wasShortTap) {
+      const isDoubleTap = terminalTouchSelectionPolicy.terminalTouchSelectionIsDoubleTap(
+        terminalLastTouchTap,
+        tapPoint,
+      );
+
+      if (isDoubleTap) {
+        const initialKeyboardWasVisible = Boolean(terminalLastTouchTap?.keyboardWasVisible);
+        clearTerminalSingleTapTimer();
+        clearTerminalLastTouchTap();
+        beginTerminalTouchWordSelection(candidate.identifier, tapPoint.clientX, tapPoint.clientY);
+        if (!initialKeyboardWasVisible) {
+          blurTerminalHelperTextarea();
+        }
+      } else {
+        if (terminalTouchSelection || term?.hasSelection?.()) {
+          endTerminalTouchSelection();
+          if (typeof term?.clearSelection === "function") {
+            try {
+              term.clearSelection();
+            } catch {}
+          }
+          syncTerminalSelectionControls();
+        }
+
+        terminalLastTouchTap = tapPoint;
+        if (terminalNativeKeyboardVisible()) {
+          focusTerminalFromTerminalTap();
+        } else {
+          clearTerminalSingleTapTimer();
+          terminalSingleTapTimer = window.setTimeout(() => {
+            terminalSingleTapTimer = null;
+            clearTerminalLastTouchTap();
+            focusTerminalFromTerminalTap();
+          }, 250);
+        }
+      }
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
   const touch = terminalTouchFromEvent(event);
   if (!touch) {
     return;

@@ -182,6 +182,14 @@ async function loadSessions({
       }
       state.pendingCreatedSessionIds.delete(activeId);
     }
+    for (const pendingId of Array.from(state.pendingCreatedSessionIds)) {
+      if (!fetchedSessionIds.has(pendingId) && !isIdleSession(pendingId)) {
+        const pendingSession = sessionsBeforeLoad.find((session) => session.id === pendingId);
+        if (pendingSession && !fetchedSessions.some((s) => s.id === pendingId)) {
+          fetchedSessions.push(pendingSession);
+        }
+      }
+    }
 
     const mergedFetchedSessions = mergeTerminalSessionRecentOpenTimes(
       sessionsBeforeLoad,
@@ -388,7 +396,7 @@ async function createSession({
       ownerKey,
       codexApiPresetId,
     });
-    enableAutoCompactForSession(session.id);
+    // 自动压缩默认开启，无需在创建时逐个加入集合。
     state.pendingCreatedSessionIds.add(session.id);
     announceSessionMutation("created", session);
     insertOrReplaceSession(session);
@@ -515,7 +523,202 @@ function selectedTerminalGroupRoles() {
   ).filter((assignment) => assignment.session_id && assignment.checked);
 }
 
+function resolveTerminalGroupMemberInitialRole(item, currentSession, allSessions, currentToken) {
+  const persistedRole = terminalGroupRoleValue(item?.group_role);
+  if (persistedRole) return persistedRole;
+
+  const nameRole = terminalGroupRoleValue(terminalCollaborationRenameRole(item?.name));
+  if (nameRole) return nameRole;
+
+  let fallbackRole = "executor";
+  if (item?.id === currentSession?.id) {
+    if (!currentToken || currentToken !== String(item?.group_token || "")) {
+      fallbackRole = "manager";
+    } else {
+      const groupMembers = (allSessions || []).filter((s) => String(s?.group_token || "") === currentToken);
+      const hasOtherManager = groupMembers.some((s) => s.id !== currentSession.id && (
+        ["super_admin", "manager"].includes(terminalGroupRoleValue(s.group_role)
+          || terminalGroupRoleValue(terminalCollaborationRenameRole(s.name)))
+      ));
+      fallbackRole = hasOtherManager ? "executor" : "manager";
+    }
+  }
+  return fallbackRole;
+}
+
+let activeRoleMenuTrigger = null;
+let activeRoleMenuSelect = null;
+let roleMenuEl = null;
+
+function ensureTerminalGroupRoleMenu() {
+  if (roleMenuEl && roleMenuEl.isConnected) return roleMenuEl;
+  let menu = document.getElementById("terminal-group-role-popup-menu");
+  if (!menu) {
+    menu = document.createElement("div");
+    menu.id = "terminal-group-role-popup-menu";
+    menu.className = "terminal-group-role-menu";
+    menu.setAttribute("role", "listbox");
+    menu.setAttribute("aria-label", "选择群组角色");
+    menu.hidden = true;
+  }
+  const dialog = (typeof terminalGroupDialogEl !== "undefined" && terminalGroupDialogEl)
+    || document.getElementById("terminal-group-dialog")
+    || document.body;
+  if (menu.parentElement !== dialog) {
+    dialog.appendChild(menu);
+  }
+  roleMenuEl = menu;
+  return roleMenuEl;
+}
+
+function positionTerminalGroupRoleMenu(trigger, menu) {
+  if (!trigger || !menu || menu.hidden) return;
+  const triggerRect = trigger.getBoundingClientRect();
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+  const margin = 8;
+  const gap = 4;
+
+  const width = Math.max(triggerRect.width, 96);
+  const spaceBelow = viewportHeight - triggerRect.bottom - gap - margin;
+  const spaceAbove = triggerRect.top - gap - margin;
+  const openAbove = spaceBelow < 110 && spaceAbove > spaceBelow;
+
+  menu.style.position = "fixed";
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.left = `${Math.round(Math.min(
+    Math.max(margin, triggerRect.left),
+    viewportWidth - width - margin,
+  ))}px`;
+  if (openAbove) {
+    const menuHeight = menu.offsetHeight || 110;
+    menu.style.top = `${Math.round(Math.max(margin, triggerRect.top - gap - menuHeight))}px`;
+  } else {
+    menu.style.top = `${Math.round(triggerRect.bottom + gap)}px`;
+  }
+}
+
+function closeTerminalGroupRoleMenu({ restoreFocus = false } = {}) {
+  const trigger = activeRoleMenuTrigger;
+  activeRoleMenuTrigger = null;
+  activeRoleMenuSelect = null;
+  if (roleMenuEl) {
+    roleMenuEl.hidden = true;
+    roleMenuEl.replaceChildren();
+  }
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", "false");
+    trigger.classList.remove("is-open");
+    if (restoreFocus && trigger.isConnected) {
+      try {
+        trigger.focus({ preventScroll: true });
+      } catch {
+        trigger.focus();
+      }
+    }
+  }
+}
+
+function openTerminalGroupRoleMenu(trigger, select) {
+  if (!trigger || !select || select.disabled || trigger.disabled) {
+    return;
+  }
+  const menu = ensureTerminalGroupRoleMenu();
+  activeRoleMenuTrigger = trigger;
+  activeRoleMenuSelect = select;
+  trigger.setAttribute("aria-expanded", "true");
+  trigger.classList.add("is-open");
+
+  menu.replaceChildren();
+  const options = [
+    ["super_admin", "👑 超级管理员"],
+    ["manager", "普通管理员"],
+    ["executor", "执行者"],
+    ["reviewer", "复核者"],
+  ];
+  for (const [val, label] of options) {
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "terminal-group-role-option";
+    item.setAttribute("role", "option");
+    item.dataset.value = val;
+    item.textContent = label;
+    const isSelected = select.value === val;
+    item.setAttribute("aria-selected", isSelected ? "true" : "false");
+    if (isSelected) {
+      item.classList.add("is-selected");
+    }
+    item.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const changed = select.value !== val;
+      select.value = val;
+      syncTerminalGroupRoleTrigger(select);
+      closeTerminalGroupRoleMenu({ restoreFocus: true });
+      if (changed) {
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    menu.appendChild(item);
+  }
+
+  menu.hidden = false;
+  positionTerminalGroupRoleMenu(trigger, menu);
+  if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+    window.requestAnimationFrame(() => {
+      if (activeRoleMenuTrigger === trigger) {
+        positionTerminalGroupRoleMenu(trigger, menu);
+      }
+    });
+  }
+}
+
+function toggleTerminalGroupRoleMenu(trigger, select) {
+  if (activeRoleMenuTrigger === trigger && roleMenuEl && !roleMenuEl.hidden) {
+    closeTerminalGroupRoleMenu();
+  } else {
+    closeTerminalGroupRoleMenu();
+    openTerminalGroupRoleMenu(trigger, select);
+  }
+}
+
+function syncTerminalGroupRoleTrigger(select) {
+  if (!select) return;
+  const picker = select.closest(".terminal-group-role-picker");
+  if (!picker) return;
+  const trigger = picker.querySelector(".terminal-group-role-trigger");
+  if (!trigger) return;
+  const labelEl = trigger.querySelector(".terminal-group-role-trigger-label");
+  const roleLabel = (select.value === "super_admin" ? "👑 " : "") + (terminalGroupRoleLabel(select.value) || "执行者");
+  if (labelEl) {
+    labelEl.textContent = roleLabel;
+  }
+  trigger.disabled = Boolean(select.disabled);
+  trigger.classList.toggle("is-manager", select.value === "manager");
+  trigger.title = `当前角色：${roleLabel}`;
+}
+
+function resolveTerminalSessionAgentType(session) {
+  const direct = String(session?.activity_agent || session?.activityAgent || "").trim();
+  if (direct) {
+    return direct;
+  }
+  if (session?.codex_api_preset_name) {
+    return "Codex";
+  }
+  const name = String(session?.name || "").toLowerCase();
+  if (name.includes("agy")) return "AGY";
+  if (name.includes("claude")) return "Claude";
+  if (name.includes("codebuddy")) return "CodeBuddy";
+  if (name.includes("devin")) return "Devin";
+  if (name.includes("qoder")) return "Qoder";
+  if (name.includes("cdx") || name.includes("codex")) return "Codex";
+  if (session?.origin === "agent") return "Agent";
+  return "Shell";
+}
+
 function renderTerminalGroupSessionList(session) {
+  closeTerminalGroupRoleMenu();
   if (!terminalGroupSessionListEl) {
     return;
   }
@@ -542,6 +745,7 @@ function renderTerminalGroupSessionList(session) {
     option.dataset.sessionName = String(item.name || item.id);
     option.dataset.sessionOrder = String(index);
     option.dataset.originalOrder = String(index);
+    option.title = String(item.name || item.id);
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
     checkbox.value = item.id;
@@ -551,10 +755,12 @@ function renderTerminalGroupSessionList(session) {
     }
     option.appendChild(checkbox);
     const roleSelect = document.createElement("select");
-    roleSelect.className = "terminal-group-role-select";
+    roleSelect.className = "terminal-group-role-select terminal-group-role-native-select";
     roleSelect.setAttribute("aria-label", `设置 ${item.name || item.id} 的群组角色`);
     roleSelect.dataset.roleFor = item.id;
-    [["manager", "管理者"], ["executor", "执行者"], ["reviewer", "复核者"]].forEach(
+    roleSelect.tabIndex = -1;
+    roleSelect.setAttribute("aria-hidden", "true");
+    [["super_admin", "👑 超级管理员"], ["manager", "普通管理员"], ["executor", "执行者"], ["reviewer", "复核者"]].forEach(
       ([value, label]) => {
         const roleOption = document.createElement("option");
         roleOption.value = value;
@@ -562,21 +768,76 @@ function renderTerminalGroupSessionList(session) {
         roleSelect.append(roleOption);
       },
     );
-    const persistedRole = terminalGroupRoleValue(item.group_role);
-    roleSelect.value = persistedRole || (item.id === session.id ? "manager" : "executor");
+    roleSelect.value = resolveTerminalGroupMemberInitialRole(item, session, sessions, currentToken);
     roleSelect.disabled = !checkbox.checked;
+
+    const rolePicker = document.createElement("div");
+    rolePicker.className = "terminal-group-role-picker";
+
+    const roleTrigger = document.createElement("button");
+    roleTrigger.type = "button";
+    roleTrigger.className = "terminal-group-role-trigger";
+    roleTrigger.setAttribute("aria-haspopup", "listbox");
+    roleTrigger.setAttribute("aria-expanded", "false");
+    roleTrigger.setAttribute("aria-label", `设置 ${item.name || item.id} 的群组角色`);
+    roleTrigger.disabled = roleSelect.disabled;
+
+    const roleTriggerLabel = document.createElement("span");
+    roleTriggerLabel.className = "terminal-group-role-trigger-label";
+    roleTriggerLabel.textContent = (roleSelect.value === "super_admin" ? "👑 " : "") + (terminalGroupRoleLabel(roleSelect.value) || "执行者");
+    roleTrigger.appendChild(roleTriggerLabel);
+
+    const roleTriggerArrow = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    roleTriggerArrow.setAttribute("class", "terminal-group-role-trigger-arrow");
+    roleTriggerArrow.setAttribute("viewBox", "0 0 10 6");
+    roleTriggerArrow.setAttribute("aria-hidden", "true");
+    roleTriggerArrow.setAttribute("fill", "currentColor");
+    const roleTriggerArrowPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    roleTriggerArrowPath.setAttribute("d", "M0 0.5L5 5.5L10 0.5Z");
+    roleTriggerArrow.appendChild(roleTriggerArrowPath);
+    roleTrigger.appendChild(roleTriggerArrow);
+
+    roleTrigger.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+    });
+    roleTrigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleTerminalGroupRoleMenu(roleTrigger, roleSelect);
+    });
+
+    rolePicker.appendChild(roleSelect);
+    rolePicker.appendChild(roleTrigger);
+
     roleSelect.addEventListener("change", () => {
+      syncTerminalGroupRoleTrigger(roleSelect);
       enforceTerminalGroupManagerInvariant(roleSelect);
     });
     checkbox.addEventListener("change", () => {
       roleSelect.disabled = !checkbox.checked;
+      syncTerminalGroupRoleTrigger(roleSelect);
       enforceTerminalGroupManagerInvariant(null);
     });
-    option.appendChild(roleSelect);
+    option.appendChild(rolePicker);
+    const agentSpan = document.createElement("span");
+    agentSpan.className = "terminal-group-session-agent";
+    const agentLabel = resolveTerminalSessionAgentType(item);
+    agentSpan.textContent = agentLabel;
+    agentSpan.dataset.agent = agentLabel;
+    agentSpan.title = `智能体类型：${agentLabel}`;
+    option.appendChild(agentSpan);
     const nameSpan = document.createElement("span");
     nameSpan.className = "terminal-group-session-name";
-    nameSpan.textContent = item.id === session.id ? `${item.name}（当前终端）` : String(item.name || item.id);
+    nameSpan.textContent = String(item.name || item.id);
+    nameSpan.title = String(item.name || item.id);
     option.appendChild(nameSpan);
+    if (item.id === session.id) {
+      const currentBadge = document.createElement("span");
+      currentBadge.className = "terminal-group-current-badge";
+      currentBadge.textContent = "当前";
+      currentBadge.title = "当前所在终端";
+      option.appendChild(currentBadge);
+    }
     const renameButton = document.createElement("button");
     renameButton.type = "button";
     renameButton.className = "button secondary terminal-group-session-rename";
@@ -588,11 +849,31 @@ function renderTerminalGroupSessionList(session) {
       openTerminalGroupMemberRenameDialog(item.id);
     });
     option.appendChild(renameButton);
-    if (!!currentToken && item.id !== session.id && String(item.group_token || "") === currentToken) {
-      const marker = document.createElement("span");
-      marker.className = "terminal-group-session-marker";
-      marker.textContent = "已同组";
-      option.appendChild(marker);
+    const itemGroupToken = String(item.group_token || "").trim();
+    if (itemGroupToken && item.id !== session.id) {
+      if (currentToken && itemGroupToken === currentToken) {
+        const marker = document.createElement("span");
+        marker.className = "terminal-group-session-marker";
+        marker.textContent = "已同组";
+        option.appendChild(marker);
+      } else {
+        const marker = document.createElement("button");
+        marker.type = "button";
+        marker.className = "terminal-group-session-marker is-other-group";
+        const targetGroupName = currentTerminalGroupName(item) || "现有群组";
+        marker.textContent = `加入: ${targetGroupName}`;
+        marker.title = `点击将当前终端加入「${targetGroupName}」群组`;
+        const groupColor = currentTerminalGroupColor(item);
+        if (groupColor) {
+          marker.style.setProperty("--badge-group-color", groupColor);
+        }
+        marker.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          applyTerminalGroupJoinSelection(itemGroupToken, session);
+        });
+        option.appendChild(marker);
+      }
     }
     terminalGroupSessionListEl.appendChild(option);
   }
@@ -601,38 +882,48 @@ function renderTerminalGroupSessionList(session) {
   syncTerminalGroupOrderButtons(session);
 }
 
-// 勾选成员里始终保留一名管理者：把某行设为管理者时其余已勾选的管理者自动
-// 改为执行者；管理者被切换走或取消勾选时，优先提升当前终端，否则提升第一个
-// 已勾选成员。未勾选的行属于其他分组，角色值不会被改动。
+// 超级管理员拥有组内最高决策权；普通管理员可并存。每级最多一名，
+// 没有任何管理角色时才补普通管理员。只处理已勾选成员，不修改其他分组。
+function normalizeTerminalGroupLeadership(members, currentId, exclusiveId = "") {
+  for (const role of ["super_admin", "manager"]) {
+    const candidates = members.filter((member) => member.role === role);
+    const keep = candidates.find((member) => member.id === exclusiveId) || candidates[0];
+    for (const member of candidates) {
+      if (member !== keep) member.role = role === "super_admin" ? "manager" : "executor";
+    }
+  }
+  if (!members.some((member) => ["super_admin", "manager"].includes(member.role))) {
+    const designated = members.find((member) => terminalCollaborationRenameRole(member.name) === "普通管理员");
+    const fallback = designated || members.find((member) => member.id === currentId) || members[0];
+    if (fallback) fallback.role = "manager";
+  }
+}
+
 function enforceTerminalGroupManagerInvariant(exclusiveSelect) {
   if (!terminalGroupSessionListEl) return;
   const rows = Array.from(terminalGroupSessionListEl.querySelectorAll(".terminal-group-session-option"));
-  const checkedRows = rows.filter(
-    (row) => row.querySelector('input[type="checkbox"]')?.checked === true,
-  );
-  const checkedSelects = checkedRows
-    .map((row) => row.querySelector("select[data-role-for]"))
-    .filter(Boolean);
-  if (exclusiveSelect && exclusiveSelect.value === "manager") {
-    for (const select of checkedSelects) {
-      if (select !== exclusiveSelect && select.value === "manager") select.value = "executor";
-    }
-  }
-  if (!checkedSelects.some((select) => select.value === "manager")) {
-    const currentId = terminalGroupDialogEl?.dataset.sessionId || "";
-    const promote = checkedSelects.find((select) => select.dataset.roleFor === currentId)
-      || checkedSelects[0];
-    if (promote) promote.value = "manager";
-  }
+  const members = rows.filter((row) => row.querySelector('input[type="checkbox"]')?.checked === true)
+    .map((row) => {
+      const select = row.querySelector("select[data-role-for]");
+      return { id: select.dataset.roleFor, name: row.dataset.sessionName, role: select.value, select };
+    });
+  normalizeTerminalGroupLeadership(members, terminalGroupDialogEl?.dataset.sessionId || "", exclusiveSelect?.dataset.roleFor);
+  for (const member of members) member.select.value = member.role;
   for (const row of rows) {
     const checked = row.querySelector('input[type="checkbox"]')?.checked === true;
     const select = row.querySelector("select[data-role-for]");
-    row.classList.toggle("is-manager", Boolean(checked && select?.value === "manager"));
+    row.classList.toggle("is-manager", Boolean(checked && ["super_admin", "manager"].includes(select?.value)));
+    if (select) syncTerminalGroupRoleTrigger(select);
   }
 }
 
 function currentTerminalGroupColor(session) {
-  const normalizeColor = (globalThis.WebClxTerminalSessionActivity?.normalizeTerminalGroupColor || ((value) => String(value || "")))(
+  const activity = globalThis.WebClxTerminalSessionActivity;
+  if (activity?.terminalGroupColor && Array.isArray(state?.sessions)) {
+    const resolved = activity.terminalGroupColor(session, state.sessions);
+    if (resolved && resolved.startsWith("#")) return resolved;
+  }
+  const normalizeColor = (activity?.normalizeTerminalGroupColor || ((value) => String(value || "")))(
     session?.group_color || session?.groupColor,
   );
   return normalizeColor;
@@ -641,7 +932,11 @@ function currentTerminalGroupColor(session) {
 function syncTerminalGroupColorControls(session) {
   if (!terminalGroupColorEl || !terminalGroupColorValueEl || !session) return;
   const color = currentTerminalGroupColor(session);
-  terminalGroupColorEl.value = color || "#4f8cff";
+  const fallbackColor = (globalThis.WebClxTerminalSessionActivity?.defaultUnusedTerminalGroupColor || (() => "#4f8cff"))(
+    session,
+    state?.sessions,
+  );
+  terminalGroupColorEl.value = color || fallbackColor;
   terminalGroupColorValueEl.textContent = terminalGroupColorEl.value;
 }
 
@@ -682,6 +977,7 @@ function syncTerminalGroupSortTabs() {
 }
 
 function applyTerminalGroupSessionListOrder() {
+  closeTerminalGroupRoleMenu();
   const options = Array.from(terminalGroupSessionListEl.querySelectorAll(".terminal-group-session-option"));
   const sortMode = terminalGroupSessionListEl.dataset.sortMode || "";
   if (sortMode === "name-asc" || sortMode === "name-desc") {
@@ -735,6 +1031,310 @@ function moveTerminalGroupSession(direction) {
   syncTerminalGroupOrderButtons(session);
 }
 
+function getAvailableTerminalGroups(currentSessionId = "") {
+  const groupsByToken = new Map();
+  const all = Array.isArray(state?.sessions) ? state.sessions : [];
+  for (const item of all) {
+    const token = String(item.group_token || item.groupToken || "").trim();
+    if (!token) continue;
+    if (!groupsByToken.has(token)) {
+      groupsByToken.set(token, {
+        token,
+        name: "",
+        color: "",
+        fixedOrder: false,
+        members: [],
+      });
+    }
+    const group = groupsByToken.get(token);
+    if (!group.name) {
+      group.name = String(item.group_name || item.groupName || "").trim();
+    }
+    if (!group.color) {
+      const color = String(item.group_color || item.groupColor || "").trim();
+      if (/^#[0-9a-fA-F]{6}$/.test(color)) group.color = color.toLowerCase();
+    }
+    if (item.group_fixed_order) group.fixedOrder = true;
+    group.members.push(item);
+  }
+  return Array.from(groupsByToken.values())
+    .filter((group) => group.members.length >= 2)
+    .map((group) => {
+    const label = group.name || group.members.map((m) => m.name || m.id).slice(0, 3).join("、") || group.token;
+    return {
+      ...group,
+      label,
+      isCurrentGroup: group.members.some((m) => m.id === currentSessionId),
+    };
+  });
+}
+
+function renderTerminalGroupJoinControls(session) {
+  const joinContainer = document.getElementById("terminal-group-join-container");
+  const joinSelect = document.getElementById("terminal-group-join-select");
+  const joinButton = document.getElementById("terminal-group-join-button");
+  const joinRenameButton = document.getElementById("terminal-group-rename-button");
+  const joinHint = document.getElementById("terminal-group-join-hint");
+  if (!joinContainer || !joinSelect) return;
+
+  const currentToken = String(session?.group_token || "").trim();
+  const availableGroups = getAvailableTerminalGroups(session?.id);
+  const joinableGroups = availableGroups.filter((g) => g.members.some((m) => m.id !== session?.id));
+
+  if (joinableGroups.length === 0) {
+    joinContainer.hidden = true;
+    joinSelect.innerHTML = '<option value="">— 选择现有群组加入 —</option>';
+    if (joinButton) joinButton.disabled = true;
+    if (joinRenameButton) joinRenameButton.disabled = true;
+    if (joinHint) {
+      joinHint.textContent = "";
+      joinHint.hidden = true;
+    }
+    return;
+  }
+
+  joinContainer.hidden = false;
+  joinSelect.innerHTML = "";
+
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = currentToken
+    ? "— 保持当前编组或自定义选择 —"
+    : "— 选择现有群组加入（可选）—";
+  joinSelect.appendChild(defaultOption);
+
+  for (const group of joinableGroups) {
+    const option = document.createElement("option");
+    option.value = group.token;
+    const memberNames = group.members.map((m) => m.name || m.id).join("、");
+    const count = group.members.length;
+    const groupNameText = group.name ? `「${group.name}」` : "未命名群组";
+    option.textContent = `${groupNameText} (${count}人: ${memberNames})`;
+    if (currentToken && group.token === currentToken) {
+      option.selected = true;
+    }
+    joinSelect.appendChild(option);
+  }
+
+  if (joinButton) {
+    joinButton.disabled = !joinSelect.value;
+  }
+  if (joinRenameButton) {
+    joinRenameButton.disabled = !joinSelect.value;
+  }
+
+  if (joinHint) {
+    if (currentToken) {
+      const myGroup = availableGroups.find((g) => g.token === currentToken);
+      joinHint.textContent = myGroup?.name
+        ? `当前终端属于「${myGroup.name}」群组。可选择切换加入其他现有群组。`
+        : "当前终端已在编组中。可选择切换加入其他现有群组。";
+    } else {
+      joinHint.textContent = "当前终端尚未加入群组。选择上方已有群组可一键填入现有成员，保存后即可加入该群组。";
+    }
+    joinHint.hidden = false;
+  }
+
+  if (!joinSelect.dataset.bound) {
+    joinSelect.dataset.bound = "true";
+    joinSelect.addEventListener("change", () => {
+      if (joinButton) joinButton.disabled = !joinSelect.value;
+      if (joinRenameButton) joinRenameButton.disabled = !joinSelect.value;
+      const currentActive = terminalGroupDialogEl?.dataset.sessionId
+        ? (state?.sessions || []).find((s) => s.id === terminalGroupDialogEl.dataset.sessionId)
+        : activeSession();
+      if (currentActive) {
+        applyTerminalGroupJoinSelection(joinSelect.value, currentActive);
+      }
+    });
+  }
+}
+
+function applyTerminalGroupJoinSelection(token, session) {
+  if (!terminalGroupSessionListEl) return;
+  const joinSelect = document.getElementById("terminal-group-join-select");
+  const joinButton = document.getElementById("terminal-group-join-button");
+  const joinRenameButton = document.getElementById("terminal-group-rename-button");
+  const joinHint = document.getElementById("terminal-group-join-hint");
+  if (joinSelect && joinSelect.value !== token) {
+    joinSelect.value = token;
+  }
+  if (joinButton) {
+    joinButton.disabled = !token;
+  }
+  if (joinRenameButton) {
+    joinRenameButton.disabled = !token;
+  }
+
+  if (!token) {
+    const checkboxes = terminalGroupSessionListEl.querySelectorAll('input[type="checkbox"]');
+    checkboxes.forEach((cb) => {
+      const isCurrent = cb.value === session.id;
+      cb.checked = isCurrent;
+      const roleSelect = cb.closest(".terminal-group-session-option")?.querySelector("select[data-role-for]");
+      if (roleSelect) {
+        roleSelect.disabled = !isCurrent;
+        syncTerminalGroupRoleTrigger(roleSelect);
+      }
+    });
+    enforceTerminalGroupManagerInvariant(null);
+    if (joinHint) {
+      joinHint.textContent = "已恢复为自定义勾选状态。可在列表中手动勾选终端。";
+    }
+    return;
+  }
+
+  const availableGroups = getAvailableTerminalGroups(session.id);
+  const targetGroup = availableGroups.find((g) => g.token === token);
+  if (!targetGroup) return;
+
+  const targetMemberIds = new Set(targetGroup.members.map((m) => m.id));
+  targetMemberIds.add(session.id);
+
+  if (terminalGroupNameEl) {
+    terminalGroupNameEl.value = targetGroup.name || "";
+  }
+  if (terminalGroupColorEl) {
+    const color = targetGroup.color || currentTerminalGroupColor(targetGroup.members[0]) || "#4f8cff";
+    terminalGroupColorEl.value = color;
+    if (terminalGroupColorValueEl) terminalGroupColorValueEl.textContent = color;
+  }
+  if (terminalGroupFixedOrderEl) {
+    terminalGroupFixedOrderEl.checked = targetGroup.fixedOrder === true;
+  }
+
+  const rows = terminalGroupSessionListEl.querySelectorAll(".terminal-group-session-option");
+  rows.forEach((row) => {
+    const cb = row.querySelector('input[type="checkbox"]');
+    const roleSelect = row.querySelector("select[data-role-for]");
+    if (!cb || !roleSelect) return;
+
+    const isMember = targetMemberIds.has(cb.value);
+    cb.checked = isMember;
+    roleSelect.disabled = !isMember;
+
+    if (isMember) {
+      const existingMember = targetGroup.members.find((m) => m.id === cb.value);
+      if (existingMember) {
+        roleSelect.value = resolveTerminalGroupMemberInitialRole(
+          existingMember,
+          session,
+          state.sessions,
+          targetGroup.token,
+        );
+      } else if (cb.value === session.id) {
+        if (!roleSelect.value || roleSelect.value === "manager" || roleSelect.value === "super_admin") {
+          roleSelect.value = "executor";
+        }
+      }
+    }
+    syncTerminalGroupRoleTrigger(roleSelect);
+  });
+
+  enforceTerminalGroupManagerInvariant(null);
+  syncTerminalGroupOrderButtons(session);
+
+  const tokenDisplay = document.getElementById("terminal-group-token-display");
+  if (tokenDisplay) {
+    const groupNameText = targetGroup.name ? `「${targetGroup.name}」` : "所选群组";
+    tokenDisplay.textContent = `已载入现有群组${groupNameText}成员。当前终端将作为新成员加入该群组。`;
+    tokenDisplay.hidden = false;
+  }
+  updateTerminalGroupDialogStatus(
+    `已选定加入群组「${targetGroup.name || targetGroup.token}」（共 ${targetGroup.members.length + 1} 人）。核对角色后点击「保存编组」生效。`,
+    "ok",
+  );
+
+  if (joinHint) {
+    const groupNameText = targetGroup.name ? `「${targetGroup.name}」` : "所选";
+    joinHint.textContent = `已载入${groupNameText}群组全部成员（共 ${targetGroup.members.length} 人）。点击下方「保存编组」即可完成加入。`;
+    joinHint.hidden = false;
+  }
+}
+
+function applyJoinExistingGroup(token) {
+  const sessionId = terminalGroupDialogEl?.dataset.sessionId;
+  const currentActive = sessionId
+    ? (state?.sessions || []).find((s) => s.id === sessionId)
+    : activeSession();
+  if (currentActive) {
+    applyTerminalGroupJoinSelection(token, currentActive);
+  }
+}
+
+function handleTerminalGroupRenamePrompt(token) {
+  const sessionId = terminalGroupDialogEl?.dataset.sessionId;
+  const currentActive = sessionId
+    ? (state?.sessions || []).find((s) => s.id === sessionId)
+    : activeSession();
+  const selectedToken = token || document.getElementById("terminal-group-join-select")?.value;
+  if (!selectedToken) return;
+
+  const availableGroups = getAvailableTerminalGroups(currentActive?.id);
+  const targetGroup = availableGroups.find((g) => g.token === selectedToken);
+  if (!targetGroup) return;
+
+  if (currentActive) {
+    applyTerminalGroupJoinSelection(selectedToken, currentActive);
+  }
+
+  const currentGroupName = targetGroup.name || (terminalGroupNameEl ? terminalGroupNameEl.value.trim() : "");
+  const input = typeof window !== "undefined" && typeof window.prompt === "function"
+    ? window.prompt("为此群组命名或更名（留空表示清除名称）：", currentGroupName)
+    : null;
+
+  if (input === null) {
+    if (terminalGroupNameEl) {
+      terminalGroupNameEl.focus();
+      terminalGroupNameEl.select();
+    }
+    return;
+  }
+
+  const trimmed = input.trim();
+  if (terminalGroupNameEl) {
+    terminalGroupNameEl.value = trimmed;
+    terminalGroupNameEl.focus();
+    terminalGroupNameEl.select();
+  }
+
+  targetGroup.name = trimmed;
+  if (state?.sessions) {
+    state.sessions.forEach((s) => {
+      if (s.group_token === selectedToken) {
+        s.group_name = trimmed;
+      }
+    });
+  }
+
+  const joinSelect = document.getElementById("terminal-group-join-select");
+  if (joinSelect) {
+    const option = Array.from(joinSelect.options).find((opt) => opt.value === selectedToken);
+    if (option) {
+      const memberNames = targetGroup.members.map((m) => m.name || m.id).join("、");
+      const count = targetGroup.members.length;
+      const groupNameText = trimmed ? `「${trimmed}」` : "未命名群组";
+      option.textContent = `${groupNameText} (${count}人: ${memberNames})`;
+    }
+  }
+
+  const displayName = trimmed ? `「${trimmed}」` : "未命名";
+  const joinHint = document.getElementById("terminal-group-join-hint");
+  if (joinHint) {
+    joinHint.textContent = `已将群组命名为${displayName}。核对下方成员与角色后，点击「保存编组」生效。`;
+    joinHint.hidden = false;
+  }
+  updateTerminalGroupDialogStatus(
+    `已将群组命名为${displayName}。点击「保存编组」完成保存。`,
+    "ok",
+  );
+}
+
+if (typeof globalThis !== "undefined") {
+  globalThis.applyJoinExistingGroup = applyJoinExistingGroup;
+  globalThis.handleTerminalGroupRenamePrompt = handleTerminalGroupRenamePrompt;
+}
+
 function openTerminalGroupDialog() {
   const session = activeSession();
   if (!session || !terminalGroupDialogEl || !terminalGroupSessionListEl) {
@@ -751,6 +1351,7 @@ function openTerminalGroupDialog() {
     terminalGroupFixedOrderEl.checked = session.group_fixed_order === true;
   }
   syncTerminalGroupControls(session);
+  renderTerminalGroupJoinControls(session);
   const tokenDisplay = document.getElementById("terminal-group-token-display");
   if (tokenDisplay) {
     const currentToken = String(session.group_token || "");
@@ -770,6 +1371,7 @@ function openTerminalGroupDialog() {
 }
 
 function closeTerminalGroupDialog() {
+  closeTerminalGroupRoleMenu();
   if (terminalGroupDialogEl?.open) {
     terminalGroupDialogEl.close();
   } else if (terminalGroupDialogEl) {
@@ -777,6 +1379,17 @@ function closeTerminalGroupDialog() {
   }
   if (terminalGroupSessionListEl) {
     terminalGroupSessionListEl.textContent = "";
+  }
+  const joinContainer = document.getElementById("terminal-group-join-container");
+  if (joinContainer) joinContainer.hidden = true;
+  const joinSelect = document.getElementById("terminal-group-join-select");
+  if (joinSelect) joinSelect.value = "";
+  const joinButton = document.getElementById("terminal-group-join-button");
+  if (joinButton) joinButton.disabled = true;
+  const joinHint = document.getElementById("terminal-group-join-hint");
+  if (joinHint) {
+    joinHint.textContent = "";
+    joinHint.hidden = true;
   }
   const tokenDisplay = document.getElementById("terminal-group-token-display");
   if (tokenDisplay) {
@@ -796,7 +1409,8 @@ function closeTerminalGroupDialog() {
 
 function terminalCollaborationRenameRole(name) {
   const normalized = String(name || "").toLocaleLowerCase("zh-Hans-CN");
-  if (/(管理者|管理|计划者|manager|planner)/.test(normalized)) return "管理者";
+  if (/(超级管理员|super_admin)/.test(normalized)) return "超级管理员";
+  if (/(普通管理员|管理者|管理|计划者|manager|planner)/.test(normalized)) return "普通管理员";
   if (/(执行者|执行|executor|worker)/.test(normalized)) return "执行者";
   if (/(复核者|复核|reviewer)/.test(normalized)) return "复核者";
   return "";
@@ -804,17 +1418,19 @@ function terminalCollaborationRenameRole(name) {
 
 function terminalGroupRoleLabel(role) {
   const normalized = String(role || "").trim();
-  if (normalized === "manager" || normalized === "管理者") return "管理者";
+  if (["super_admin", "超级管理员"].includes(normalized)) return "超级管理员";
+  if (["manager", "普通管理员", "管理者"].includes(normalized)) return "普通管理员";
   if (normalized === "reviewer" || normalized === "复核者") return "复核者";
   if (normalized === "executor" || normalized === "执行者") return "执行者";
   return "";
 }
 
-// 后端把角色规范化成中文（管理者/执行者/复核者）存储，下拉框选项值用英文键；
+// 后端把角色规范化成中文（超级管理员/普通管理员/执行者/复核者）存储，下拉框选项值用英文键；
 // 回显和比较前先统一映射，避免持久化角色显示成空白。
 function terminalGroupRoleValue(role) {
   const normalized = String(role || "").trim().toLowerCase();
-  if (["manager", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
+  if (["super_admin", "超级管理员"].includes(normalized)) return "super_admin";
+  if (["manager", "普通管理员", "管理者", "管理", "计划者", "planner"].includes(normalized)) return "manager";
   if (["executor", "执行者", "执行", "worker"].includes(normalized)) return "executor";
   if (["reviewer", "复核者", "复核"].includes(normalized)) return "reviewer";
   return "";
@@ -866,6 +1482,119 @@ function normalizeTerminalManagerName(value) {
   return String(value || "").trim().replace(/_+$/u, "");
 }
 
+function terminalSessionRoleKey(role) {
+  const norm = String(role || "").trim().toLowerCase();
+  if (norm.includes("super_admin") || norm.includes("超级管理员")) return "super_admin";
+  if (norm.includes("manager") || norm.includes("普通管理员") || norm.includes("管理员")) return "manager";
+  if (norm.includes("reviewer") || norm.includes("复核者")) return "reviewer";
+  return "executor";
+}
+
+function terminalSessionsHaveCollaborationContact(sessionA, sessionB, allMembers = []) {
+  if (!sessionA || !sessionB || sessionA.id === sessionB.id) return false;
+  const roleA = terminalSessionRoleKey(sessionA.role || sessionA.group_role);
+  const roleB = terminalSessionRoleKey(sessionB.role || sessionB.group_role);
+
+  const hasSuperAdmin = allMembers.some((m) => terminalSessionRoleKey(m.role || m.group_role) === "super_admin");
+  const hasManager = allMembers.some((m) => terminalSessionRoleKey(m.role || m.group_role) === "manager");
+
+  // 如果组内无管理员（对等模式），所有成员互通
+  if (!hasSuperAdmin && !hasManager) {
+    return true;
+  }
+
+  // 如果只有超级管理员，没有普通管理员，则超级管理员与所有执行者互通；但两个执行者之间不互通
+  if (hasSuperAdmin && !hasManager) {
+    if (roleA === "super_admin" || roleB === "super_admin") return true;
+    return false;
+  }
+
+  // 标准层级：超级管理员(super_admin) <-> 普通管理员(manager) <-> 执行者(executor/reviewer)
+  // 超级管理员原则上只与管理员联系，不越级与执行者联系
+  if (roleA === "super_admin" || roleB === "super_admin") {
+    return roleA === "manager" || roleB === "manager";
+  }
+
+  // 普通管理员与执行者/复核者联系
+  if (roleA === "manager" || roleB === "manager") {
+    return true;
+  }
+
+  // 执行者之间无直接联系（执行者1跟2没联系，不相互通知）
+  return false;
+}
+
+function resolveTerminalGroupUpdateRecipients({
+  groupedMembers,
+  previousMembers,
+  previousGroupName,
+  groupName,
+}) {
+  const isNewGroup = previousMembers.length < 2 && groupedMembers.length >= 2;
+  // 初次建群时通知全组
+  if (isNewGroup) {
+    return groupedMembers;
+  }
+
+  const oldGroupName = String(previousGroupName || "").trim();
+  const newGroupName = String(groupName || "").trim();
+  const groupNameChanged = Boolean(oldGroupName !== newGroupName && (oldGroupName || newGroupName));
+  // 群组本身改名，通知组内全部成员
+  if (groupNameChanged) {
+    return groupedMembers;
+  }
+
+  const before = new Map(previousMembers.map((m) => [m.id, m]));
+  const added = groupedMembers.filter((m) => !before.has(m.id));
+  const changed = groupedMembers.filter((m) => {
+    const old = before.get(m.id);
+    if (!old) return false;
+    return old.role !== m.role;
+  });
+  const renamed = groupedMembers.filter((m) => {
+    const old = before.get(m.id);
+    if (!old) return false;
+    return (old.name || "") !== (m.name || "");
+  });
+
+  const recipientIds = new Set();
+
+  // 1. 新加入成员逻辑：
+  // "新加入执行者，只需要通知管理者，不需要通知其它执行者和超级管理员"
+  for (const newMember of added) {
+    const roleKey = terminalSessionRoleKey(newMember.role);
+    if (roleKey === "executor" || roleKey === "reviewer") {
+      // 仅通知管理者，排除其它执行者和超级管理员
+      for (const m of groupedMembers) {
+        if (terminalSessionRoleKey(m.role) === "manager") {
+          recipientIds.add(m.id);
+        } else if (terminalSessionRoleKey(m.role) === "super_admin" && !groupedMembers.some((g) => terminalSessionRoleKey(g.role) === "manager")) {
+          recipientIds.add(m.id);
+        }
+      }
+    } else {
+      // 若新加入的是管理员或超级管理员，按联系关系通知有联系的成员
+      for (const m of groupedMembers) {
+        if (m.id === newMember.id || terminalSessionsHaveCollaborationContact(newMember, m, groupedMembers)) {
+          recipientIds.add(m.id);
+        }
+      }
+    }
+  }
+
+  // 2. 更名或角色变更逻辑：
+  // "终端更名只通知跟它有联系的终端，比如执行者1跟2没联系，则不需要相互通知"
+  for (const item of [...renamed, ...changed]) {
+    for (const m of groupedMembers) {
+      if (m.id === item.id || terminalSessionsHaveCollaborationContact(item, m, groupedMembers)) {
+        recipientIds.add(m.id);
+      }
+    }
+  }
+
+  return groupedMembers.filter((m) => recipientIds.has(m.id));
+}
+
 async function submitTerminalGroupManagerRename(event) {
   event.preventDefault();
   const sessionId = terminalGroupManagerDialog?.dataset.sessionId;
@@ -880,9 +1609,9 @@ async function submitTerminalGroupManagerRename(event) {
     return;
   }
   const currentToken = String(session.group_token || "");
-  const others = state.sessions.filter((item) => item.id !== session.id
-    && currentToken
-    && String(item.group_token || "") === currentToken);
+  const allGroupMembers = state.sessions.filter((item) =>
+    currentToken && String(item.group_token || "") === currentToken
+  );
   const previousName = session.name;
   updateTerminalGroupManagerStatus("正在保存终端名…", "info");
   try {
@@ -894,8 +1623,12 @@ async function submitTerminalGroupManagerRename(event) {
     state.sessions = state.sessions.map((item) => (item.id === renamed.id ? renamed : item));
     renderSessions();
     const groupName = currentTerminalGroupName(renamed) || currentToken || "terminal-group";
-    if (others.length) {
-      Promise.all(others.map((member) => terminalGroupNotifyDelivery(member.id, {
+    // 终端更名只通知跟它有联系的终端，比如执行者1跟2没联系，则不需要相互通知
+    const contactTargets = allGroupMembers.filter((item) =>
+      item.id !== session.id && terminalSessionsHaveCollaborationContact(renamed, item, allGroupMembers)
+    );
+    if (contactTargets.length) {
+      Promise.all(contactTargets.map((member) => terminalGroupNotifyDelivery(member.id, {
         target: member.id,
         data: `[系统消息][群组:${groupName}] 成员终端已改名：「${previousName}」→「${renamed.name}」。`,
         submit: true,
@@ -916,11 +1649,11 @@ async function submitTerminalGroupManagerRename(event) {
       const nameSpan = row.querySelector(".terminal-group-session-name");
       const currentId = groupSessionId;
       if (nameSpan) {
-        nameSpan.textContent = renamed.id === currentId
-          ? `${renamed.name}（当前终端）`
-          : String(renamed.name || renamed.id);
+        nameSpan.textContent = String(renamed.name || renamed.id);
+        nameSpan.title = String(renamed.name || renamed.id);
       }
       row.dataset.sessionName = String(renamed.name || renamed.id);
+      row.title = String(renamed.name || renamed.id);
     }
     if (groupSessionId) {
       const groupSession = state.sessions.find((item) => item.id === groupSessionId);
@@ -945,6 +1678,7 @@ function terminalGroupChangeBrief(
   previousNames,
   nextNames,
   groupName,
+  previousGroupName = "",
 ) {
   const before = new Map(previousMembers.map((member) => [member.id, member]));
   const after = new Map(nextMembers.map((member) => [member.id, member]));
@@ -956,8 +1690,27 @@ function terminalGroupChangeBrief(
     return old.role !== member.role
       || (previousNames.get(member.id) || "") !== (nextNames.get(member.id) || "");
   });
-  if (!added.length && !removed.length && !changed.length) return "";
-  const lines = [`[系统消息][群组更新:${groupName || "terminal-group"}] 成员、终端名或角色已更新。`];
+  const oldGroupName = String(previousGroupName || "").trim();
+  const newGroupName = String(groupName || "").trim();
+  const groupNameChanged = Boolean(oldGroupName !== newGroupName && (oldGroupName || newGroupName));
+
+  if (!added.length && !removed.length && !changed.length && !groupNameChanged) return "";
+
+  // 纯群组改名通知（无增减员及角色变动）
+  if (!added.length && !removed.length && !changed.length && groupNameChanged) {
+    const nameDesc = oldGroupName && newGroupName
+      ? `「${oldGroupName}」→「${newGroupName}」`
+      : (newGroupName ? `为「${newGroupName}」` : `已清除（原名「${oldGroupName}」）`);
+    return `[系统消息][群组更新:${newGroupName || oldGroupName || "terminal-group"}] 群组名称已更新${nameDesc}。此消息已发送给你和当前合作方，用于避免误解；无需立即回复。`;
+  }
+
+  const lines = [`[系统消息][群组更新:${newGroupName || "terminal-group"}] 成员、终端名或角色已更新。`];
+  if (groupNameChanged) {
+    const nameDesc = oldGroupName && newGroupName
+      ? `「${oldGroupName}」→「${newGroupName}」`
+      : (newGroupName ? `「${newGroupName}」` : `已清除`);
+    lines.push(`群组名称：${nameDesc}。`);
+  }
   if (added.length) {
     lines.push(`新成员：${added.map((member) => `「${member.name}」(${terminalGroupRoleLabel(member.role) || "未指定"})`).join("、")}`);
   }
@@ -989,7 +1742,7 @@ async function scheduleTerminalCollaborationRenameNotice(session) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       target: session.id,
-      data: `[协作] 你已改名为「${session.name}」，当前角色是${role}。开始工作前先阅读协作工作须知，并用终端定时消息流程与搭档确认。协作消息一律通过 /api/terminal/scheduled-inputs 设置未来短延时发送（实时消息也延迟数秒），不得同步等待投递返回；排程成功不等于接收，以对方定时 ACK 或原生记录确认，不重复发送正文。`,
+      data: `[协作] 你已改名为「${session.name}」，当前角色是${role}。开始工作前先用 $webclx-terminal-collaboration 技能读取工作须知，并用 webclx-terminal-message 技能的定时消息流程与搭档确认。协作消息一律通过 /api/terminal/scheduled-inputs 设置未来短延时发送（实时消息也延迟数秒），不得同步等待投递返回；排程成功不等于接收，以对方定时 ACK 或原生记录确认，不重复发送正文。`,
       submit: true,
       submit_enters: 1,
       bracketed_paste: true,
@@ -1003,6 +1756,8 @@ function dispatchTerminalGroupNotifications({
   sessionId,
   groupedMembers,
   previousMembers,
+  previousGroupName,
+  groupName,
   executors,
   updateNotice,
   brief,
@@ -1013,11 +1768,14 @@ function dispatchTerminalGroupNotifications({
   const promise = (async () => {
     try {
       if (updateNotice) {
-        const current = groupedMembers.find((member) => member.id === sessionId);
-        const partners = groupedMembers.filter((member) => member.id !== sessionId);
-        const removedPartners = previousMembers.filter((member) => member.id !== sessionId
-          && !groupedMembers.some((next) => next.id === member.id));
-        const updateOutcomes = await Promise.all([current, ...partners, ...removedPartners].filter(Boolean).map(
+        // 群组更新广播严格只发送给有联系的目标成员（新执行者仅通知管理者，不通知其它执行者和超级管理）
+        const targetMembers = resolveTerminalGroupUpdateRecipients({
+          groupedMembers,
+          previousMembers,
+          previousGroupName,
+          groupName,
+        });
+        const updateOutcomes = await Promise.all(targetMembers.map(
           (member) => terminalGroupNotifyDelivery(member.id, {
             target: member.id,
             data: updateNotice,
@@ -1075,15 +1833,44 @@ async function saveTerminalGroupToken() {
   if (!sessionId || !terminalGroupSessionListEl) return;
   const memberIds = selectedTerminalGroupMembers();
   const roleAssignments = selectedTerminalGroupRoles();
-  const previousMembers = state.sessions
-    .filter((session) => session.group_token
-      && session.group_token === (state.sessions.find((item) => item.id === sessionId)?.group_token || ""))
-    .map((member) => ({
-      id: member.id,
-      name: member.name || member.id,
-      role: terminalGroupRoleValue(member.group_role)
-        || (member.id === sessionId ? "manager" : "executor"),
-    }));
+  const currentSession = state.sessions.find((item) => item.id === sessionId);
+  const currentToken = String(currentSession?.group_token || "").trim();
+
+  // 精准识别基准群组 token，避免将独立终端或迁入终端误作为基准导致把其他群组当作旧成员广播
+  const selectedJoinToken = document.getElementById("terminal-group-join-select")?.value?.trim();
+  let baseToken = "";
+  if (selectedJoinToken) {
+    baseToken = selectedJoinToken;
+  } else {
+    const tokenCounts = {};
+    for (const id of memberIds) {
+      const s = state.sessions.find((item) => item.id === id);
+      const tok = String(s?.group_token || "").trim();
+      if (tok) {
+        tokenCounts[tok] = (tokenCounts[tok] || 0) + 1;
+      }
+    }
+    const sortedTokens = Object.keys(tokenCounts).sort((a, b) => tokenCounts[b] - tokenCounts[a]);
+    if (currentToken && memberIds.includes(sessionId) && sortedTokens.includes(currentToken)) {
+      baseToken = currentToken;
+    } else if (sortedTokens.length > 0) {
+      baseToken = sortedTokens[0];
+    }
+  }
+
+  let previousMembers = [];
+  if (baseToken) {
+    previousMembers = state.sessions
+      .filter((session) => session.group_token && session.group_token === baseToken)
+      .map((member) => ({
+        id: member.id,
+        name: member.name || member.id,
+        role: terminalGroupRoleValue(member.group_role)
+          || terminalGroupRoleValue(terminalCollaborationRenameRole(member.name))
+          || (member.id === sessionId ? "manager" : "executor"),
+      }));
+  }
+
   const previousNames = new Map(previousMembers.map((member) => [member.id, member.name]));
   const groupedMembers = memberIds
     .map((id) => state.sessions.find((item) => item.id === id))
@@ -1093,22 +1880,14 @@ async function saveTerminalGroupToken() {
       name: member.name || member.id,
       role: roleAssignments.find((assignment) => assignment.session_id === member.id)?.role || "",
     }));
-  // 每组只保留一名管理者：重复指定时以列表顺序第一个为准，其余降级为执行者；
-  // 无人被指定时默认当前终端为管理者。
-  let hasManager = false;
-  for (const member of groupedMembers) {
-    if (member.role === "manager") {
-      if (hasManager) member.role = "executor";
-      else hasManager = true;
-    }
-  }
-  if (!hasManager && groupedMembers.length > 0) {
-    const fallback = groupedMembers.find((member) => member.id === sessionId) || groupedMembers[0];
-    fallback.role = "manager";
-  }
-  const manager = groupedMembers.find((member) => member.role === "manager");
+  normalizeTerminalGroupLeadership(groupedMembers, sessionId);
+  const manager = groupedMembers.find((member) => member.role === "super_admin")
+    || groupedMembers.find((member) => member.role === "manager");
   const executors = groupedMembers.filter((member) => member !== manager);
-  const groupName = terminalGroupNameEl?.value.trim() || "";
+  const baseSession = baseToken ? state.sessions.find((s) => s.group_token === baseToken && s.group_name) : null;
+  const previousGroupName = String(baseSession?.group_name || currentSession?.group_name || "").trim();
+  const nextGroupName = terminalGroupNameEl ? terminalGroupNameEl.value.trim() : previousGroupName;
+  const groupName = nextGroupName || previousGroupName || "";
   terminalGroupSaving = true;
   const submit = terminalGroupFormEl.querySelector('[type="submit"]');
   submit.disabled = true;
@@ -1136,14 +1915,20 @@ async function saveTerminalGroupToken() {
       previousNames,
       nextNames,
       groupName,
+      previousGroupName,
     );
+
+    // 仅在初次组建群组时发送协作建队提示，已有群组加入新成员不再全组重发建队提示（避免骚扰已有执行者）
+    const isNewGroupCreation = previousMembers.length < 2 && groupedMembers.length >= 2;
+    const shouldSendBrief = isNewGroupCreation && Boolean(manager && executors.length > 0);
+
     let brief = "";
-    if (manager && executors.length > 0) {
+    if (shouldSendBrief) {
       const skillName = "webclx-terminal-collaboration";
       const task = [
         "这是群组建队提示，不是新任务授权。",
         "先读取角色/搭档/群组信息和 $webclx-terminal-collaboration 工作须知；",
-        "除非管理者随后下发明确任务，否则保持只读待命，不改动文件、不部署、不新建工作流。",
+        "除非超级管理员或普通管理员随后下发明确任务，否则保持只读待命，不改动文件、不部署、不新建工作流。",
       ].join(" ");
       brief = terminalCollaborationBrief({
         manager,
@@ -1166,6 +1951,8 @@ async function saveTerminalGroupToken() {
         sessionId,
         groupedMembers,
         previousMembers,
+        previousGroupName,
+        groupName,
         executors,
         updateNotice,
         brief,
@@ -1317,6 +2104,38 @@ function refreshTerminalViewportLayout({ fit = true, requireConnected = false } 
 // terminal.js 在本脚本之后才求值，这里不能引用它的 const，只能查 DOM；
 // 无 DOM 的测试沙箱（如 terminal-deleted-session-reconnect）直接跳过绑定。
 if (typeof document !== "undefined") {
+  document.addEventListener("pointerdown", (event) => {
+    if (!roleMenuEl || roleMenuEl.hidden) return;
+    if (roleMenuEl.contains(event.target)) return;
+    if (activeRoleMenuTrigger && activeRoleMenuTrigger.contains(event.target)) return;
+    closeTerminalGroupRoleMenu();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && roleMenuEl && !roleMenuEl.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeTerminalGroupRoleMenu({ restoreFocus: true });
+    }
+  });
+
+  const sessionListEl = document.getElementById("terminal-group-session-list");
+  if (sessionListEl) {
+    sessionListEl.addEventListener("scroll", () => {
+      if (roleMenuEl && !roleMenuEl.hidden) {
+        closeTerminalGroupRoleMenu();
+      }
+    }, { passive: true });
+  }
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("resize", () => {
+      if (roleMenuEl && !roleMenuEl.hidden) {
+        closeTerminalGroupRoleMenu();
+      }
+    });
+  }
+
   const terminalGroupManagerFormEl = document.getElementById("terminal-group-manager-form");
   if (terminalGroupManagerFormEl) {
     terminalGroupManagerFormEl.addEventListener("submit", submitTerminalGroupManagerRename);
@@ -1325,4 +2144,23 @@ if (typeof document !== "undefined") {
   if (terminalGroupManagerCancelButtonEl) {
     terminalGroupManagerCancelButtonEl.addEventListener("click", closeTerminalGroupManagerDialog);
   }
+}
+
+if (typeof module === "object" && module.exports) {
+  module.exports = {
+    terminalCollaborationRenameRole,
+    terminalGroupRoleLabel,
+    terminalGroupRoleValue,
+    normalizeTerminalGroupLeadership,
+    resolveTerminalGroupMemberInitialRole,
+    getAvailableTerminalGroups,
+    renderTerminalGroupJoinControls,
+    applyTerminalGroupJoinSelection,
+    applyJoinExistingGroup,
+    handleTerminalGroupRenamePrompt,
+    terminalGroupChangeBrief,
+    terminalSessionRoleKey,
+    terminalSessionsHaveCollaborationContact,
+    resolveTerminalGroupUpdateRecipients,
+  };
 }

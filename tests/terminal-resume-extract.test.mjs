@@ -14,6 +14,23 @@ const {
 } = require("../static/terminal-resume-extract.js");
 
 const resumeId = "019d1ba6-f772-7452-a391-6553ccbc0a50";
+for (const flag of ["--session ", "--session=", "-s "]) {
+  assert.deepEqual(extractLatestResumeInfo(`codearts ${flag}ses_codearts123`), { id: "ses_codearts123", program: "codearts" });
+  assert.equal(extractLatestResumeCommand(`codearts ${flag}ses_codearts123`), "codearts --session ses_codearts123");
+}
+for (const flag of ["--resume ", "--resume=", "-r "]) {
+  assert.deepEqual(extractLatestResumeInfo(`qodercli ${flag}ses_qoder123`), { id: "ses_qoder123", program: "qoder" });
+  assert.equal(extractLatestResumeCommand(`qodercli ${flag}ses_qoder123`), "qodercli --resume ses_qoder123");
+}
+assert.deepEqual(extractLatestResumeInfo("qoderclicn --resume ses_cn456"), { id: "ses_cn456", program: "qoderclicn" });
+assert.equal(extractLatestResumeCommand("qoderclicn --resume ses_cn456"), "qoderclicn --resume ses_cn456");
+assert.deepEqual(extractLatestResumeInfo("devin -r quiet-river\nqodercli -r ses_qoder123"), { id: "ses_qoder123", program: "qoder" });
+assert.deepEqual(extractLatestResumeInfo(`codex resume ${resumeId}\nqodercli --resume ses_qoder123`), { id: "ses_qoder123", program: "qoder" });
+assert.deepEqual(extractLatestResumeInfo(`qodercli --resume ses_qoder123\ncodex resume ${resumeId}`), { id: resumeId, program: "codex" });
+assert.deepEqual(extractLatestResumeInfo("devin -r quiet-river\ncodearts --session ses_codearts123"), { id: "ses_codearts123", program: "codearts" });
+assert.deepEqual(extractLatestResumeInfo("codearts --session ses_codearts123\nopencode --session ses_other"), { id: "ses_other", program: "opencode" });
+assert.deepEqual(extractLatestResumeInfo(`codex resume ${resumeId}\ncodearts --session ses_codearts123`), { id: "ses_codearts123", program: "codearts" });
+assert.deepEqual(extractLatestResumeInfo(`codearts --session ses_codearts123\ncodex resume ${resumeId}`), { id: resumeId, program: "codex" });
 const laterResumeId = "019d2091-73ef-7522-a073-e5a4b8195fe7";
 const selectResumeId = "019f741e-6bb4-7a03-ac43-80226f0aaced";
 const selectResumePrompt = [
@@ -265,6 +282,7 @@ const agyCommand = `agy --conversation=${agyId}`;
 for (const prompt of [
   agyCommand,
   `Resume with: agy --conversation="${agyId}"`,
+  `Resume with -c (or command below):\nagy --conversation=${agyId}`,
   `agy --conversation ${agyId}`,
   "agy --conversation=056e1735-a2a8-4a4b-ac05-86a7\n7528e643",
 ]) {
@@ -567,10 +585,34 @@ assert.equal(
 );
 
 const sentResumeCommands = [];
+const sentContinueUrls = [];
 const resumeAgentSandbox = vm.createContext({
   console,
+  setInterval,
+  clearInterval,
   terminalResumeExtract: require("../static/terminal-resume-extract.js"),
   readTerminalBufferTailText: () => devinCompactOutput,
+  // The resume screen never changes in this fixture, so the readiness detector
+  // reports ready on the first poll and the continue call is observable.
+  readTerminalBufferTailTextFrom: () => devinCompactOutput,
+  state: { activeSessionId: "s1" },
+  activeTerminalContext: { sessionId: "s1", term: {} },
+  WebClxTerminalResumeReady: {
+    RESUME_SCAN_LINES: 80,
+    RESUME_READY_SETTLE_MS: 0,
+    RESUME_READY_TIMEOUT_MS: 200,
+    RESUME_READY_POLL_MS: 5,
+    terminalResumeAgentKind: () => "devin",
+    // Devin has no stable ready marker, so the action must not follow the
+    // resume with an unverified "继续".
+    terminalResumeAgentReady: () => false,
+    terminalResumeAgentWorking: () => false,
+    terminalResumeShellReturned: () => false,
+  },
+  requestJson: async (url) => {
+    sentContinueUrls.push(url);
+    return { ok: true };
+  },
   ensureTerminalReadyForInput: () => true,
   mobileKeySendQueue: Promise.resolve(),
   sendTerminalAutoTypedInput: async (command) => {
@@ -593,4 +635,9 @@ assert.deepEqual(
   sentResumeCommands,
   [devinCommand],
   "the extract_resume action should auto-type the Devin resume command from the compact output",
+);
+assert.deepEqual(
+  sentContinueUrls,
+  [],
+  "an agent without a verifiable ready marker must not be followed by an automatic 继续",
 );

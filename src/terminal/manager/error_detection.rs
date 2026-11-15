@@ -7,6 +7,10 @@ use super::super::tmux::capture_tmux_text_pane_snapshot;
 
 const NONFATAL_MCP_STARTUP_SUMMARY: &str = "mcp startup incomplete";
 
+/// Codex 预设识别扫描的行数：完成行与底部信息行都落在 composer 上方，
+/// 12 行足以覆盖二者，又不会读到更早的历史 turn。
+const TERMINAL_CODEX_PRESET_LINE_LIMIT: usize = 20;
+
 #[derive(Clone)]
 pub(in crate::terminal) struct TerminalErrorKeywordMatch {
     pub(in crate::terminal) keyword: String,
@@ -266,10 +270,19 @@ pub(in crate::terminal) fn terminal_cline_idle_prompt_from_snapshot(
 
 #[cfg_attr(test, allow(dead_code))]
 pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool {
-    for line in tail.lines().rev() {
-        if line_is_completion_status(line) {
+    let clean_tail = strip_codex_composer_tail(tail);
+    let lines: Vec<&str> = clean_tail.lines().collect();
+    // “✔ Worked for …” 之后的内容是新 turn 的提交/草稿或总结尾巴，
+    // 不能再用老 spinner 或引用文本把已完成终端判回工作中。
+    let last_completion = lines
+        .iter()
+        .rposition(|line| line_is_completion_status(line));
+    let last_content_index = lines.iter().rposition(|line| !line.trim().is_empty());
+    for (index, line) in lines.iter().enumerate().rev() {
+        if Some(index) == last_completion {
             return false;
         }
+        let after_completion = last_completion.is_some_and(|completion| index > completion);
         if line_is_codex_working_status(line) {
             return true;
         }
@@ -277,10 +290,100 @@ pub(in crate::terminal) fn terminal_tail_has_working_status(tail: &str) -> bool 
             continue;
         }
         if line_is_claude_working_spinner(line) || line_is_agy_working_status(line) {
-            return true;
+            if !after_completion || line_carries_live_elapsed(line) {
+                return true;
+            }
+            continue;
+        }
+        if line_is_submitted_user_prompt(line) {
+            if !after_completion {
+                return true;
+            }
+            // 完成行之后的 “> …” 多为输入框草稿（带发送提示）；只有真正提交的
+            // 最后一行才算新 turn 开始。
+            if !line_is_composer_draft(line) && Some(index) == last_content_index {
+                return true;
+            }
         }
     }
     false
+}
+
+/// 状态行自带耗时或 esc 提示，说明它是当前活动行而不是历史记录。
+fn line_carries_live_elapsed(line: &str) -> bool {
+    let trimmed = line.trim();
+    let normalized = trimmed.to_lowercase();
+    if normalized.contains("esc to interrupt") || normalized.contains("esc to cancel") {
+        return true;
+    }
+    trailing_parenthetical(trimmed).is_some_and(|detail| {
+        detail
+            .split(['•', '·'])
+            .any(|part| looks_like_elapsed_duration(part.trim()))
+    })
+}
+
+/// 输入框草稿行（右侧带 “↵ send / ⏎ send” 提示），不是已提交消息。
+fn line_is_composer_draft(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.contains('↵') || trimmed.contains('⏎')
+}
+
+/// Codex（所有模型）都会在当前 turn 结束时于 composer 上方打印完成行，
+/// 例如 `Worked for 48s • 11:44 PM`。部分 provider（GLM-5.3）运行期间不渲染
+/// `Working (… • esc to interrupt)` 行，画面只剩流式消息 + composer，于是
+/// working 判定为空，长工具调用期间被误判为空闲。预设：Codex 面板缺少该
+/// 完成行时按“工作中”处理。
+pub(in crate::terminal) fn terminal_tail_is_codex_turn_in_progress(
+    tail: &str,
+    codex_agent: bool,
+) -> bool {
+    let mut looks_like_codex = codex_agent;
+    let mut finished_turn = false;
+    for line in tail.lines().rev().take(TERMINAL_CODEX_PRESET_LINE_LIMIT) {
+        if line_is_codex_worked_for_status(line) || line_is_codex_recap_summary(line) {
+            finished_turn = true;
+        } else if line_is_codex_context_footer(line) {
+            looks_like_codex = true;
+        }
+    }
+    looks_like_codex && !finished_turn
+}
+
+pub(in crate::terminal) fn terminal_codex_turn_in_progress_from_snapshot(
+    snapshot: &[u8],
+    line_limit: u32,
+    codex_agent: bool,
+) -> bool {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    terminal_tail_is_codex_turn_in_progress(&tail, codex_agent)
+}
+
+/// Codex 在完成后打印的收尾摘要：`↳ Recap: …`。它出现在 `Worked for` 之后，
+/// 长摘要会把 Worked 行挤出窗口，因此 Recap 本身也必须终止“工作中”判定。
+fn line_is_codex_recap_summary(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("↳ Recap:")
+        || trimmed.starts_with("↳ Recap：")
+        || trimmed.to_lowercase().starts_with("recap:")
+}
+
+fn line_is_codex_worked_for_status(line: &str) -> bool {
+    let trimmed = line
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphanumeric());
+    let Some(rest) = trimmed.strip_prefix("Worked for ") else {
+        return false;
+    };
+    rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+}
+
+/// Codex 的底部信息行：`GLM-5.3 xhigh · Context 4% used · Standard`。
+/// 其他 agent 的上下文提示是 `Context left until auto-compact`，不含 `% used`。
+fn line_is_codex_context_footer(line: &str) -> bool {
+    let normalized = line.trim().to_lowercase();
+    normalized.contains("context ") && normalized.contains("% used")
 }
 
 fn line_is_codex_working_status(line: &str) -> bool {
@@ -299,8 +402,20 @@ fn line_is_codex_working_status(line: &str) -> bool {
 }
 
 #[cfg_attr(test, allow(dead_code))]
+/// 压缩中只在“贴底”的位置才算实时状态：压缩行一旦被后续输出顶上去，
+/// 说明压缩已经结束、终端早已继续工作，不能再显示压缩中。
+const TERMINAL_COMPACTING_TAIL_ROWS: usize = 6;
+
 pub(in crate::terminal) fn terminal_tail_has_compacting_status(tail: &str) -> bool {
-    for line in tail.lines().rev() {
+    let rows: Vec<&str> = tail
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    for (offset, line) in rows.iter().rev().enumerate() {
+        if offset >= TERMINAL_COMPACTING_TAIL_ROWS {
+            return false;
+        }
         if line_is_compact_completion_status(line) {
             return false;
         }
@@ -317,8 +432,9 @@ pub(in crate::terminal) fn terminal_tail_has_compacting_status(tail: &str) -> bo
 }
 
 fn line_is_compacting_status(line: &str) -> bool {
-    let normalized = line.trim().to_lowercase();
-    [
+    let trimmed = line.trim();
+    let normalized = trimmed.to_lowercase();
+    let has_marker = [
         "compacting context",
         "compacting conversation",
         "compacting history",
@@ -326,7 +442,23 @@ fn line_is_compacting_status(line: &str) -> bool {
         "压缩上下文",
     ]
     .iter()
-    .any(|marker| normalized.contains(marker))
+    .any(|marker| normalized.contains(marker));
+    if !has_marker {
+        return false;
+    }
+    // 只认真实状态行：带 esc 提示、带耗时括号、带 spinner 前缀，或本身就很短。
+    // 聊天记录里复述“正在压缩中”等长句、引用块不算压缩进行中。
+    let short_status_row =
+        trimmed.chars().count() <= 32 && !trimmed.starts_with(['-', '>', '│', '|', '›', '•']);
+    normalized.contains("esc to interrupt")
+        || normalized.contains("esc to cancel")
+        || trailing_parenthetical(trimmed).is_some_and(|detail| {
+            detail
+                .split(['•', '·'])
+                .any(|part| looks_like_elapsed_duration(part.trim()))
+        })
+        || line_has_claude_status_prefix(trimmed)
+        || short_status_row
 }
 
 fn line_is_compact_completion_status(line: &str) -> bool {
@@ -340,6 +472,99 @@ fn line_is_compact_completion_status(line: &str) -> bool {
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
+}
+
+/// 从 Codex/GLM 页脚 `GPT-6.1-Sol xhigh · Context 11% used · Standard`
+/// 提取归一化模型关键词（如 `gpt-6-1-sol`），用于按模型覆盖阈值。
+pub(in crate::terminal) fn terminal_snapshot_compact_model_key(
+    snapshot: &[u8],
+    line_limit: u32,
+) -> Option<String> {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    tail.lines().rev().find_map(|line| {
+        if !line.to_lowercase().contains("% used") {
+            return None;
+        }
+        let segment = line.split('·').next()?.trim();
+        let mut words: Vec<&str> = segment.split_whitespace().collect();
+        if words.last().is_some_and(|word| is_model_effort_token(word)) {
+            words.pop();
+        }
+        let model = words.join(" ");
+        (!model.is_empty()).then(|| crate::terminal::normalize_auto_compact_model_key(&model))
+    })
+}
+
+fn is_model_effort_token(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "xhigh" | "high" | "medium" | "low" | "minimal" | "max" | "standard" | "fast" | "none"
+    )
+}
+
+/// 从 pane 底部读取“已用上下文百分比”。
+///
+/// 支持 Codex/GLM 的 `· Context 51% used ·` 与 Claude 的
+/// `Context left until auto-compact: 23%`（后者换算成已用 77%）。
+pub(in crate::terminal) fn terminal_snapshot_context_percent_used(
+    snapshot: &[u8],
+    line_limit: u32,
+) -> Option<u32> {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    tail.lines().rev().find_map(|line| {
+        let lower = line.to_lowercase();
+        context_percent_used_in(&lower).or_else(|| context_percent_left_in(&lower))
+    })
+}
+
+fn context_percent_used_in(line: &str) -> Option<u32> {
+    // 只认 Codex/GLM 的页脚片段 "· Context 51% used ·"，
+    // 避免聊天记录里提到 "Context 51% used" 时误判当前占用。
+    if !line.contains("· context ") {
+        return None;
+    }
+    let tokens: Vec<&str> = line
+        .split(|c: char| c.is_whitespace() || c == '·' || c == ',' || c == '|')
+        .filter(|token| !token.is_empty())
+        .collect();
+    for window in tokens.windows(2) {
+        if !window[1].starts_with("used") {
+            continue;
+        }
+        let Some(value) = window[0].strip_suffix('%') else {
+            continue;
+        };
+        if let Ok(percent) = value.parse::<u32>() {
+            return Some(percent.min(100));
+        }
+    }
+    None
+}
+
+fn context_percent_left_in(line: &str) -> Option<u32> {
+    let marker = "left until auto-compact";
+    if !line.contains(marker) {
+        return None;
+    }
+    let (_, rest) = line.split_once(':')?;
+    let value = rest.trim().trim_end_matches('%').trim();
+    value
+        .parse::<u32>()
+        .ok()
+        .map(|left| 100u32.saturating_sub(left.min(100)))
+}
+
+/// 最近输出里是否带有压缩完成标记（`Context compacted` 等）。
+/// 服务端自动压缩据此跳过刚压缩过的终端，避免同一段上下文被重复压缩。
+pub(in crate::terminal) fn terminal_snapshot_has_compact_completion(
+    snapshot: &[u8],
+    line_limit: u32,
+) -> bool {
+    let text = String::from_utf8_lossy(snapshot);
+    let tail = terminal_tail_lines(&text, line_limit);
+    tail.lines().any(line_is_compact_completion_status)
 }
 
 fn line_is_newer_turn_status(line: &str) -> bool {
@@ -424,6 +649,24 @@ fn line_is_agy_working_status(line: &str) -> bool {
     }
     let normalized = trim_terminal_status_line_prefix(trimmed).to_lowercase();
     if normalized == "esc to cancel" || normalized == "press esc to interrupt generation." {
+        return true;
+    }
+    // Native AGY puts the selected model on the same footer row. It may
+    // also render a braille progress row with the cancellation hint inline.
+    if normalized
+        .strip_prefix("esc to cancel")
+        .is_some_and(|model| {
+            let model = model.trim_start();
+            ["claude ", "gemini ", "gpt"]
+                .iter()
+                .any(|prefix| model.starts_with(prefix))
+        })
+        || (trimmed
+            .chars()
+            .next()
+            .is_some_and(|c| ('\u{2800}'..='\u{28ff}').contains(&c))
+            && normalized.ends_with("esc to cancel"))
+    {
         return true;
     }
 
@@ -543,7 +786,68 @@ pub(in crate::terminal) fn terminal_worked_status_match_from_snapshot(
 
 #[cfg_attr(test, allow(dead_code))]
 pub(in crate::terminal) fn terminal_tail_has_worked_status(tail: &str) -> bool {
-    tail.lines().any(line_is_completion_status)
+    let clean_tail = strip_codex_composer_tail(tail);
+    for line in clean_tail.lines().rev() {
+        if line_is_completion_status(line) {
+            return true;
+        }
+        if line_is_codex_working_status(line)
+            || line_is_claude_working_spinner(line)
+            || line_is_agy_working_status(line)
+            || line_is_submitted_user_prompt(line)
+        {
+            return false;
+        }
+    }
+    false
+}
+
+fn is_codex_status_footer(line: &str) -> bool {
+    line.contains(" · Context ") && line.contains("% used")
+}
+
+fn is_particle(ch: char) -> bool {
+    matches!(ch, '⠁' | '⠂' | '⠄' | '⠈' | '⠐' | '⠠' | '⡀' | '⢀')
+}
+
+fn strip_codex_composer_tail<'a>(tail: &'a str) -> &'a str {
+    let lines: Vec<&str> = tail.lines().collect();
+    if lines.is_empty() {
+        return tail;
+    }
+    if let Some(footer_idx) = lines.iter().rposition(|l| is_codex_status_footer(l)) {
+        if footer_idx > 0 {
+            let mut prompt_idx = footer_idx - 1;
+            while prompt_idx > 0 && lines[prompt_idx].trim().is_empty() {
+                prompt_idx -= 1;
+            }
+            if lines[prompt_idx].trim_start().starts_with('›') {
+                let end_offset = lines[..prompt_idx]
+                    .iter()
+                    .map(|l| l.len() + 1)
+                    .sum::<usize>();
+                return &tail[..end_offset.min(tail.len())];
+            }
+        }
+    }
+    tail
+}
+
+fn line_is_submitted_user_prompt(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('›') {
+        return false;
+    }
+    let body = trimmed.strip_prefix('›').unwrap_or_default().trim();
+    if body.is_empty() {
+        return false;
+    }
+    let clean: String = body.chars().filter(|c| !is_particle(*c)).collect();
+    let clean = clean.trim();
+    if clean.is_empty() || clean == "Ask Codex to do anything" {
+        return false;
+    }
+    true
 }
 
 /// Detects an agent's turn-completion line: `<past-tense verb> for <duration>`.
@@ -551,6 +855,9 @@ pub(in crate::terminal) fn terminal_tail_has_worked_status(tail: &str) -> bool {
 /// (and varies the verb), so we accept any single alphabetic verb ending in
 /// "ed" rather than hard-coding "worked".
 fn line_is_completion_status(line: &str) -> bool {
+    if line_is_codex_recap_summary(line) {
+        return true;
+    }
     let normalized = trim_terminal_status_line_prefix(line).to_lowercase();
     let Some((verb, duration)) = normalized.split_once(" for ") else {
         return false;
@@ -604,11 +911,68 @@ fn looks_like_elapsed_duration(value: &str) -> bool {
         return true; // Pure duration, nothing trailing.
     };
 
-    // Allow trailing decoration (box-drawing / punctuation / symbols) but reject
-    // trailing letters or digits, which indicate prose rather than a status line.
-    value[start..]
+    is_valid_completion_remainder(&value[start..])
+}
+
+fn is_valid_completion_remainder(remainder: &str) -> bool {
+    let trimmed = remainder.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Allow trailing decoration (box-drawing / punctuation / symbols).
+    if trimmed
         .chars()
         .all(|character| !character.is_alphanumeric())
+    {
+        return true;
+    }
+    // Codex may print trailing timestamps like `• 10:38 AM`, `• 11:05 PM`, or `· 10:38`.
+    looks_like_completion_timestamp(trimmed)
+}
+
+fn looks_like_completion_timestamp(text: &str) -> bool {
+    let stripped = text
+        .trim()
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .trim_start();
+    let tokens: Vec<&str> = stripped.split_whitespace().collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    let time_part = tokens[0].trim_end_matches(|c: char| !c.is_alphanumeric());
+    let mut parts = time_part.split(':');
+    let Some(hours) = parts.next() else {
+        return false;
+    };
+    let Some(minutes) = parts.next() else {
+        return false;
+    };
+    if !hours.chars().all(|c| c.is_ascii_digit()) || hours.is_empty() || hours.len() > 2 {
+        return false;
+    }
+    if !minutes.chars().all(|c| c.is_ascii_digit()) || minutes.len() != 2 {
+        return false;
+    }
+    if let Some(seconds) = parts.next() {
+        if !seconds.chars().all(|c| c.is_ascii_digit()) || seconds.len() != 2 {
+            return false;
+        }
+    }
+    if parts.next().is_some() {
+        return false;
+    }
+    for token in &tokens[1..] {
+        let clean = token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_lowercase();
+        if clean.is_empty() {
+            continue;
+        }
+        if clean != "am" && clean != "pm" {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg_attr(test, allow(dead_code))]
@@ -860,6 +1224,59 @@ pub(in crate::terminal) fn compact_terminal_search_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::terminal_error_keyword_match_from_snapshot;
+
+    #[test]
+    fn codebuddy_forbidden_uses_loaded_mark_only_rule_instead_of_old_quota_error() {
+        struct SettingsFixture(std::path::PathBuf);
+        impl Drop for SettingsFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture = SettingsFixture(std::env::temp_dir().join(format!(
+            "webclx-codebuddy-forbidden-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        )));
+        std::fs::create_dir_all(&fixture.0).unwrap();
+        let settings = settings_core::SettingsManager::load(&fixture.0).unwrap();
+        for error in ["403 request illegal", "403 request\n    illegal"] {
+            let snapshot = format!(
+                "● REPL\n  └ 429 您的使用量已超出频率限制\n> 继续\n● REPL\n  └ {error}\n────────────────────\n> \n────────────────────"
+            );
+            let matched = terminal_error_keyword_match_from_snapshot(
+                snapshot.as_bytes(),
+                12,
+                &settings.terminal_error_keywords(),
+                &[],
+                true,
+            )
+            .expect("native forbidden error must not appear completed or remain a quota error");
+            assert_eq!(matched.keyword, "403 request illegal");
+            assert!(!matched.continue_sent);
+            assert_eq!(
+                super::super::resolve_terminal_error_keyword_action(
+                    &matched.keyword,
+                    &settings.terminal_error_keyword_actions(),
+                ),
+                settings_core::TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY,
+            );
+            assert!(!super::super::account_rotation::exhaustion_keyword(&matched.keyword));
+            assert!(
+                terminal_error_keyword_match_from_snapshot(
+                    format!("{snapshot}\n• Working (12s • esc to interrupt)").as_bytes(),
+                    12,
+                    &settings.terminal_error_keywords(),
+                    &[],
+                    true,
+                )
+                .is_none()
+            );
+        }
+    }
 
     #[test]
     fn terminal_error_snapshot_does_not_retry_while_agent_is_working() {

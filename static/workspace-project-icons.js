@@ -84,12 +84,23 @@
   }
 
   const EXECUTOR_EMOJIS = ["⚙️", "🛠️", "🚀", "🔧", "🧭", "🧪", "📦", "🛰️", "🧩", "🎯"];
+  // 复核者是独立角色，不能复用执行者的随机/固定 Emoji；这里的固定图标也
+  // 刻意不在 EXECUTOR_EMOJIS 里，避免复核者和执行者显示成同一个图标。
+  const REVIEWER_EMOJI = "🔍";
+  const LEGACY_MANAGER_EMOJIS = new Set(["👑", "🛡️", "📋", "⚔️"]);
+  const MANAGER_EMOJI = "🔱";
+  const TERMINAL_GROUP_ROLE_LABELS = { super_admin: "超级管理员", manager: "普通管理员", executor: "执行者", reviewer: "复核者" };
   function terminalRoleEmoji(option) {
     const role = option.dataset.groupRole || "";
     if (!role) return "";
-    if (role === "manager") return root.localStorage?.getItem("webclx:terminal-group-manager-emoji") || "👑";
-    if (root.localStorage?.getItem("webclx:terminal-group-executor-emoji-mode") === "fixed") {
-      return root.localStorage?.getItem("webclx:terminal-group-executor-emoji") || "⚙️";
+    if (role === "super_admin") return "👑";
+    if (role === "manager") {
+      const custom = root.localStorage?.getItem("webclx:terminal-group-manager-emoji");
+      return custom && !LEGACY_MANAGER_EMOJIS.has(custom) ? custom : MANAGER_EMOJI;
+    }
+    if (role === "reviewer") return REVIEWER_EMOJI;
+    if (root.localStorage?.getItem("webclx:terminal-group-executor-emoji-mode") !== "random") {
+      return root.localStorage?.getItem("webclx:terminal-group-executor-emoji") || "🚀";
     }
     let hash = 2166136261;
     // Random is selected once per project, so every executor terminal for the
@@ -202,6 +213,9 @@
           "background",
           "color-mix(in srgb, var(--terminal-group-color) 18%, transparent)",
         );
+      } else {
+        container.style.removeProperty("--terminal-group-color");
+        container.style.removeProperty("background");
       }
       const path = option.dataset.iconProjectPath || option.dataset.workspacePath || "";
       const icon = createWorkspaceProjectIcon(
@@ -227,7 +241,9 @@
           counterpart = null;
         }
         role.title = [
-          option.dataset.groupRoleName || (option.dataset.groupRole === "manager" ? "管理者" : "执行者"),
+          option.dataset.groupRoleName
+            || TERMINAL_GROUP_ROLE_LABELS[option.dataset.groupRole]
+            || "",
           counterpart ? `搭档：${counterpart.name || counterpart.id}` : "",
         ].filter(Boolean).join(" · ");
         container.append(role);
@@ -258,12 +274,14 @@
       const parts = [base, ...details];
       const groupName = option.dataset.groupName || "";
       if (groupName) {
-        const groupBadge = `【${groupName}】`;
+        const groupBadge = `[${groupName}]`;
         if (parts[0].includes(` · ${groupName}`)) {
           parts[0] = parts[0].replace(` · ${groupName}`, "");
         }
-        if (!parts[0].includes(groupBadge)) {
-          parts[0] = `${groupBadge}${parts[0]}`;
+        if (parts[0].startsWith(groupBadge)) {
+          parts[0] = `${groupBadge} ${parts[0].slice(groupBadge.length).trimStart()}`;
+        } else if (!parts[0].includes(groupBadge)) {
+          parts[0] = `${groupBadge} ${parts[0]}`;
         }
       }
       text.textContent = parts.join(separator);
@@ -517,6 +535,7 @@
     workspaceProjectTextIcon,
     workspaceProjectColorSlots,
     workspaceProjectHue,
+    terminalRoleEmoji,
     createWorkspaceProjectIcon,
     enhanceWorkspaceIconSelect,
   });

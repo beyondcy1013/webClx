@@ -874,6 +874,11 @@ pub async fn list_codex_accounts(
                 active: current_mode == CurrentAuthMode::Auth && summary.active,
                 saved_at: preset.saved_at,
                 switch_count: preset.switch_count,
+                last_switch_at: preset.last_switch_at,
+                switch_history: effective_switch_history(
+                    &preset.switch_history,
+                    preset.last_switch_at,
+                ),
                 account: summary
                     .details
                     .email
@@ -898,6 +903,11 @@ pub async fn list_codex_accounts(
                 active: summary.active,
                 saved_at: preset.saved_at,
                 switch_count: preset.switch_count,
+                last_switch_at: preset.last_switch_at,
+                switch_history: effective_switch_history(
+                    &preset.switch_history,
+                    preset.last_switch_at,
+                ),
                 account: Some(preset.provider_name.clone()),
                 model: api_preset_model(preset).map(str::to_string),
                 endpoint: Some(preset.base_url.clone()),
@@ -1232,6 +1242,7 @@ pub async fn save_auth_preset(
         }
     }
     let preset = StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: generate_preset_id("auth"),
         name,
@@ -1244,6 +1255,7 @@ pub async fn save_auth_preset(
         legacy_secondary_config_value: None,
         auth,
         switch_count: 0,
+        last_switch_at: None,
     };
     presets.insert(0, preset.clone());
 
@@ -1311,6 +1323,7 @@ async fn save_current_auth_preset_for_login(
         }
         None => {
             let preset = StoredAuthPreset {
+                switch_history: Vec::new(),
                 interchange_source: None,
                 id: generate_preset_id("auth"),
                 name: resolve_auth_preset_name(name, &auth, &presets, None),
@@ -1327,6 +1340,7 @@ async fn save_current_auth_preset_for_login(
                 legacy_secondary_config_value: None,
                 auth,
                 switch_count: 0,
+                last_switch_at: None,
             };
             presets.insert(0, preset.clone());
             preset
@@ -1410,6 +1424,7 @@ pub async fn migrate_zcode_accounts(
                 } else {
                     let details = auth_summary(&auth);
                     presets.push(StoredAuthPreset {
+                        switch_history: Vec::new(),
                         interchange_source: None,
                         id: generate_preset_id("auth"),
                         name,
@@ -1426,6 +1441,7 @@ pub async fn migrate_zcode_accounts(
                         legacy_secondary_config_value: None,
                         auth,
                         switch_count: 0,
+                        last_switch_at: None,
                     });
                 }
                 imported += 1;
@@ -1559,6 +1575,7 @@ pub async fn update_auth_preset(
         }
     }
     let preset = StoredAuthPreset {
+        switch_history: Vec::new(),
         interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
@@ -1571,6 +1588,7 @@ pub async fn update_auth_preset(
         legacy_secondary_config_value: None,
         auth,
         switch_count: presets[index].switch_count,
+        last_switch_at: presets[index].last_switch_at,
     };
     presets[index] = preset.clone();
 
@@ -1620,6 +1638,7 @@ pub async fn save_api_preset(
 
     let mut presets = state.auth_manager.api_presets_snapshot();
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: generate_preset_id("api"),
         name: resolve_api_preset_name(&payload.name, &base_url, &presets, None),
@@ -1643,6 +1662,7 @@ pub async fn save_api_preset(
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     presets.insert(0, preset.clone());
 
@@ -1795,6 +1815,7 @@ async fn save_imported_auth_accounts(
         );
         let resolved_name = resolve_auth_preset_name(&account.name, &auth, &presets, None);
         let preset = StoredAuthPreset {
+            switch_history: Vec::new(),
             interchange_source: None,
             id: preset_id,
             name: resolved_name.clone(),
@@ -1807,6 +1828,7 @@ async fn save_imported_auth_accounts(
             legacy_secondary_config_value: None,
             auth,
             switch_count: 0,
+            last_switch_at: None,
         };
         presets.insert(0, preset);
         saved_names.push(resolved_name);
@@ -1852,6 +1874,7 @@ async fn save_imported_api_accounts(
 
         let resolved_name = resolve_api_preset_name(&preset_name, &base_url, &presets, None);
         let preset = StoredApiPreset {
+            switch_history: Vec::new(),
             interchange_source: None,
             id: preset_id,
             name: resolved_name.clone(),
@@ -1875,6 +1898,7 @@ async fn save_imported_api_accounts(
             access_mode: Some(ApiAccessMode::ChatgptOauth),
             favorite: false,
             switch_count: 0,
+            last_switch_at: None,
         };
         presets.insert(0, preset);
         saved_names.push(resolved_name);
@@ -2044,6 +2068,7 @@ pub async fn sync_sub2api_accounts(
             });
             let resolved_name = resolve_auth_preset_name(&norm.name, &auth, &presets, None);
             let preset = StoredAuthPreset {
+                switch_history: Vec::new(),
                 interchange_source: None,
                 id: preset_id,
                 name: resolved_name.clone(),
@@ -2056,6 +2081,7 @@ pub async fn sync_sub2api_accounts(
                 legacy_secondary_config_value: None,
                 auth,
                 switch_count: 0,
+                last_switch_at: None,
             };
             presets.insert(0, preset);
             saved_oauth_names.push(resolved_name);
@@ -2075,6 +2101,7 @@ pub async fn sync_sub2api_accounts(
             );
             let resolved_name = resolve_api_preset_name(&norm.name, &norm.base_url, &presets, None);
             let preset = StoredApiPreset {
+                switch_history: Vec::new(),
                 interchange_source: None,
                 id: preset_id,
                 name: resolved_name.clone(),
@@ -2098,6 +2125,7 @@ pub async fn sync_sub2api_accounts(
                 access_mode: Some(auth_core::ApiAccessMode::Direct),
                 favorite: false,
                 switch_count: 0,
+                last_switch_at: None,
             };
             presets.insert(0, preset);
             saved_api_names.push(resolved_name);
@@ -2124,6 +2152,7 @@ pub async fn sync_sub2api_accounts(
                 candidate
             };
             let preset = StoredClaudePreset {
+                switch_history: Vec::new(),
                 interchange_source: None,
                 id: preset_id,
                 name: resolved_name.clone(),
@@ -2144,6 +2173,7 @@ pub async fn sync_sub2api_accounts(
                 use_local_proxy: false,
                 access_mode: None,
                 switch_count: 0,
+                last_switch_at: None,
             };
             presets.insert(0, preset);
             saved_claude_names.push(resolved_name);
@@ -2514,6 +2544,7 @@ pub async fn save_claude_preset(
 
     let mut presets = state.auth_manager.claude_presets_snapshot();
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: generate_preset_id("claude"),
         name: resolve_claude_preset_name(&payload.name, &base_url, &presets, None),
@@ -2534,6 +2565,7 @@ pub async fn save_claude_preset(
         use_local_proxy,
         access_mode: Some(access_mode),
         switch_count: 0,
+        last_switch_at: None,
     };
     presets.insert(0, preset.clone());
 
@@ -2623,6 +2655,7 @@ pub async fn update_api_preset(
     let name =
         resolve_api_preset_name(&payload.name, &effective_base_url, &presets, Some(&preset_id));
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
@@ -2674,6 +2707,7 @@ pub async fn update_api_preset(
         access_mode: Some(previous_access_mode),
         favorite: previous.favorite,
         switch_count: previous.switch_count,
+        last_switch_at: previous.last_switch_at,
     };
     presets[index] = preset.clone();
 
@@ -2830,6 +2864,7 @@ pub async fn update_claude_preset(
 
     let name = resolve_claude_preset_name(&payload.name, &base_url, &presets, Some(&preset_id));
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: presets[index].interchange_source.clone(),
         id: preset_id,
         name,
@@ -2850,6 +2885,7 @@ pub async fn update_claude_preset(
         use_local_proxy,
         access_mode: Some(access_mode),
         switch_count: 0,
+        last_switch_at: None,
     };
     presets[index] = preset.clone();
 

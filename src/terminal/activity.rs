@@ -39,8 +39,9 @@ pub(super) fn terminal_compact_command_blocked_agent<'a>(
     if command.split_whitespace().next() != Some("/compact") {
         return None;
     }
+    // 默认所有智能体均支持 /compact（包括 AGY/Antigravity 等），仅在明确指定的黑名单中排除
     activity.agents.iter().find_map(|agent| {
-        ["CodeBuddy", "AGY", "Antigravity", "Cline"]
+        ["CodeBuddy", "Cline"]
             .iter()
             .any(|blocked| agent.eq_ignore_ascii_case(blocked))
             .then_some(agent.as_str())
@@ -311,6 +312,9 @@ fn agent_names_for_process(process: &ProcessInfo) -> Vec<&'static str> {
     if is_opencode_process(&comm, &cmdline) {
         agents.push("OpenCode");
     }
+    if is_codearts_process(&comm, &cmdline) {
+        agents.push("CodeArts");
+    }
 
     agents
 }
@@ -476,6 +480,17 @@ fn is_opencode_process(comm: &str, cmdline: &str) -> bool {
 }
 
 #[cfg(not(windows))]
+fn is_codearts_process(comm: &str, cmdline: &str) -> bool {
+    let mut tokens = cmdline.split_whitespace();
+    let executable = tokens.next().and_then(|token| token.rsplit('/').next());
+    let script = tokens.next().unwrap_or_default();
+    comm == "codearts"
+        || executable == Some("codearts")
+        || (matches!(executable, Some("node") | Some("bun") | Some("bash") | Some("sh"))
+            && script.rsplit('/').next() == Some("codearts"))
+}
+
+#[cfg(not(windows))]
 fn executable_matches(cmdline: &str, expected: &str) -> bool {
     let mut tokens = cmdline.split_whitespace();
     let executable = tokens.next().and_then(|token| token.rsplit('/').next());
@@ -489,14 +504,7 @@ mod tests {
 
     #[test]
     fn terminal_compact_agent_guard_blocks_incompatible_agents_and_command_arguments() {
-        for agent in [
-            "CodeBuddy",
-            "codebuddy",
-            "AGY",
-            "agy",
-            "Antigravity",
-            "Cline",
-        ] {
+        for agent in ["CodeBuddy", "codebuddy", "Cline"] {
             let activity = TerminalAgentActivity {
                 agents: vec!["Codex".to_string(), agent.to_string()],
                 orphaned_agents: Vec::new(),
@@ -508,7 +516,7 @@ mod tests {
                 assert!(terminal_compact_command_blocked_agent(command, &activity).is_none());
             }
         }
-        for agent in ["Codex", "Claude", ""] {
+        for agent in ["Codex", "Claude", "AGY", "agy", "Antigravity", ""] {
             let activity = TerminalAgentActivity {
                 agents: vec![agent.to_string()],
                 orphaned_agents: Vec::new(),
@@ -903,6 +911,32 @@ mod tests {
             cgroup: String::new(),
         };
         assert!(agent_names_for_process(&argument).is_empty());
+    }
+
+    #[test]
+    fn agent_detection_recognizes_codearts_launchers() {
+        for (comm, cmdline) in [
+            ("codearts", "/home/test/.codeartsdoer/installers/bin/codearts"),
+            ("bash", "bash /home/test/.codeartsdoer/installers/codearts"),
+            ("node", "node /usr/local/bin/codearts --session ses_test"),
+            ("bun", "bun /usr/local/bin/codearts"),
+        ] {
+            let process = ProcessInfo {
+                ppid: 1,
+                comm: comm.into(),
+                cmdline: cmdline.into(),
+                cgroup: String::new(),
+            };
+            assert_eq!(agent_names_for_process(&process), vec!["CodeArts"]);
+        }
+        for cmdline in [
+            "rg codearts src",
+            "echo codearts",
+            "bash -c echo codearts",
+            "node /tmp/codearts-helper.js",
+        ] {
+            assert!(!is_codearts_process("other", cmdline));
+        }
     }
 
     #[test]

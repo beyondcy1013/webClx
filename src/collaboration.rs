@@ -10,6 +10,7 @@ use axum::{
     Json,
     extract::{Path as AxumPath, Query, State},
     http::StatusCode,
+    response::{IntoResponse, Response},
 };
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,13 @@ pub struct GroupMessage {
     pub created_at: u64,
     #[serde(default)]
     pub acknowledgements: HashMap<String, String>,
+    /// 准入方式：`member`（正常成员发言）或 `forced`（非 active 成员强制发送）。
+    /// 旧历史消息没有该字段，反序列化为空串。
+    #[serde(default)]
+    pub admission: String,
+    /// 强制发送时调用方给出的理由，便于事后审计；普通发言为空。
+    #[serde(default)]
+    pub admission_reason: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -134,6 +142,13 @@ pub struct SendMessageRequest {
     pub reply_to: String,
     #[serde(default)]
     pub idempotency_key: String,
+    /// 强制发送：即使发送者不是 active member（未加入/已退出/observer 只读），
+    /// 也允许发言，消息会标记 `admission=forced`。默认关闭，保持原行为。
+    #[serde(default)]
+    pub force: bool,
+    /// 强制发送的理由，写入消息的 `admission_reason` 供审计。
+    #[serde(default)]
+    pub force_reason: String,
 }
 #[derive(Debug, Deserialize)]
 pub struct AckMessageRequest {
@@ -300,11 +315,108 @@ fn validate_text(value: &str, field: &str) -> Result<String, AppError> {
     }
     Ok(value.to_string())
 }
-fn active_member(group: &DiscussionGroup, agent_id: &str) -> bool {
-    group
-        .members
-        .iter()
-        .any(|m| m.agent_id == agent_id && m.status == "active" && m.role != "observer")
+/// 发送者不能正常发言的具体原因，用于给调用方明确回应与下一步指引。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SenderBlock {
+    /// 从未加入该讨论组
+    Absent,
+    /// 曾经加入但状态不是 active（如已退出）
+    Left,
+    /// 只读观察者
+    Observer,
+}
+
+fn sender_block(group: &DiscussionGroup, agent_id: &str) -> Option<SenderBlock> {
+    match group.members.iter().find(|m| m.agent_id == agent_id) {
+        None => Some(SenderBlock::Absent),
+        Some(m) if m.status != "active" => Some(SenderBlock::Left),
+        Some(m) if m.role == "observer" => Some(SenderBlock::Observer),
+        Some(_) => None,
+    }
+}
+
+/// 决定本次发言的准入标记：member 正常发言，forced 强制发送。
+fn sender_admission(
+    group: &DiscussionGroup,
+    agent_id: &str,
+    force: bool,
+) -> Result<&'static str, SenderBlock> {
+    match sender_block(group, agent_id) {
+        None => Ok("member"),
+        Some(_) if force => Ok("forced"),
+        Some(block) => Err(block),
+    }
+}
+
+fn blocked_sender_error(
+    group: &DiscussionGroup,
+    group_id: &str,
+    agent_id: &str,
+    block: SenderBlock,
+) -> BlockedSender {
+    let member = group.members.iter().find(|m| m.agent_id == agent_id);
+    let (state, role, status) = match (block, member) {
+        (SenderBlock::Left, Some(m)) => ("left", m.role.clone(), m.status.clone()),
+        (SenderBlock::Observer, Some(m)) => ("observer", m.role.clone(), m.status.clone()),
+        _ => ("absent", String::new(), String::new()),
+    };
+    let join_step = format!(
+        "加入后再发言：POST /api/collaboration/groups/{group_id}/join  body={{\"agent_id\":\"{agent_id}\",\"role\":\"member\"}}"
+    );
+    let register_step = format!(
+        "若 agent 尚未注册：POST /api/collaboration/agents  body={{\"agent_id\":\"{agent_id}\",\"name\":\"<显示名>\"}}"
+    );
+    let force_step = "确需立即发送（例如仅提醒/告知、不参与表决）：带 \"force\": true 重试；消息会标记 admission=forced，可用 \"force_reason\" 记录理由，强制发送不改变成员状态。".to_string();
+    let mut next_steps: Vec<String> = Vec::new();
+    match block {
+        SenderBlock::Absent => {
+            next_steps.push(register_step);
+            next_steps.push(join_step);
+        }
+        SenderBlock::Left => {
+            next_steps.push(
+                "该 agent 曾是成员但状态不是 active（如已退出），重新 join 即可恢复。".to_string(),
+            );
+            next_steps.push(join_step);
+        }
+        SenderBlock::Observer => {
+            next_steps.push(
+                "当前角色是 observer（只读）：需以 role=member 重新 join 才能正常发言。"
+                    .to_string(),
+            );
+            next_steps.push(join_step);
+        }
+    }
+    next_steps.push(force_step);
+    let reason = match block {
+        SenderBlock::Absent => "未加入讨论组",
+        SenderBlock::Left => "成员状态不是 active",
+        SenderBlock::Observer => "observer 只读",
+    };
+    BlockedSender {
+        status: StatusCode::BAD_REQUEST,
+        body: json!({
+            "code": "sender_not_active_member",
+            "error": format!("发送者 {agent_id} 当前不可发言（{reason}）"),
+            "group_id": group_id,
+            "sender_agent_id": agent_id,
+            "membership": { "state": state, "role": role, "status": status },
+            "force_supported": true,
+            "next_steps": next_steps,
+        }),
+    }
+}
+
+/// 发送被拒时的结构化响应：既说明原因，也给出可直接照做的下一步。
+struct BlockedSender {
+    status: StatusCode,
+    body: Value,
+}
+
+impl IntoResponse for BlockedSender {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body)).into_response()
+    }
 }
 
 pub async fn list_agents(State(state): State<AppState>) -> Json<Value> {
@@ -486,17 +598,35 @@ pub async fn send_message(
     State(state): State<AppState>,
     AxumPath(group_id): AxumPath<String>,
     Json(payload): Json<SendMessageRequest>,
-) -> ApiResult<(StatusCode, Json<GroupMessage>)> {
-    let sender = validate_id(&payload.sender_agent_id, "sender_agent_id")?;
-    let text = validate_text(&payload.text, "text")?;
+) -> Result<(StatusCode, Json<GroupMessage>), Response> {
+    let sender = validate_id(&payload.sender_agent_id, "sender_agent_id")
+        .map_err(|error| error.into_response())?;
+    let text = validate_text(&payload.text, "text").map_err(|error| error.into_response())?;
+    let force = payload.force;
+    let force_reason = payload.force_reason.trim().to_string();
+    let admission = {
+        let data = crate::lock_or_recover!(state.collaboration_manager.data.read());
+        let group = data
+            .groups
+            .get(&group_id)
+            .ok_or_else(|| AppError::not_found("讨论组不存在").into_response())?;
+        match sender_admission(group, &sender, force) {
+            Ok(admission) => admission.to_string(),
+            Err(block) => {
+                return Err(blocked_sender_error(group, &group_id, &sender, block).into_response());
+            }
+        }
+    };
     let manager = state.collaboration_manager.clone();
     let message = manager.mutate(|data| {
         let group = data
             .groups
             .get_mut(&group_id)
             .ok_or_else(|| AppError::not_found("讨论组不存在"))?;
-        if !active_member(group, &sender) {
-            return Err(AppError::bad_request("发送者不是可发言的 active member"));
+        if sender_admission(group, &sender, force).is_err() {
+            return Err(AppError::bad_request(
+                "发送期间成员状态发生变化，请重试：先 join 成为 active member，或显式使用 force=true 强制发送",
+            ));
         }
         let messages = data.messages.entry(group_id.clone()).or_default();
         if !payload.idempotency_key.trim().is_empty() {
@@ -524,10 +654,13 @@ pub async fn send_message(
             idempotency_key: payload.idempotency_key.trim().to_string(),
             created_at: now(),
             acknowledgements: HashMap::new(),
+            admission: admission.clone(),
+            admission_reason: force_reason.clone(),
         };
         messages.push(message.clone());
         Ok(message)
-    })?;
+    })
+    .map_err(|error| error.into_response())?;
     Ok((StatusCode::CREATED, Json(message)))
 }
 pub async fn ack_message(
@@ -627,6 +760,63 @@ mod tests {
             projection_degraded: false,
             projection_error: String::new(),
         };
-        assert!(!active_member(&group, "o"));
+        assert_eq!(sender_block(&group, "o"), Some(SenderBlock::Observer));
+    }
+    fn member(agent_id: &str, role: &str, status: &str) -> Membership {
+        Membership {
+            agent_id: agent_id.to_string(),
+            role: role.to_string(),
+            status: status.to_string(),
+            joined_at: 0,
+            last_read_sequence: 0,
+        }
+    }
+
+    fn group_with(members: Vec<Membership>) -> DiscussionGroup {
+        DiscussionGroup {
+            group_id: "g".into(),
+            project_id: "p".into(),
+            name: "n".into(),
+            topic: String::new(),
+            owner_agent_id: "owner".into(),
+            status: "active".into(),
+            members,
+            last_sequence: 0,
+            created_at: 0,
+            updated_at: 0,
+            projection_degraded: false,
+            projection_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn sender_block_distinguishes_absent_left_and_observer() {
+        let group = group_with(vec![
+            member("active", "member", "active"),
+            member("gone", "member", "left"),
+            member("watch", "observer", "active"),
+        ]);
+        assert_eq!(sender_block(&group, "active"), None);
+        assert_eq!(sender_block(&group, "gone"), Some(SenderBlock::Left));
+        assert_eq!(sender_block(&group, "watch"), Some(SenderBlock::Observer));
+        assert_eq!(sender_block(&group, "nobody"), Some(SenderBlock::Absent));
+    }
+
+    #[test]
+    fn force_sends_are_marked_forced() {
+        let group = group_with(vec![member("watch", "observer", "active")]);
+        assert_eq!(sender_admission(&group, "watch", false), Err(SenderBlock::Observer));
+        assert_eq!(sender_admission(&group, "watch", true), Ok("forced"));
+        assert_eq!(sender_admission(&group, "missing", true), Ok("forced"));
+        assert_eq!(sender_admission(&group, "missing", false), Err(SenderBlock::Absent));
+    }
+
+    #[test]
+    fn send_request_keeps_default_non_force_semantics() {
+        let request: SendMessageRequest =
+            serde_json::from_str("{\"sender_agent_id\":\"a\",\"text\":\"hi\"}")
+                .expect("deserialize");
+        assert!(!request.force);
+        assert!(request.force_reason.is_empty());
     }
 }

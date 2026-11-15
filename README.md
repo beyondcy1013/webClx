@@ -51,6 +51,28 @@ flowchart LR
 
 ## 运行
 
+也可以在 Linux x86_64 / arm64 上使用官方安装脚本快速安装最新 GitHub Release：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beyondcy1013/webClx/main/install.sh | bash
+```
+
+脚本会自动匹配平台、下载 Release 中的平台包和 `.sha256` 校验文件，校验成功后安装到
+`~/.local/webclx-<版本>` 并直接启动服务。只安装不启动时使用：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beyondcy1013/webClx/main/install.sh | bash -s -- --no-start
+```
+
+Windows x86_64 可在 PowerShell 中执行：
+
+```powershell
+Invoke-RestMethod https://raw.githubusercontent.com/beyondcy1013/webClx/main/install.ps1 | Invoke-Expression
+```
+
+只安装不启动时，先下载脚本再执行 `.\install.ps1 -NoStart`。安装目录默认是
+`%LOCALAPPDATA%\webClx\webclx-<版本>`。
+
 ```bash
 cargo run -- serve
 ```
@@ -90,8 +112,10 @@ webclx use oauth "plus-account"
 webclx use claude "anthropic"
 ```
 
-`use` 是显式永久切换，会写入共享配置。`run` 则为本次 agent 创建一次性隔离配置，
-不会修改活动预设、用户 `config.toml` 或其它会话；agent 退出后自动清理：
+`use` 是显式永久切换，会写入共享配置且不恢复。`run` 是临时启动事务：先把目标预设写入
+真实共享配置，原生启动 Agent，优先等待本次新启动信号并短暂稳定后恢复原预设；
+Agent 不在 tmux 内或限时内未出现信号时，用短固定数秒兜底恢复。恢复不等待 Agent 退出，
+启动异常也不会终止已启动的 Agent：
 
 ```bash
 webclx run api "primary" -- codex
@@ -129,7 +153,7 @@ journalctl -u webclx -f
 ```bash
 bash /home/root/.codex/skills/webclx-compile-api/scripts/request-webclx-deploy-api.sh \
   --project webClx \
-  --project-dir /home/codes/webClx \
+  --project-dir /home/codes/tools/webClx \
   --command 'cargo build --release' \
   --install-command 'bash scripts/rebuild-and-deploy.sh --skip-build' \
   --audit-path /home/bin/webclx/webClx \
@@ -158,15 +182,15 @@ install -m 0755 frps /home/bin/webclx/frps
 注意：
 
 - 当前 `webclx.service` 的 `WorkingDirectory` 是 `/home/bin/webclx`
-- 当前仓库规范路径是 `/home/codes/webClx`
-- 服务启动后会从 `current_dir()/static` 读取静态资源，所以实际生效的是 `/home/bin/webclx/static/*`
+- 当前仓库规范路径是 `/home/codes/tools/webClx`
+- 仓库中的 `static` 必须保持指向 `/home/bin/webclx/static` 的绝对符号链接；链接完好时源码与运行目录访问同一静态资源
 - 设置页“系统”TAB 可以选择新终端用户身份；默认是 `root`
 - 设置页“系统”TAB 可以配置终端快捷命令；默认 `1` 启动 `codex`，`2` 启动 `claude`，3 秒未选择时默认启动 `1`
 - Codex / Claude 配置路径按设置页选择的用户身份解析；在 Unix 上通过系统用户库获取该用户的 home 和 shell
 - 当前这台机器 `root` 的真实 home 当前是 `/home/root`；这是运行时状态，不要把它写死到代码、脚本或 service 里
 - 不要通过 `/etc/default/webclx` 或其他环境变量去改写 `.codex` / `.claude` 的目标路径；旧路径如 `/root/.codex`、`/home/beyondcy/.codex` 只应作为兼容符号链接存在
 - Cargo 的真实构建产物目录可能来自 `~/.cargo/config.toml` 的 `target-dir`；部署时先确认 `target_directory`
-- 只改仓库里的 `static/*` 而不把文件同步到 `/home/bin/webclx/static/*`，前端页面不会更新
+- 链接完好时不要在仓库 `static/*` 与 `/home/bin/webclx/static/*` 之间复制或同步；若链接缺失或错误，先恢复符号链接
 - 如果默认工作目录配置的是符号链接路径，页面和设置文件会保留该显示路径；日志里会同时给出 canonical 真实路径
 - 文件浏览和网页终端默认进入哪个目录，由网页“设置”页里的默认工作目录决定
 - 进入默认目录后，网页里可以通过 `..` 进入它的上一层，但不能继续 `../..` 往上跨更多层

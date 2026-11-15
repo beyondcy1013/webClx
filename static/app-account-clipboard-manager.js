@@ -15,14 +15,19 @@
       return false;
     }
 
+    const openDialogs = document.querySelectorAll("dialog[open]");
+    const container = openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : document.body;
     const textarea = document.createElement("textarea");
     textarea.value = text;
-    textarea.readOnly = true;
     textarea.setAttribute("aria-hidden", "true");
-    textarea.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;";
-    document.body.appendChild(textarea);
-    textarea.focus();
+    textarea.setAttribute("tabindex", "-1");
+    textarea.style.cssText = "position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;";
+    container.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
     textarea.select();
+    if (typeof textarea.setSelectionRange === "function") {
+      textarea.setSelectionRange(0, textarea.value.length);
+    }
     try {
       return Boolean(document.execCommand?.("copy"));
     } catch {

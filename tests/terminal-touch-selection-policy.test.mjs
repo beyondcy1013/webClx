@@ -145,7 +145,7 @@ assert.doesNotMatch(
 
 assert.match(
   terminalFocusSelectionJs,
-  /function preventNativeTerminalTouchSelection\(event\) \{[\s\S]*document\.getSelection\(\)\?\.removeAllRanges\(\);[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*\}/,
+  /function preventNativeTerminalTouchSelection\(event\) \{[\s\S]*clearNativeTerminalTextSelection\(\);[\s\S]*event\.preventDefault\(\);[\s\S]*event\.stopPropagation\(\);[\s\S]*\}/,
   "terminal touch selection should suppress browser-native text selection so only the xterm handles appear",
 );
 
@@ -178,7 +178,7 @@ assert.match(
 
 assert.match(
   terminalJs,
-  /terminalHost\.addEventListener\("contextmenu", handleTerminalContextMenuSelection\);/,
+  /terminalHost\.addEventListener\("contextmenu", handleTerminalContextMenuSelection, \{ capture: true \}\);/,
   "terminal contextmenu should use the guarded touch-selection handler instead of starting selection twice",
 );
 

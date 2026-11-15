@@ -2,6 +2,83 @@
 
 Date: 2026-07-10
 
+## 手动预编译预热（2026-11-13）
+
+项目管理菜单在“部署项目”正下方提供“预编译预热”。点击后冻结当前项目目录与
+源终端 ID，刷新终端名称并通过 `/api/build/compile` 提交；成功入队显示请求号、
+实际构建命令，沿用编译状态页及原终端完成回调。提交期间同项目连点只发一次，
+网络失败或状态未知时明确提示，由用户核对状态后决定重试。
+
+未配置时复用后端现有推断：Cargo 项目执行 `cargo build --release`，Node 项目执行
+`npm run build`，Make 项目执行 `make`。保留项目已有工具链、profile 和缓存目录；
+不清理缓存，不额外跑 check/test，不提交安装或重启阶段。预热是实际构建，
+首次可能较慢；后续相同工具链、目标、特性及参数才可复用其缓存。
+
+Android、Windows 交叉编译及其它构建系统在项目根 `.webclx.json` 中配置构建专用命令
+（与现有 `web` 配置共存），使用与正式构建相同的目标和参数。例如：
+
+```json
+{
+  "precompile": {
+    "command": ["cargo", "build", "--release", "--locked", "--target", "x86_64-pc-windows-gnu"],
+    "required_artifacts": ["target/x86_64-pc-windows-gnu/release/my-app.exe"]
+  }
+}
+```
+
+`command` 为 argv 数组；也可调用项目已有的纯构建脚本。`required_artifacts` 可选，
+填写实际产物路径。命令不得包含部署/安装/重启；预热入口不调用或猜测
+`rebuild-and-deploy.sh`。自定义脚本自身的副作用仍由项目负责。没有配置文件时允许
+自动推断；配置无法读取、JSON 无效或字段错误时停止并提示，避免悄悄改成错误目标。
+
+预热请求显式携带 `purpose: "precompile"`（普通编译为 `compile`，部署固定为 `deploy`）。
+同项目一旦提交新的构建请求，队列 API 会为该请求写入取代标记；worker 在预热开始前
+和构建过程中都检查取代标记与请求目录中的最新请求，命中即停止预热：排队中的预热直接
+跳过，运行中的预热终止整个构建进程树（子 shell、timeout、cargo/rustc），不再完成
+最终链接。被取消的预热只发 toast 说明原因与取代请求号，不向源终端发送消息——取消
+不影响用户任务，终端消息会被智能体当作新的用户输入，只是噪音；状态仍可通过请求查询
+接口看到。若取代者是更新的预热，toast 注明“新的预热请求”，由它继续热构建缓存；若
+取代者是正式构建，产物由该请求重新生成。预热之间同样适用本规则——预热可丢弃，最新
+一次预热代表当前要热的状态，不比较构建参数。取代标记同时覆盖请求已被其它 worker
+领取、离开请求目录的情况。
+
+反过来，预热排在同项目正式编译之后时也不会执行：提交预热时若同项目已有更早的真实
+请求仍在排队，或已有真实构建运行到该预热请求之后才结束（含仍在运行），预热只会增加
+队列等待，worker 直接跳过并只发 toast：“同项目正式编译 xxx 已在前，预热无增益”。
+判断只看同项目与请求时间，不涉及构建参数。
+
+实现为静态菜单及 `terminal-project-precompile.js`，复用既有编译 API，仅新增请求
+`purpose` 字段与队列取代标记。运行结果新增 `cancelled` 状态（编译状态页显示“已取消”），
+与 `success`/`failed`/`timed_out` 一样属于终态。回归：
+`tests/terminal-project-precompile.test.mjs`（参数、身份、连点及失败边界）、
+`tests/compile-worker-precompile-supersession.test.mjs`（运行中终止与排队中跳过）
+和 `tests/terminal-project-precompile.browser.py`（桌面/触屏真实菜单，所有 API 均拦截）。
+
+验证（2026-11-14）：部署请求 `181223-18e7e19e54eabe1d` 通过 35 项 compile_service 单测后
+构建并重启。端到端用临时项目验证：预热请求 `182112-18e7e208abf29108` 构建期间收到同项目
+真实请求 `182121-18e7e208abf29109`，预热被终止（状态 cancelled，`prewarmed.bin` 未生成），
+真实请求随后成功生成 `real.bin`；回调消息包含“预编译预热已取消”与取代请求号。首次端到端
+验证暴露看门狗与 `build-pid` 写入的启动竞态（看门狗先于 pid 文件启动会立即退出），已改为
+先写 pid 文件再启动看门狗并复测通过。
+
+预热之间取代（2026-11-14）：预热 `202546-18e7e8fc1e0d8f0b`（构建 12 秒）运行期间提交同项目
+预热 `202555-18e7e8fc1e0d8f0c`，前者状态 cancelled 且未生成 `warmup-a.bin`，后者成功生成
+`warmup-b.bin`；取代标记与回调均指向 `202555…`，回调文案为“同项目出现新的预热请求”。
+
+预热在正式编译之后（2026-11-14）：同项目先提交真实编译 `204152-18e7e94d5db17eaa`
+（构建 8 秒），随后提交预热 `204153-18e7e94d5db17eab`；预热状态 cancelled、未生成
+`warm.bin`，日志记录 `precompile_superseded_by=204152… (ahead)`，回调文案为“同项目正式编译
+204152… 已在前，预热无增益”。回归 `tests/compile-worker-precompile-supersession.test.mjs`
+覆盖运行中终止、排队中跳过、预热之间取代与排在正式编译之后四个场景。
+
+验证：webClx 请求 `235622-18e7a08ad74847ae`（2026-11-13 23:56:28–23:56:31）
+通过 JS 语法、16 项定向 Node 回归、1280×900 与 390×844 浏览器操作；覆盖默认命令、
+自定义构建、队列失败、源终端切换和提交防重。集中原件：
+`/home/bin/webclx/compile/runs/20261113T235628-3846403-31205/build-1.log`。
+线上 `/assets/terminal.html` 与两个变更 JS 均 HTTP 200 且逐字节匹配源码；
+未登录 `/terminal` 正常跳登录页，不作为已登录验收。静态入口已生效，刷新终端页加载；
+本次浏览器测试未提交真实项目构建，也未安装或重启服务。
+
 ## 工作环境与任务流程归一化（2026-09-26，第一阶段）
 
 入口：设置 → 工作流 → 新建工作流 → 从使用场景开始。
@@ -255,7 +332,7 @@ the existing workspace-scoped `/api/file` endpoint and opens it in a new tab.
 in the quick menu are removed while loading.
 
 `复制id并提问` uses the complete current-session detection chain and copies
-`调用codex db维护skill读取session id为 <id>并接受指令：` through the same
+`调用codex db维护skill读取<agent> session id为 <id>并接受指令：` (e.g. `codex` or `agy`) through the same
 clipboard helper as `复制终端名`. It does not write or submit text to the terminal.
 
 The quick menu is normalized for both defaults and saved configurations:
@@ -281,7 +358,7 @@ session appends its former name to `previous_names` in `terminal-state.json`;
 state loading rebuilds the alias map, so aliases survive restarts and are
 scoped to the same workspace path. A message sent through an old name is still
 delivered to the same session and returns `renamed_target: true` together with
-`current_terminal_name`. The `terminal-notifications` script prints the new
+`current_terminal_name`. The `webclx-terminal-message` script prints the new
 name and its JSON response remains available to callers, allowing the sender
 to switch targets on the next message while old in-flight senders continue to
 work.
@@ -438,7 +515,7 @@ Two independent issues combined to make every `--target` deploy fail:
 - Direct `systemd-run --pipe` check that the bootstrapped worker resolves
   `cargo` to `/home/root/.cargo/bin/cargo` with the windows target visible.
 - loongMsg deploy (request 232435) succeeded end to end: 1m17s cross-compile,
-  rustCommander replace-restart, loongMsg.exe PID 416 online on HOST.
+  rustCommander replace-restart, loongMsg.exe PID 416 online on 192.168.3.38.
 - rustCommander deploy via soft button is the remaining repro after the
   webClx self-deploy (request 233614) lands the `noop-compile` path.
 
@@ -531,7 +608,7 @@ Both are merged into saved entries by stable ID and can be edited, moved, or rem
 - 经本机设置 API 仅恢复 `system_temperature` 的完整命令并清空污染的快捷键，来源是
   `path-repath-backup-20260829T133147/webclx-settings.json`，先通过 `bash -n`，未向用户终端执行。
 - 万能快捷键固定放在全能菜单首项，与底部自定义命令区分。
-- HTTP 核对本机、HOST:PORT、PUBLIC_DOMAIN:11112 的 `/assets/terminal.html`
+- HTTP 核对本机、192.168.3.2:11111、fpsq.xyz:11112 的 `/assets/terminal.html`
   均含万能入口。安卓返回前台仅派发 pageshow，不会重新加载 HTML；已打开旧页面需真实刷新。
 - `tests/terminal-command-pipes.test.mjs` 覆盖命令管道、引号与快捷键往返。
   `tests/terminal-menu-history.browser.py` 使用完整页面与生产脚本，模拟桌面和安卓 touch，

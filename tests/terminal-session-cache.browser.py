@@ -17,9 +17,10 @@ MOBILE = os.environ.get("WEBCLX_TEST_MOBILE") == "1"
 RECONNECT = os.environ.get("WEBCLX_TEST_RECONNECT") == "1"
 LEGACY_ANDROID = os.environ.get("WEBCLX_TEST_ANDROID_LEGACY") == "1"
 ANDROID = os.environ.get("WEBCLX_TEST_ANDROID") == "1" or LEGACY_ANDROID
-CHROMIUM = os.environ.get(
-    "WEBCLX_TEST_CHROMIUM",
-    "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome",
+# CI uses Playwright's installed Chromium. Local runs may select system Chrome
+# without depending on a particular user's Playwright cache version.
+CHROMIUM = os.environ.get("WEBCLX_TEST_CHROMIUM") or (
+    "/opt/google/chrome/chrome" if Path("/opt/google/chrome/chrome").is_file() else None
 )
 SESSIONS = [
     {
@@ -65,6 +66,7 @@ async def main():
     websocket_messages = {}
     console_errors = []
     page_errors = []
+    reconnect_release = asyncio.Event()
 
     async with async_playwright() as playwright, managed_browser(playwright) as browser:
         page = await browser.new_page(
@@ -137,6 +139,19 @@ async def main():
             session_id = parse_qs(parsed.query).get("session_id", [""])[0]
             websocket_routes.setdefault(session_id, []).append(websocket)
             connection_index = len(websocket_routes[session_id]) - 1
+            if RECONNECT and session_id == "session-a" and connection_index == 1:
+                # Hold a real write completion until after switching. Sampling a tiny
+                # outputWriteInFlight interval made this overlap test timing-dependent.
+                await page.evaluate(
+                    """() => {
+                        const context = terminalSessionCache.get('session-a');
+                        const originalWrite = context.term.write.bind(context.term);
+                        context.term.write = (bytes, callback) => {
+                            context.term.write = originalWrite;
+                            originalWrite(bytes, () => { window.finishReconnectWrite = callback; });
+                        };
+                    }""",
+                )
             websocket_messages.setdefault(session_id, [])
             websocket.on_message(
                 lambda message: websocket_messages[session_id].append(message)
@@ -149,6 +164,7 @@ async def main():
                     for index in range(140):
                         websocket.send(f"{session_id}-reconnect-{index:03d}\r\n".encode())
                         await asyncio.sleep(0.02)
+                    await reconnect_release.wait()
                 else:
                     websocket.send(terminal_payload(session_id))
                 websocket.send(json.dumps({"type": "terminal_backlog_replay", "action": "end"}))
@@ -158,6 +174,9 @@ async def main():
         await page.route("**/*", handle_http)
         await page.route_web_socket("**/api/terminal/ws?**", handle_websocket)
         await page.goto("http://webclx.test/terminal?path=demo&session=session-a")
+        if ANDROID or LEGACY_ANDROID:
+            # Complete the real first-use flow before testing terminal input/focus.
+            await page.locator('#webclx-language-welcome button[data-locale="zh-CN"]').click()
         try:
             await page.wait_for_function(
                 """() => activeTerminalContext?.sessionId === 'session-a' &&
@@ -298,7 +317,8 @@ async def main():
             await page.wait_for_function(
                 """() => {
                     const context = terminalSessionCache.get('session-a');
-                    return context?.backlogReplayActive && context.outputWriteInFlight;
+                    return context?.backlogReplayActive && context.outputWriteInFlight &&
+                        typeof window.finishReconnectWrite === 'function';
                 }""",
                 timeout=5000,
             )
@@ -330,6 +350,8 @@ async def main():
             )
             assert visible_probe == "session-a-node", visible_probe
             retained_repaint_ms = round((time.monotonic() - switch_started_at) * 1000)
+            await page.evaluate("() => window.finishReconnectWrite()")
+            reconnect_release.set()
             await page.wait_for_function(
                 """() => {
                     const context = terminalSessionCache.get('session-a');
@@ -531,7 +553,7 @@ async def main():
             assert bottom_state["following"] is True, bottom_state
             assert abs(bottom_state["domTop"] - bottom_state["expectedTop"]) <= 1, bottom_state
 
-        # Even a session left at the top must open at the bottom when selected.
+        # New background output replaces a previously saved history position.
         await page.click("#scroll-terminal-top")
         assert await page.evaluate("() => term.buffer.active.viewportY") == 0
         await page.select_option("#session-switcher", "session-b")
@@ -551,12 +573,61 @@ async def main():
         assert all(item["following"] and item["viewportY"] == item["baseY"] for item in reveals), reveals
         await page.evaluate("() => window.restoreBackgroundScrollProbe()")
 
+        # A cached session with no new output keeps its reading position.
+        # Sample every frame through layout/focus settling: a final-position
+        # check alone misses repeated scrolling after the dropdown switch.
+        for reading_row in [0, 20]:
+            await page.evaluate(
+                """row => {
+                    noteTerminalUserScrollIntent();
+                    term.scrollToLine(row);
+                    syncTerminalViewportDomToBuffer();
+                    saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
+                    refreshTerminalInputVisibilityAfterPageResume();
+                }""",
+                reading_row,
+            )
+            for cycle in range(3):
+                await page.select_option("#session-switcher", "session-b")
+                await page.select_option("#session-switcher", "session-a")
+                positions = await page.evaluate(
+                    """() => new Promise(resolve => {
+                        const samples = [];
+                        const started = performance.now();
+                        const sample = () => {
+                            samples.push({
+                                row: term.buffer.active.viewportY,
+                                following: activeTerminalContext.followOutput,
+                                domTop: terminalViewportElement().scrollTop,
+                                expectedTop: term.buffer.active.viewportY * terminalViewportRowHeight(),
+                            });
+                            if (performance.now() - started < 500) requestAnimationFrame(sample);
+                            else resolve(samples);
+                        };
+                        sample();
+                    })""",
+                )
+                assert all(item["row"] == reading_row and not item["following"]
+                           and abs(item["domTop"] - item["expectedTop"]) <= 1
+                           for item in positions), ("cached-reading-switch", reading_row, cycle, positions)
+
         # Typing returns to live output and persists that choice for switching.
         await page.evaluate("() => focusTerminalFromTerminalTap()")
         await page.keyboard.type("follow-again")
         await page.wait_for_timeout(700)
         await page.select_option("#session-switcher", "session-b")
         websocket_routes["session-a"][-1].send(b"\r\nFOLLOW-AFTER-INPUT\r\n")
+        await page.wait_for_timeout(100)
+        await page.select_option("#session-switcher", "session-a")
+        await page.wait_for_timeout(400)
+        assert await page.evaluate("() => term.buffer.active.viewportY === term.buffer.active.baseY")
+        assert await page.evaluate("() => activeTerminalContext.followOutput") is True
+
+        # CodeBuddy/quiet agent regression: foreground output scrolls the terminal,
+        # goes silent (no background output), switching away and back preserves bottom.
+        websocket_routes["session-a"][-1].send(b"\r\nQUIET-AGENT-OUTPUT-1\r\nQUIET-AGENT-OUTPUT-2\r\n")
+        await page.wait_for_timeout(100)
+        await page.select_option("#session-switcher", "session-b")
         await page.wait_for_timeout(100)
         await page.select_option("#session-switcher", "session-a")
         await page.wait_for_timeout(400)
@@ -676,7 +747,12 @@ async def main():
             await page.mouse.wheel(0, -300)
         await page.wait_for_function("() => term.buffer.active.viewportY < term.buffer.active.baseY")
         await page.wait_for_timeout(100)
-        assert await page.evaluate("() => activeTerminalContext.followOutput") is False
+        touch_scroll_state = await page.evaluate(
+            """() => ({following: activeTerminalContext.followOutput,
+                row: term.buffer.active.viewportY, baseY: term.buffer.active.baseY,
+                saved: terminalScrollPositions.get(state.activeSessionId)})""",
+        )
+        assert touch_scroll_state["following"] is False, touch_scroll_state
         await page.select_option("#session-switcher", "session-b")
         websocket_routes["session-a"][-1].send(b"\r\nMANUAL-PRESERVE-HISTORY\r\n")
         await page.wait_for_timeout(100)
@@ -710,6 +786,15 @@ async def main():
             return probe
 
         await page.wait_for_timeout(1800)
+        # Agent output arrives over many frames, including carriage-return
+        # status redraws. Following must survive without another input event.
+        for batch in range(30):
+            websocket_routes["session-a"][-1].send(
+                (f"\r\x1b[2KWorking {batch}\r\n" + "agent output\r\n" * 8).encode()
+            )
+            await page.wait_for_timeout(40)
+            await scroll_probe(f"continuous-agent-output-{batch}")
+
         for cols, rows in [(200, 80), (45, 18), (120, 65), (90, 24)]:
             websocket_routes["session-a"][-1].send(json.dumps({
                 "type": "terminal_viewport_size", "cols": cols, "rows": rows,
@@ -775,6 +860,29 @@ async def main():
         await scroll_probe("reading-after-output", following=False, reading_row=20)
         await page.click("#scroll-terminal-bottom")
         result["scrollGeometryAudit"] = await scroll_probe("restored-follow")
+
+        # Android may evict a quiet cached xterm. Replaying the same history
+        # must still restore the saved reading position instead of saving the
+        # empty/intermediate buffer as the new position.
+        await page.evaluate(
+            """() => {
+                noteTerminalUserScrollIntent();
+                term.scrollToLine(20);
+                syncTerminalViewportDomToBuffer();
+                saveTerminalScrollPositionForSession(state.activeSessionId, { userIntent: true });
+            }""",
+        )
+        await page.select_option("#session-switcher", "session-b")
+        await page.evaluate("() => disposeTerminalSessionContext('session-a')")
+        await page.select_option("#session-switcher", "session-a")
+        await page.wait_for_function(
+            """() => activeTerminalContext.hasLoadedOutput &&
+                !activeTerminalContext.initialReplayPending &&
+                !activeTerminalContext.backlogReplayActive &&
+                !activeTerminalContext.outputWriteInFlight""",
+        )
+        await page.wait_for_timeout(500)
+        await scroll_probe("evicted-reading-replay", following=False, reading_row=20)
 
         assert not page_errors, page_errors
         if MOBILE:

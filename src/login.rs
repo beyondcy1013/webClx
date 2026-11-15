@@ -22,8 +22,6 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::sync::{Mutex, Semaphore};
 
-use tracing::warn;
-
 use crate::{ApiResult, AppError, AppState};
 use reqwest::Url;
 
@@ -40,6 +38,7 @@ const INITIAL_PASSWORD_RANDOM_BYTES: usize = 24;
 const TRUST_SECRET_FILE_NAME: &str = ".webclx-cross-instance-trust";
 const TICKET_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const DEFAULT_USERNAME: &str = "webclx";
+pub const SUPER_ADMIN_ROLE: &str = "super_admin";
 const MAX_CONCURRENT_PASSWORD_VERIFICATIONS: usize = 2;
 const MAX_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 const MAX_ARGON2_ITERATIONS: u32 = 10;
@@ -317,12 +316,18 @@ pub async fn cross_instance_login(
     let cookie_value = issue_session_cookie(&ticket.user, &state)?;
     let ttl = session_ttl(&state.workspace_settings);
     let mut headers = axum::http::HeaderMap::new();
-    append_session_cookie(&mut headers, &cookie_value, ttl.as_secs())?;
+    append_session_cookie(
+        &mut headers,
+        &session_cookie_name(&state)?,
+        &cookie_value,
+        ttl.as_secs(),
+    )?;
     Ok((
         headers,
         Json(LoginResponse {
             ok: true,
             user: ticket.user,
+            role: Some(SUPER_ADMIN_ROLE),
         }),
     ))
 }
@@ -532,8 +537,29 @@ pub fn verify_session_cookie(value: Option<&str>, state: &AppState) -> Option<St
     Some(payload.user)
 }
 
+fn session_cookie_name_for_secret(secret: &[u8]) -> String {
+    // A stable, domain-separated HMAC identifies this instance without exposing its key.
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(b"webclx-session-cookie-namespace-v1");
+    format!("{SESSION_COOKIE_NAME}_{}", &hex::encode(mac.finalize().into_bytes())[..24])
+}
+
+fn session_cookie_name(state: &AppState) -> Result<String, AppError> {
+    let secret = session_secret(state)
+        .map_err(|error| AppError::internal(format!("加载会话密钥失败: {error}")))?;
+    Ok(session_cookie_name_for_secret(&secret))
+}
+
 pub fn verify_session_from_headers(headers: &HeaderMap, state: &AppState) -> Option<String> {
-    session_cookie_values(headers)
+    let name = session_cookie_name(state).ok()?;
+    let scoped = session_cookie_values(headers, &name);
+    // A scoped logout marker must prevent fallback to an old shared cookie.
+    let values = if scoped.is_empty() {
+        session_cookie_values(headers, SESSION_COOKIE_NAME)
+    } else {
+        scoped
+    };
+    values
         .into_iter()
         .find_map(|value| verify_session_cookie(Some(&value), state))
 }
@@ -550,6 +576,7 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub ok: bool,
     pub user: String,
+    pub role: Option<&'static str>,
 }
 
 #[derive(Deserialize)]
@@ -626,6 +653,7 @@ pub async fn update_password(
     remove_initial_password_file(&state.app_dir)
         .map_err(|error| AppError::internal(format!("无法删除初始登录凭据: {error}")))?;
 
+    let old_cookie_name = session_cookie_name(&state)?;
     let secret = generate_session_secret();
     crate::private_file::write_atomic(&state.app_dir.join(SECRET_FILE_NAME), &secret)
         .map_err(|error| AppError::internal(format!("轮换会话密钥失败: {error}")))?;
@@ -636,7 +664,7 @@ pub async fn update_password(
         .map_err(|_| AppError::internal("会话密钥锁已损坏"))? = secret;
 
     let mut headers = HeaderMap::new();
-    append_expired_session_cookie(&mut headers, SESSION_COOKIE_NAME)?;
+    append_expired_session_cookie(&mut headers, &old_cookie_name)?;
     Ok((
         headers,
         Json(UpdatePasswordResponse {
@@ -690,12 +718,18 @@ pub async fn login(
     let cookie_value = issue_session_cookie(&user, &state)?;
     let ttl = session_ttl(&state.workspace_settings);
     let mut headers = axum::http::HeaderMap::new();
-    append_session_cookie(&mut headers, &cookie_value, ttl.as_secs())?;
+    append_session_cookie(
+        &mut headers,
+        &session_cookie_name(&state)?,
+        &cookie_value,
+        ttl.as_secs(),
+    )?;
     Ok((
         headers,
         Json(LoginResponse {
             ok: true,
             user: user.clone(),
+            role: user_role(&user),
         }),
     ))
 }
@@ -708,37 +742,70 @@ fn remove_initial_password_file(app_dir: &Path) -> io::Result<()> {
     }
 }
 
+/// The initial WebUI credential is the owner identity. Later multi-user support
+/// must replace this with a persisted role lookup instead of widening it.
+pub fn user_role(user: &str) -> Option<&'static str> {
+    (!user.trim().is_empty()).then_some(SUPER_ADMIN_ROLE)
+}
+
 #[derive(Serialize)]
 pub struct SessionResponse {
     pub authenticated: bool,
     pub user: Option<String>,
+    pub role: Option<&'static str>,
 }
 
-pub async fn logout() -> impl IntoResponse {
-    let mut headers = axum::http::HeaderMap::new();
-    if let Err(err) = append_expired_session_cookie(&mut headers, SESSION_COOKIE_NAME) {
-        warn!(error = %err, "无法构造登出失效 cookie header");
-    }
-    (
+pub async fn logout(State(state): State<AppState>) -> ApiResult<impl IntoResponse> {
+    let mut headers = HeaderMap::new();
+    // Keep a scoped tombstone until any legacy signed cookie would have expired.
+    // Never delete the shared legacy cookie: another instance may still use it.
+    append_session_cookie(
+        &mut headers,
+        &session_cookie_name(&state)?,
+        "logged-out",
+        u64::from(settings_core::MAX_SESSION_TTL_DAYS) * 24 * 60 * 60,
+    )?;
+    Ok((
         StatusCode::OK,
         headers,
         Json(SessionResponse {
             authenticated: false,
+            role: None,
             user: None,
         }),
-    )
+    ))
 }
 
-/// GET /api/auth/session：返回当前会话状态（前端用于判断是否需要跳登录）。
+/// GET /api/auth/session: also promotes a valid legacy cookie before remote navigation.
 pub async fn session_status(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
-) -> Json<SessionResponse> {
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
     let user = verify_session_from_headers(&headers, &state);
-    Json(SessionResponse {
-        authenticated: user.is_some(),
-        user,
-    })
+    let mut response_headers = HeaderMap::new();
+    let name = session_cookie_name(&state)?;
+    if user.is_some() && session_cookie_values(&headers, &name).is_empty() {
+        if let Some(value) = session_cookie_values(&headers, SESSION_COOKIE_NAME)
+            .into_iter()
+            .find(|value| verify_session_cookie(Some(value), &state).is_some())
+        {
+            // Preserve the original signed expiry rather than renew the session.
+            append_session_cookie(
+                &mut response_headers,
+                &name,
+                &value,
+                session_ttl(&state.workspace_settings).as_secs(),
+            )?;
+        }
+    }
+    Ok((
+        response_headers,
+        Json(SessionResponse {
+            authenticated: user.is_some(),
+            role: user.as_deref().and_then(user_role),
+            user,
+        }),
+    ))
 }
 
 /// Nginx auth_request endpoint for sibling services on the same browser host.
@@ -754,7 +821,7 @@ pub async fn proxy_auth_check(
     }
 }
 
-fn session_cookie_values(headers: &HeaderMap) -> Vec<String> {
+fn session_cookie_values(headers: &HeaderMap, name: &str) -> Vec<String> {
     let Some(raw) = headers.get(COOKIE).and_then(|value| value.to_str().ok()) else {
         return Vec::new();
     };
@@ -762,7 +829,7 @@ fn session_cookie_values(headers: &HeaderMap) -> Vec<String> {
     for pair in raw.split(';') {
         let pair = pair.trim();
         if let Some((k, v)) = pair.split_once('=')
-            && k.trim() == SESSION_COOKIE_NAME
+            && k.trim() == name
         {
             values.push(v.trim().to_string());
         }
@@ -772,12 +839,12 @@ fn session_cookie_values(headers: &HeaderMap) -> Vec<String> {
 
 fn append_session_cookie(
     headers: &mut HeaderMap,
+    name: &str,
     value: &str,
     max_age_secs: u64,
 ) -> Result<(), AppError> {
-    let cookie = format!(
-        "{SESSION_COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs};"
-    );
+    let cookie =
+        format!("{name}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age_secs};");
     let parsed = cookie
         .parse()
         .map_err(|err| AppError::internal(format!("构造会话 cookie 失败: {err}")))?;
@@ -797,6 +864,84 @@ fn append_expired_session_cookie(headers: &mut HeaderMap, name: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn instance_cookie_namespace_is_stable_and_distinct() {
+        assert_eq!(session_cookie_name_for_secret(b"one"), session_cookie_name_for_secret(b"one"));
+        assert_ne!(session_cookie_name_for_secret(b"one"), session_cookie_name_for_secret(b"two"));
+    }
+
+    #[tokio::test]
+    async fn instance_cookie_migration_survives_remote_shared_cookie_and_local_logout() {
+        let state = test_state();
+        let valid = issue_session_cookie("fixture", &state).unwrap();
+        let name = session_cookie_name(&state).unwrap();
+        let mut legacy = HeaderMap::new();
+        legacy.insert(COOKIE, format!("{SESSION_COOKIE_NAME}={valid}").parse().unwrap());
+        let response = session_status(State(state.clone()), legacy)
+            .await
+            .unwrap()
+            .into_response();
+        let migrated = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(migrated.starts_with(&format!("{name}={valid};")));
+        let mut cookies = HeaderMap::new();
+        cookies.insert(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}=remote-instance-cookie; {name}={valid}")
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(verify_session_from_headers(&cookies, &state).as_deref(), Some("fixture"));
+        let response = logout(State(state.clone())).await.unwrap().into_response();
+        let logged_out = response
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(logged_out.starts_with(&format!("{name}=logged-out;")));
+        assert_eq!(response.headers().get_all(SET_COOKIE).iter().count(), 1);
+        cookies.insert(
+            COOKIE,
+            format!("{SESSION_COOKIE_NAME}={valid}; {name}=logged-out")
+                .parse()
+                .unwrap(),
+        );
+        assert!(verify_session_from_headers(&cookies, &state).is_none());
+    }
+
+    #[tokio::test]
+    async fn session_reports_super_admin_role_until_logout() {
+        let state = test_state();
+        let valid = issue_session_cookie("owner", &state).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, format!("{SESSION_COOKIE_NAME}={valid}").parse().unwrap());
+        let response = session_status(State(state.clone()), headers)
+            .await
+            .unwrap()
+            .into_response();
+        let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(body["authenticated"], true);
+        assert_eq!(body["user"], "owner");
+        assert_eq!(body["role"], SUPER_ADMIN_ROLE);
+
+        let response = logout(State(state)).await.unwrap().into_response();
+        let payload = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(body["authenticated"], false);
+        assert!(body["user"].is_null());
+        assert!(body["role"].is_null());
+    }
+
     use super::*;
     use crate::{AppState, auth, codex_proxy, frpc, proxy, quota, settings, terminal};
     use sha2::Digest;

@@ -71,8 +71,8 @@ assert.match(
 );
 assert.match(
   terminalJs,
-  /function isSessionCompactCapableAgent\(session\) \{[\s\S]*?!agent\.includes\("cline"\)[\s\S]*?!agent\.includes\("agy"\)[\s\S]*?!agent\.includes\("codebuddy"\)/,
-  "Cline, AGY and CodeBuddy sessions must not enter the Codex-style compact lifecycle",
+  /function isSessionCompactCapableAgent\(session\) \{[\s\S]*?!agent\.includes\("cline"\)[\s\S]*?!agent\.includes\("codebuddy"\)/,
+  "Cline and CodeBuddy sessions must not enter the Codex-style compact lifecycle",
 );
 assert.match(
   terminalJs,
@@ -91,12 +91,12 @@ assert.match(
 );
 assert.match(
   terminalJs,
-  /!isSessionCompactCapableAgent\(session\) \|\| isSessionAgyTerminal\(session\)/,
+  /!isSessionCompactCapableAgent\(session\)/,
   "auto compact candidate filtering must recheck the live agent type",
 );
 assert.match(
   terminalJs,
-  /!isSessionCompactCapableAgent\(latest\) \|\| isSessionAgyTerminal\(latest\)/,
+  /!isSessionCompactCapableAgent\(latest\)/,
   "the delayed compact sender must recheck the live agent type",
 );
 

@@ -44,6 +44,7 @@ pub fn build_settings_response(
         show_dot_entries: manager.show_dot_entries(),
         show_all_workspace_sessions: manager.show_all_workspace_sessions(),
         terminal_new_session_behavior: manager.terminal_new_session_behavior(),
+        terminal_account_sort: manager.terminal_account_sort(),
         desktop_terminal_soft_keyboard_enabled: manager.desktop_terminal_soft_keyboard_enabled(),
         terminal_soft_keyboard_scale: manager.terminal_soft_keyboard_scale(),
         terminal_floating_button_offset_vh: manager.terminal_floating_button_offset_vh(),
@@ -68,6 +69,12 @@ pub fn build_settings_response(
         terminal_error_keyword_actions: manager.terminal_error_keyword_actions(),
         terminal_activity_agent_display: manager.terminal_activity_agent_display(),
         terminal_completion_bell_enabled: manager.terminal_completion_bell_enabled(),
+        terminal_report_debounce_seconds: manager.terminal_report_debounce_seconds(),
+        default_terminal_report_debounce_seconds: default_terminal_report_debounce_seconds(),
+        terminal_message_queue_seconds: manager.terminal_message_queue_seconds(),
+        default_terminal_message_queue_seconds: default_terminal_message_queue_seconds(),
+        terminal_task_timeout_secs: manager.terminal_task_timeout_secs(),
+        default_terminal_task_timeout_secs: default_terminal_task_timeout_secs(),
         server_port_auto_increment: manager.server_port_auto_increment(),
         default_server_port_auto_increment: default_server_port_auto_increment(),
         compile_command_timeout_secs: manager.compile_command_timeout_secs(),
@@ -197,6 +204,11 @@ pub async fn save_settings(
         .unwrap_or_else(|| manager.show_all_workspace_sessions());
     let terminal_new_session_behavior =
         sanitize_terminal_new_session_behavior(payload.terminal_new_session_behavior);
+    let terminal_account_sort = sanitize_terminal_account_sort(
+        payload
+            .terminal_account_sort
+            .or_else(|| Some(manager.terminal_account_sort())),
+    );
     let desktop_terminal_soft_keyboard_enabled = payload
         .desktop_terminal_soft_keyboard_enabled
         .unwrap_or_else(|| manager.desktop_terminal_soft_keyboard_enabled());
@@ -294,6 +306,21 @@ pub async fn save_settings(
     let terminal_completion_bell_enabled = payload
         .terminal_completion_bell_enabled
         .unwrap_or_else(|| manager.terminal_completion_bell_enabled());
+    let terminal_report_debounce_seconds = normalize_terminal_report_debounce_seconds(
+        payload
+            .terminal_report_debounce_seconds
+            .unwrap_or_else(|| manager.terminal_report_debounce_seconds()),
+    );
+    let terminal_message_queue_seconds = normalize_terminal_message_queue_seconds(
+        payload
+            .terminal_message_queue_seconds
+            .unwrap_or_else(|| manager.terminal_message_queue_seconds()),
+    );
+    let terminal_task_timeout_secs = normalize_terminal_task_timeout_secs(
+        payload
+            .terminal_task_timeout_secs
+            .unwrap_or_else(|| manager.terminal_task_timeout_secs()),
+    );
     let server_port_auto_increment = payload
         .server_port_auto_increment
         .unwrap_or_else(|| manager.server_port_auto_increment());
@@ -440,6 +467,8 @@ pub async fn save_settings(
         show_dot_entries,
         show_all_workspace_sessions,
         terminal_new_session_behavior: Some(terminal_new_session_behavior.clone()),
+        terminal_account_sort: Some(terminal_account_sort.clone()),
+        terminal_codebuddy_account_sort: None,
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -462,6 +491,9 @@ pub async fn save_settings(
         terminal_error_keyword_actions: terminal_error_keyword_actions.clone(),
         terminal_activity_agent_display,
         terminal_completion_bell_enabled,
+        terminal_report_debounce_seconds,
+        terminal_message_queue_seconds,
+        terminal_task_timeout_secs,
         server_port_auto_increment,
         compile_command_timeout_secs,
         compile_max_concurrency,
@@ -515,6 +547,7 @@ pub async fn save_settings(
         show_dot_entries,
         show_all_workspace_sessions,
         terminal_new_session_behavior.clone(),
+        terminal_account_sort.clone(),
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -537,6 +570,9 @@ pub async fn save_settings(
         terminal_error_keyword_actions.clone(),
         terminal_activity_agent_display,
         terminal_completion_bell_enabled,
+        terminal_report_debounce_seconds,
+        terminal_message_queue_seconds,
+        terminal_task_timeout_secs,
         server_port_auto_increment,
         compile_command_timeout_secs,
         compile_max_concurrency,
@@ -581,6 +617,7 @@ pub async fn save_settings(
         show_dot_entries,
         show_all_workspace_sessions,
         terminal_new_session_behavior,
+        terminal_account_sort,
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -603,6 +640,9 @@ pub async fn save_settings(
         terminal_error_keyword_actions,
         terminal_activity_agent_display,
         terminal_completion_bell_enabled,
+        terminal_report_debounce_seconds,
+        terminal_message_queue_seconds,
+        terminal_task_timeout_secs,
         server_port_auto_increment,
         compile_command_timeout_secs,
         compile_max_concurrency,
@@ -649,6 +689,9 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_agent_commands",
             "terminal_activity_agent_display",
             "terminal_completion_bell_enabled",
+            "terminal_report_debounce_seconds",
+            "terminal_message_queue_seconds",
+            "terminal_task_timeout_secs",
             "server_port_auto_increment",
             "terminal_scrollback_lines",
             "terminal_error_match_line_limit",
@@ -712,6 +755,9 @@ fn fields_for_tab(tab: &str) -> &'static [&'static str] {
             "terminal_agent_commands",
             "terminal_activity_agent_display",
             "terminal_completion_bell_enabled",
+            "terminal_report_debounce_seconds",
+            "terminal_message_queue_seconds",
+            "terminal_task_timeout_secs",
             "server_port_auto_increment",
             "terminal_scrollback_lines",
             "terminal_error_match_line_limit",
@@ -779,6 +825,9 @@ const ALL_MERGE_FIELDS: &[&str] = &[
     "terminal_error_keyword_actions",
     "terminal_activity_agent_display",
     "terminal_completion_bell_enabled",
+    "terminal_report_debounce_seconds",
+    "terminal_message_queue_seconds",
+    "terminal_task_timeout_secs",
     "server_port_auto_increment",
     "compile_command_timeout_secs",
     "compile_max_concurrency",
@@ -1178,6 +1227,13 @@ fn merged_field_response(
         "terminal_completion_bell_enabled" => {
             serde_json::json!(remote.terminal_completion_bell_enabled)
         }
+        "terminal_report_debounce_seconds" => {
+            serde_json::json!(remote.terminal_report_debounce_seconds)
+        }
+        "terminal_message_queue_seconds" => {
+            serde_json::json!(remote.terminal_message_queue_seconds)
+        }
+        "terminal_task_timeout_secs" => serde_json::json!(remote.terminal_task_timeout_secs),
         "server_port_auto_increment" => serde_json::json!(remote.server_port_auto_increment),
         "compile_command_timeout_secs" => serde_json::json!(remote.compile_command_timeout_secs),
         "compile_max_concurrency" => serde_json::json!(remote.compile_max_concurrency),

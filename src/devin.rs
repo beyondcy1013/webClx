@@ -60,6 +60,28 @@ pub struct DevinAccount {
     pub active: bool,
     #[serde(default)]
     pub saved_at: i64,
+    #[serde(default)]
+    pub switch_count: u64,
+    /// 最近一次切换到该账号的时间（毫秒）；旧数据没有记录时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_switch_at: Option<i64>,
+    /// 每次切换到该账号的时间戳（毫秒），用于按时间窗口统计使用次数。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub switch_history: Vec<i64>,
+    /// Last successful upstream subscription query; independent of credential age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<DevinSubscription>,
+}
+
+/// Whitelisted billing metadata. Upstream timestamps are Unix seconds.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DevinSubscription {
+    pub slug: String,
+    pub status: String,
+    pub current_period_end: Option<i64>,
+    pub cancel_at: Option<i64>,
+    pub end_of_cycle_slug: Option<String>,
+    pub queried_at: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +151,8 @@ impl DevinManager {
                 upsert_current_login(
                     &mut accounts,
                     DevinAccount {
+                        switch_count: 0,
+                        switch_history: Vec::new(),
                         client_type: DevinClientType::Cli,
                         id,
                         name: if !probed.name.is_empty() {
@@ -147,6 +171,8 @@ impl DevinManager {
                         },
                         active: true,
                         saved_at: now_ms(),
+                        last_switch_at: None,
+                        subscription: None,
                     },
                 );
             }
@@ -188,6 +214,34 @@ impl DevinManager {
         list
     }
 
+    fn save_subscription(
+        &self,
+        queried_account: &DevinAccount,
+        subscription: &DevinSubscription,
+    ) -> Result<(), String> {
+        let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
+        let mut updated = accounts.clone();
+        let account = updated
+            .iter_mut()
+            .find(|account| {
+                account.id == queried_account.id
+                    && account.client_type == DevinClientType::Cli
+                    && account.token == queried_account.token
+                    && account.org_id == queried_account.org_id
+            })
+            .ok_or_else(|| "账号凭据已变更，请重新查询套餐".to_string())?;
+        account.subscription = Some(subscription.clone());
+        // Keep credential timestamps and login configuration intact. Publish to memory only
+        // after the atomic disk write succeeds, while serializing concurrent account changes.
+        crate::atomic_file::write_atomic(
+            &self.file,
+            &serde_json::to_vec_pretty(&updated).map_err(|e| e.to_string())?,
+        )
+        .map_err(|_| "套餐查询成功，但保存订阅信息失败".to_string())?;
+        *accounts = updated;
+        Ok(())
+    }
+
     pub fn switch_account(&self, account_id: &str) -> Result<DevinAccount, String> {
         let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
         let target_idx = accounts
@@ -217,6 +271,14 @@ impl DevinManager {
         // 4. 更新内存中的 active 状态
         for a in accounts.iter_mut() {
             a.active = a.client_type == DevinClientType::Cli && a.id == account_id;
+        }
+        {
+            let switched_at = now_ms();
+            let target = &mut accounts[target_idx];
+            target.switch_count = target.switch_count.saturating_add(1);
+            let previous = target.last_switch_at;
+            auth_core::push_switch_event(&mut target.switch_history, previous, switched_at);
+            target.last_switch_at = Some(switched_at);
         }
 
         let switched = accounts[target_idx].clone();
@@ -253,6 +315,8 @@ impl DevinManager {
         let active = current_token.as_ref().map_or(false, |tok| tok == &token);
 
         let account = DevinAccount {
+            switch_count: 0,
+            switch_history: Vec::new(),
             client_type: DevinClientType::Cli,
             id: id.clone(),
             name,
@@ -267,6 +331,8 @@ impl DevinManager {
             },
             active,
             saved_at: now_ms(),
+            last_switch_at: None,
+            subscription: None,
         };
 
         if let Some(pos) = accounts.iter().position(|a| {
@@ -312,6 +378,8 @@ impl DevinManager {
         };
 
         let account = DevinAccount {
+            switch_count: 0,
+            switch_history: Vec::new(),
             client_type: DevinClientType::Cli,
             id: sanitize_account_id(&email),
             name: if !probed.name.is_empty() {
@@ -330,6 +398,8 @@ impl DevinManager {
             },
             active: true,
             saved_at: now_ms(),
+            last_switch_at: None,
+            subscription: None,
         };
 
         let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
@@ -427,6 +497,8 @@ impl DevinManager {
             };
 
             let new_acct = DevinAccount {
+                switch_count: 0,
+                switch_history: Vec::new(),
                 client_type: DevinClientType::Cli,
                 id: id.clone(),
                 name: if !item.name.is_empty() {
@@ -445,6 +517,8 @@ impl DevinManager {
                 },
                 active,
                 saved_at: incoming_saved_at,
+                last_switch_at: None,
+                subscription: None,
             };
 
             if let Some(pos) = accounts.iter().position(|a| {
@@ -518,6 +592,8 @@ impl DevinManager {
         let database = profile.join("User/globalStorage/state.vscdb");
         let metadata = probe_desktop_profile(&profile, &database)?;
         let account = DevinAccount {
+            switch_count: 0,
+            switch_history: Vec::new(),
             client_type: DevinClientType::Desktop,
             id: metadata.id.clone(),
             name: metadata
@@ -531,6 +607,8 @@ impl DevinManager {
             plan: "Desktop".to_string(),
             active: metadata.logged_in,
             saved_at: now_ms(),
+            last_switch_at: None,
+            subscription: None,
         };
 
         let mut accounts = self.accounts.write().map_err(|e| e.to_string())?;
@@ -1089,6 +1167,8 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                 let token = parts.last().unwrap().trim();
                 if !token.is_empty() {
                     list.push(DevinAccount {
+                        switch_count: 0,
+                        switch_history: Vec::new(),
                         client_type: DevinClientType::Cli,
                         id: sanitize_account_id(email),
                         name: email.to_string(),
@@ -1099,6 +1179,8 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                         plan: "Devin Pro".to_string(),
                         active: false,
                         saved_at: now_ms(),
+                        last_switch_at: None,
+                        subscription: None,
                     });
                 }
             } else if trimmed.starts_with("devin-session-token$")
@@ -1110,6 +1192,8 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                     trimmed
                 };
                 list.push(DevinAccount {
+                    switch_count: 0,
+                    switch_history: Vec::new(),
                     client_type: DevinClientType::Cli,
                     id: format!("devin-{}", now_ms()),
                     name: "Imported Token".to_string(),
@@ -1120,6 +1204,8 @@ fn collect_devin_import_items(body: &Value) -> Result<Vec<DevinAccount>, String>
                     plan: "Devin Pro".to_string(),
                     active: false,
                     saved_at: now_ms(),
+                    last_switch_at: None,
+                    subscription: None,
                 });
             }
         }
@@ -1203,6 +1289,8 @@ fn parse_devin_account_value(v: &Value) -> Result<Option<DevinAccount>, String> 
         .unwrap_or_else(now_ms);
 
     Ok(Some(DevinAccount {
+        switch_count: 0,
+        switch_history: Vec::new(),
         client_type: DevinClientType::Cli,
         id,
         name: if !name.is_empty() {
@@ -1217,6 +1305,8 @@ fn parse_devin_account_value(v: &Value) -> Result<Option<DevinAccount>, String> 
         plan: plan.to_string(),
         active: false,
         saved_at,
+        last_switch_at: None,
+        subscription: None,
     }))
 }
 
@@ -1232,6 +1322,11 @@ pub fn routes() -> axum::Router<AppState> {
             axum::routing::delete(delete_devin_account),
         )
         .route("/api/auth/devin-accounts/{account_id}/switch", put(switch_devin_account))
+        .route("/api/auth/devin-accounts/{account_id}/quota", get(query_devin_quota))
+        .route(
+            "/api/auth/devin-accounts/{account_id}/subscription/refresh",
+            post(refresh_devin_subscription),
+        )
         .route("/api/auth/devin-accounts/import", post(import_devin_accounts))
         .route("/api/auth/devin-accounts/export", post(export_devin_accounts))
         .route("/api/auth/devin-accounts/import-current", post(import_current_devin_account))
@@ -1253,7 +1348,229 @@ async fn detect_current_devin_account(State(state): State<AppState>) -> ApiResul
 }
 
 async fn list_devin_accounts(State(state): State<AppState>) -> Json<Value> {
-    Json(json!(state.devin_manager.list_accounts()))
+    let accounts = state
+        .devin_manager
+        .list_accounts()
+        .into_iter()
+        .map(|account| {
+            let history = auth_core::effective_switch_history(
+                &account.switch_history,
+                account.last_switch_at,
+            );
+            let mut value = json!(account);
+            if let Some(map) = value.as_object_mut() {
+                map.insert("switch_history".to_string(), json!(history));
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+    Json(json!(accounts))
+}
+
+fn parse_devin_balance(value: &Value) -> Result<f64, String> {
+    value
+        .get("overage_balance")
+        .and_then(Value::as_f64)
+        .filter(|balance| balance.is_finite())
+        .ok_or_else(|| "额度接口缺少有效的 overage_balance 字段".to_string())
+}
+
+/// Native CLI team identifiers address an account; web billing addresses its organization.
+fn billing_org_id<'a>(team_id: &str, organizations: &'a Value) -> Result<&'a str, String> {
+    let account_id = team_id
+        .strip_prefix("devin-team$")
+        .ok_or_else(|| "不是 CLI 团队标识".to_string())?;
+    let matches: Vec<&str> = organizations
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|org| org.get("account_id").and_then(Value::as_str) == Some(account_id))
+        .filter_map(|org| org.get("org_id").and_then(Value::as_str))
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    match matches.as_slice() {
+        [id] => Ok(id),
+        [] => Err("当前账号的组织列表中没有与 CLI 团队对应的组织".to_string()),
+        _ => Err("CLI 团队对应多个组织，无法确定额度所属组织".to_string()),
+    }
+}
+
+async fn resolve_billing_org(
+    client: &reqwest::Client,
+    account: &DevinAccount,
+) -> ApiResult<String> {
+    if account.org_id.starts_with("devin-team$") {
+        let response = client
+            .get("https://app.devin.ai/api/organizations")
+            .bearer_auth(&account.token)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|_| AppError::bad_request("查询账号组织列表失败或超时"))?;
+        if !response.status().is_success() {
+            return Err(AppError::bad_request(format!(
+                "组织列表接口返回 HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+        let organizations: Value = response
+            .json()
+            .await
+            .map_err(|_| AppError::bad_request("组织列表接口返回无效 JSON"))?;
+        Ok(billing_org_id(&account.org_id, &organizations)
+            .map_err(AppError::bad_request)?
+            .to_string())
+    } else {
+        Ok(account.org_id.clone())
+    }
+}
+
+fn parse_devin_subscription(data: &Value, queried_at: i64) -> Result<DevinSubscription, String> {
+    let required_text = |key: &str| {
+        data.get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("订阅接口缺少有效的 {key} 字段"))
+    };
+    let timestamp = |key: &str| match data.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value
+            .as_i64()
+            .filter(|seconds| (1..=253402300799).contains(seconds))
+            .map(Some)
+            .ok_or_else(|| format!("订阅接口的 {key} 时间无效")),
+    };
+    let end_of_cycle_slug = match data.get("end_of_cycle_slug") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(slug)) if !slug.trim().is_empty() => Some(slug.clone()),
+        _ => return Err("订阅接口的 end_of_cycle_slug 无效".to_string()),
+    };
+    Ok(DevinSubscription {
+        slug: required_text("slug")?,
+        status: required_text("status")?,
+        current_period_end: timestamp("current_period_end")?,
+        cancel_at: timestamp("cancel_at")?,
+        end_of_cycle_slug,
+        queried_at,
+    })
+}
+
+async fn refresh_devin_subscription(
+    State(state): State<AppState>,
+    AxumPath(account_id): AxumPath<String>,
+) -> ApiResult<Json<DevinSubscription>> {
+    let account = state
+        .devin_manager
+        .list_accounts()
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| AppError::bad_request("找不到 Devin 账号"))?;
+    if account.client_type != DevinClientType::Cli {
+        return Err(AppError::bad_request("Desktop 登录摘要不含可查询套餐的会话凭据"));
+    }
+    if account.token.trim().is_empty() || account.org_id.trim().is_empty() {
+        return Err(AppError::bad_request("查询套餐需要该账号的 token 和组织 ID"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| AppError::bad_request("创建套餐查询客户端失败"))?;
+    let org_id = resolve_billing_org(&client, &account).await?;
+    let response = client
+        .get("https://app.devin.ai/api/billing/subscription")
+        .bearer_auth(&account.token)
+        .header("x-cog-org-id", &org_id)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|_| AppError::bad_request("套餐查询请求失败或超时"))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "订阅接口返回 HTTP {}",
+            response.status().as_u16()
+        )));
+    }
+    let data: Value = response
+        .json()
+        .await
+        .map_err(|_| AppError::bad_request("订阅接口返回无效 JSON"))?;
+    let subscription = parse_devin_subscription(&data, now_ms()).map_err(AppError::bad_request)?;
+    state
+        .devin_manager
+        .save_subscription(&account, &subscription)
+        .map_err(AppError::bad_request)?;
+    Ok(Json(subscription))
+}
+
+async fn query_devin_quota(
+    State(state): State<AppState>,
+    AxumPath(account_id): AxumPath<String>,
+) -> ApiResult<Json<Value>> {
+    let account = state
+        .devin_manager
+        .list_accounts()
+        .into_iter()
+        .find(|account| account.id == account_id)
+        .ok_or_else(|| AppError::bad_request("找不到 Devin 账号"))?;
+    if account.client_type != DevinClientType::Cli {
+        return Err(AppError::bad_request("Desktop 登录摘要不含可查询额度的会话凭据"));
+    }
+    if account.token.trim().is_empty() || account.org_id.trim().is_empty() {
+        return Err(AppError::bad_request("查询额度需要该账号的 token 和组织 ID"));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| AppError::bad_request("创建额度查询客户端失败"))?;
+    let org_id = resolve_billing_org(&client, &account).await?;
+    let mut url = reqwest::Url::parse("https://app.devin.ai/").expect("valid Devin URL");
+    url.path_segments_mut().expect("base URL").extend([
+        "api",
+        org_id.as_str(),
+        "billing",
+        "quota",
+        "usage",
+    ]);
+    let response = client
+        .get(url)
+        .bearer_auth(&account.token)
+        .header("x-cog-org-id", &org_id)
+        .header("accept", "application/json")
+        .header("origin", "https://app.devin.ai")
+        .header("referer", "https://app.devin.ai/")
+        .send()
+        .await
+        .map_err(|_| AppError::bad_request("额度查询请求失败或超时"))?;
+    if !response.status().is_success() {
+        return Err(AppError::bad_request(format!(
+            "额度接口返回 HTTP {}{}",
+            response.status().as_u16(),
+            if matches!(response.status().as_u16(), 401 | 403) {
+                "，请检查会话是否过期"
+            } else {
+                ""
+            }
+        )));
+    }
+    let data: Value = response
+        .json()
+        .await
+        .map_err(|_| AppError::bad_request("额度接口返回无效 JSON"))?;
+    let balance = parse_devin_balance(&data).map_err(AppError::bad_request)?;
+    Ok(Json(json!({
+        "overage_balance": balance,
+        "is_quota_plan": data.get("is_quota_plan").and_then(Value::as_bool),
+        "has_quota_allocation": data.get("has_quota_allocation").and_then(Value::as_bool),
+        "daily_percentage": data.get("daily_percentage").and_then(Value::as_f64),
+        "weekly_percentage": data.get("weekly_percentage").and_then(Value::as_f64),
+        "hide_daily_quota": data.get("hide_daily_quota").and_then(Value::as_bool),
+        "daily_reset_at": data.get("daily_reset_at").and_then(Value::as_str),
+        "weekly_reset_at": data.get("weekly_reset_at").and_then(Value::as_str),
+        "queried_at": now_ms()
+    })))
 }
 
 async fn add_devin_account(
@@ -1477,6 +1794,94 @@ mod tests {
     }
 
     #[test]
+    fn subscription_parses_seconds_and_missing_dates_without_inventing_expiry() {
+        let data = json!({"slug":"pro", "status":"active", "current_period_end":1793784543,
+            "cancel_at":1793784543, "end_of_cycle_slug":"free", "secret":"never-return"});
+        let subscription = parse_devin_subscription(&data, 100).unwrap();
+        assert_eq!(subscription.current_period_end, Some(1793784543));
+        assert_eq!(subscription.cancel_at, Some(1793784543));
+        assert_eq!(subscription.end_of_cycle_slug.as_deref(), Some("free"));
+        assert!(
+            !serde_json::to_string(&subscription)
+                .unwrap()
+                .contains("secret")
+        );
+        let canceled = parse_devin_subscription(
+            &json!({"slug":"pro", "status":"canceled",
+            "current_period_end":null, "cancel_at":null}),
+            200,
+        )
+        .unwrap();
+        assert_eq!(canceled.current_period_end, None);
+        assert_eq!(canceled.cancel_at, None);
+        for value in [
+            json!("1793784543"),
+            json!(-1),
+            json!(0),
+            json!(1793784543000_i64),
+        ] {
+            let mut invalid = data.clone();
+            invalid["current_period_end"] = value;
+            assert!(parse_devin_subscription(&invalid, 100).is_err());
+        }
+        assert!(parse_devin_subscription(&json!({"status":"active"}), 100).is_err());
+    }
+
+    #[test]
+    fn subscription_refresh_persists_without_changing_credentials_or_import_age() {
+        let (dir, manager) = import_test_manager("subscription-persist");
+        let mut account = cli_account("subscription-test", "token-original", true, 50);
+        account.org_id = "devin-team$account-test".into();
+        account.last_switch_at = Some(60);
+        manager.accounts.write().unwrap().push(account.clone());
+        let subscription = parse_devin_subscription(
+            &json!({"slug":"pro", "status":"active",
+            "current_period_end":1793784543}),
+            100,
+        )
+        .unwrap();
+        manager.save_subscription(&account, &subscription).unwrap();
+        let disk: Vec<DevinAccount> =
+            serde_json::from_slice(&fs::read(&manager.file).unwrap()).unwrap();
+        assert_eq!(disk[0].subscription.as_ref(), Some(&subscription));
+        let mut without_subscription = disk[0].clone();
+        without_subscription.subscription = None;
+        assert_eq!(json!(without_subscription), json!(account));
+        assert!(!manager.home.exists(), "query must not write native login files");
+        let canceled =
+            parse_devin_subscription(&json!({"slug":"pro", "status":"canceled"}), 200).unwrap();
+        manager.save_subscription(&account, &canceled).unwrap();
+        assert_eq!(manager.accounts.read().unwrap()[0].subscription.as_ref(), Some(&canceled));
+        // Old records remain readable; absent dates clear the previous date on success.
+        let old: DevinAccount = serde_json::from_value(json!(account)).unwrap();
+        assert!(old.subscription.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subscription_rejects_stale_credentials_and_does_not_publish_failed_writes() {
+        let (dir, manager) = import_test_manager("subscription-stale");
+        let account = cli_account("subscription-test", "token-original", false, 50);
+        manager.accounts.write().unwrap().push(account.clone());
+        let subscription =
+            parse_devin_subscription(&json!({"slug":"pro", "status":"active"}), 100).unwrap();
+        for changed_org in [false, true] {
+            let mut stale = account.clone();
+            if changed_org {
+                stale.org_id = "another-org".into();
+            } else {
+                stale.token = "old-token".into();
+            }
+            assert!(manager.save_subscription(&stale, &subscription).is_err());
+            assert!(!manager.file.exists());
+        }
+        fs::create_dir(&manager.file).unwrap();
+        assert!(manager.save_subscription(&account, &subscription).is_err());
+        assert!(manager.accounts.read().unwrap()[0].subscription.is_none());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn import_newer_credential_overwrites_silently() {
         let (dir, manager) = import_test_manager("import-newer");
         manager
@@ -1679,5 +2084,41 @@ mod tests {
         // 6. Delete account
         manager.delete_account(&added.id).unwrap();
         assert!(manager.list_accounts().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+    #[test]
+    fn cli_team_maps_only_to_its_unique_account_organization() {
+        let orgs = json!([
+            {"account_id":"account-other", "org_id":"org-other"},
+            {"account_id":"account-target", "org_id":"org-target"}
+        ]);
+        assert_eq!(billing_org_id("devin-team$account-target", &orgs).unwrap(), "org-target");
+        assert!(billing_org_id("devin-team$account-missing", &orgs).is_err());
+        assert!(billing_org_id("org-target", &orgs).is_err());
+        let ambiguous = json!([
+            {"account_id":"account-target", "org_id":"org-a"},
+            {"account_id":"account-target", "org_id":"org-b"}
+        ]);
+        assert!(billing_org_id("devin-team$account-target", &ambiguous).is_err());
+        assert!(billing_org_id("devin-team$account-target", &json!(null)).is_err());
+    }
+
+    #[test]
+    fn balance_requires_numeric_field_and_preserves_zero_and_negative() {
+        for balance in [0.0, 7.65, -1.5] {
+            assert_eq!(parse_devin_balance(&json!({"overage_balance": balance})).unwrap(), balance);
+        }
+        for invalid in [
+            json!({}),
+            json!(null),
+            json!({"overage_balance": "7.65"}),
+            json!({"overage_balance": null}),
+        ] {
+            assert!(parse_devin_balance(&invalid).is_err());
+        }
     }
 }

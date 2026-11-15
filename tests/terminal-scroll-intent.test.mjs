@@ -101,6 +101,19 @@ sandbox.saveTerminalScrollPositionForSession("a", { userIntent: true });
 sandbox.restoreTerminalScrollSnapshot(firstScrollSnapshot);
 assert.equal(buffer.viewportY, 10, "a pre-intent resume snapshot cannot undo the first user scroll");
 
+// Cache eviction recreates an empty xterm before its first replay. A layout
+// snapshot taken there must carry the saved reading position into replay.
+context.hasLoadedOutput = false;
+buffer.viewportY = 0;
+buffer.baseY = 0;
+const emptyReplaySnapshot = sandbox.captureTerminalScrollSnapshotForSession("a");
+assert.equal(emptyReplaySnapshot.scrollTop, 100,
+  "an empty replacement must not capture row 0 over the saved reading position");
+context.hasLoadedOutput = true;
+buffer.baseY = 120;
+sandbox.restoreTerminalScrollSnapshot(emptyReplaySnapshot);
+assert.equal(buffer.viewportY, 10, "pre-replay layout settles at the saved reading position");
+
 // Switching rebinds the listener and removes it from the previous viewport.
 sandbox.bindTerminalViewportScroll();
 const nextViewport = new Viewport();

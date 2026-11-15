@@ -29,11 +29,11 @@ use super::{
     sanitize_codex_api_auto_proxy_match_provider_ids, sanitize_codex_config_key,
     sanitize_codex_config_value, sanitize_codex_default_config_entries,
     sanitize_codex_secondary_config_key, sanitize_codex_secondary_config_value,
-    sanitize_compile_environment, sanitize_favorite_paths, sanitize_terminal_agent_commands,
-    sanitize_terminal_default_env_vars, sanitize_terminal_error_keyword_actions,
-    sanitize_terminal_function_commands, sanitize_terminal_quick_commands,
-    sanitize_terminal_quick_start_default_key, sanitize_terminal_rename_presets,
-    sanitize_workspace_history, validate_terminal_tool_entries,
+    sanitize_compile_environment, sanitize_favorite_paths, sanitize_terminal_account_sort,
+    sanitize_terminal_agent_commands, sanitize_terminal_default_env_vars,
+    sanitize_terminal_error_keyword_actions, sanitize_terminal_function_commands,
+    sanitize_terminal_quick_commands, sanitize_terminal_quick_start_default_key,
+    sanitize_terminal_rename_presets, sanitize_workspace_history, validate_terminal_tool_entries,
 };
 use std::path::{Path, PathBuf};
 
@@ -178,13 +178,17 @@ fn sanitize_claude_model_options_trims_and_deduplicates() {
 }
 
 #[test]
-fn terminal_quick_commands_default_to_codex_and_claude() {
+fn terminal_quick_commands_default_to_codex_claude_and_codebuddy() {
     let parsed: SettingsFile =
         serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
 
-    assert_eq!(parsed.terminal_quick_commands.len(), 2);
+    assert_eq!(parsed.terminal_quick_commands.len(), 3);
     assert_eq!(parsed.terminal_quick_commands[0].key, "1");
     assert_eq!(parsed.terminal_quick_commands[0].command, "codex");
+    assert_eq!(parsed.terminal_quick_commands[1].key, "2");
+    assert_eq!(parsed.terminal_quick_commands[1].command, "claude");
+    assert_eq!(parsed.terminal_quick_commands[2].key, "3");
+    assert_eq!(parsed.terminal_quick_commands[2].command, "codebuddy");
     assert_eq!(
         parsed.terminal_quick_start_default_key,
         DEFAULT_TERMINAL_QUICK_START_DEFAULT_KEY
@@ -196,7 +200,7 @@ fn terminal_function_commands_default_to_keyboard_and_slash_commands() {
     let parsed: SettingsFile =
         serde_json::from_str(r#"{"workspace_dir":"/home/codes"}"#).expect("parse settings");
 
-    assert_eq!(parsed.terminal_slash_commands.len(), 13);
+    assert_eq!(parsed.terminal_slash_commands.len(), 14);
     assert!(
         !parsed
             .terminal_slash_commands
@@ -238,6 +242,7 @@ fn terminal_function_commands_default_to_keyboard_and_slash_commands() {
             "resume",
             "status",
             "fork",
+            "model",
             "compact",
         ]
     );
@@ -269,7 +274,7 @@ fn terminal_function_commands_default_to_keyboard_and_slash_commands() {
 #[test]
 fn terminal_agent_commands_default_to_the_dialog_agents() {
     let parsed: SettingsFile = serde_json::from_str("{\"workspace_dir\": \"/home\"}").unwrap();
-    assert_eq!(parsed.terminal_agent_commands.len(), 8);
+    assert_eq!(parsed.terminal_agent_commands.len(), 10);
     assert_eq!(parsed.terminal_agent_commands[3].key, "devin");
     assert_eq!(parsed.terminal_agent_commands[3].label, "Devin");
     assert_eq!(parsed.terminal_agent_commands[3].new_command, "devin");
@@ -280,6 +285,13 @@ fn terminal_agent_commands_default_to_the_dialog_agents() {
     assert_eq!(
         parsed.terminal_agent_commands[6].resume_command,
         "opencode --session {session_id}"
+    );
+    assert_eq!(parsed.terminal_agent_commands[8].key, "qoder");
+    assert_eq!(parsed.terminal_agent_commands[8].label, "Qoder");
+    assert_eq!(parsed.terminal_agent_commands[8].new_command, "qodercli");
+    assert_eq!(
+        parsed.terminal_agent_commands[8].resume_command,
+        "qodercli --resume {session_id}"
     );
 }
 
@@ -1370,6 +1382,44 @@ fn default_terminal_tool_entries_include_fork_session() {
 }
 
 #[test]
+fn load_saved_settings_merges_builtin_slash_commands() {
+    let config_path = std::env::temp_dir()
+        .join(format!("webclx-settings-terminal-slash-cmds-{}.json", std::process::id()));
+    std::fs::write(
+        &config_path,
+        r#"{
+            "workspace_dir": "/home/codes",
+            "terminal_slash_commands": [
+                {
+                    "key": "custom_slash",
+                    "label": "/custom",
+                    "action": "send_slash_command",
+                    "command": "/custom",
+                    "shortcut": ""
+                },
+                {
+                    "key": "compact",
+                    "label": "/compact",
+                    "action": "send_slash_command",
+                    "command": "/compact",
+                    "shortcut": ""
+                }
+            ]
+        }"#,
+    )
+    .expect("write test settings");
+
+    let loaded = load_saved_settings(&config_path)
+        .expect("load settings")
+        .expect("settings should exist");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(loaded.terminal_slash_commands.iter().any(|cmd| cmd.key == "custom_slash"));
+    assert!(loaded.terminal_slash_commands.iter().any(|cmd| cmd.key == "model"));
+    assert!(loaded.terminal_slash_commands.iter().any(|cmd| cmd.key == "compact"));
+}
+
+#[test]
 fn load_saved_settings_merges_builtin_fork_tool_entry() {
     let config_path = std::env::temp_dir()
         .join(format!("webclx-settings-terminal-tool-entries-{}.json", std::process::id()));
@@ -1496,6 +1546,29 @@ fn builtin_404_actions_upgrade_legacy_continue_rules_to_mark_only() {
         action.keyword == "404 Not Found"
             && action.action == TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY
     }));
+}
+
+#[test]
+fn codebuddy_forbidden_migrates_legacy_keywords_and_retry_action() {
+    let keywords = super::merge_builtin_terminal_error_keywords(&["custom error".to_string()]);
+    assert!(
+        keywords
+            .iter()
+            .any(|keyword| keyword == "403 request illegal")
+    );
+    assert!(keywords.iter().any(|keyword| keyword == "custom error"));
+    let actions = merge_builtin_terminal_error_keyword_actions(&[TerminalErrorKeywordAction {
+        keyword: "403 REQUEST ILLEGAL".to_string(),
+        action: TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE.to_string(),
+    }]);
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| action.keyword.eq_ignore_ascii_case("403 request illegal"))
+            .map(|action| action.action.as_str())
+            .collect::<Vec<_>>(),
+        vec![TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY],
+    );
 }
 
 #[test]
@@ -1679,6 +1752,33 @@ fn legacy_actions_deserialize_with_empty_codex_launch_fields() {
 }
 
 #[test]
+fn terminal_account_sort_round_trips_and_normalizes() {
+    let json = r#"{"workspace_dir":"/home/codes","terminal_account_sort":"recent_switch"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_account_sort.as_deref(), Some("recent_switch"));
+    assert_eq!(sanitize_terminal_account_sort(parsed.terminal_account_sort), "recent_switch");
+    assert_eq!(sanitize_terminal_account_sort(Some("bogus".to_string())), "credits");
+
+    let json = r#"{"workspace_dir":"/home/codes"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_account_sort, None);
+
+    // 旧字段名仍可作为回退读取。
+    let json =
+        r#"{"workspace_dir":"/home/codes","terminal_codebuddy_account_sort":"switch_count"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_account_sort, None);
+    assert_eq!(
+        sanitize_terminal_account_sort(
+            parsed
+                .terminal_account_sort
+                .or(parsed.terminal_codebuddy_account_sort)
+        ),
+        "switch_count"
+    );
+}
+
+#[test]
 fn terminal_new_session_behavior_round_trips_and_normalizes() {
     let json = r#"{"workspace_dir":"/home/codes","terminal_new_session_behavior":"direct"}"#;
     let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
@@ -1687,4 +1787,38 @@ fn terminal_new_session_behavior_round_trips_and_normalizes() {
     let json = r#"{"workspace_dir":"/home/codes"}"#;
     let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
     assert_eq!(parsed.terminal_new_session_behavior, None);
+}
+
+#[test]
+fn terminal_message_queue_seconds_defaults_and_normalizes() {
+    assert_eq!(crate::DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS, 8);
+    assert_eq!(crate::default_terminal_message_queue_seconds(), 8);
+    assert_eq!(crate::normalize_terminal_message_queue_seconds(0), 8);
+    assert_eq!(crate::normalize_terminal_message_queue_seconds(8), 8);
+    assert_eq!(crate::normalize_terminal_message_queue_seconds(60), 60);
+    assert_eq!(crate::normalize_terminal_message_queue_seconds(601), 8);
+
+    let json = r#"{"workspace_dir":"/home/codes","terminal_message_queue_seconds":15}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_message_queue_seconds, 15);
+
+    let json = r#"{"workspace_dir":"/home/codes"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_message_queue_seconds, 8);
+}
+
+#[test]
+fn terminal_task_timeout_secs_defaults_and_normalizes() {
+    assert_eq!(crate::DEFAULT_TERMINAL_TASK_TIMEOUT_SECS, 30);
+    assert_eq!(crate::normalize_terminal_task_timeout_secs(0), 10);
+    assert_eq!(crate::normalize_terminal_task_timeout_secs(30), 30);
+    assert_eq!(crate::normalize_terminal_task_timeout_secs(180), 120);
+
+    let json = r#"{"workspace_dir":"/home/codes","terminal_task_timeout_secs":45}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_task_timeout_secs, 45);
+
+    let json = r#"{"workspace_dir":"/home/codes"}"#;
+    let parsed: SettingsFile = serde_json::from_str(json).expect("parse settings");
+    assert_eq!(parsed.terminal_task_timeout_secs, 30);
 }

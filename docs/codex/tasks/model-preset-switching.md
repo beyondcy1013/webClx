@@ -445,7 +445,7 @@ Claude 不使用 Codex 的 `comp_hash`。
 
 ## sub2api 预设导入与配置方案
 
-- sub2api 管理器支持多配置方案（Profile）下拉选择，默认配置方案为本机服务（`http://127.0.0.1:PORT`，管理员 `admin@example.invalid`），打开弹窗后默认选中并自动填入参数，支持一键连接拉取。
+- sub2api 管理器支持多配置方案（Profile）下拉选择，默认配置方案为本机服务（`http://127.0.0.1:18381`，管理员 `beyondcy@126.com`），打开弹窗后默认选中并自动填入参数，支持一键连接拉取。
 - 拉取列表（`list_only: true`）不触发预设持久化；导入保存时调用 sub2api 的 `GET /api/v1/admin/accounts/data` 接口获取包含真实未脱敏凭据的账号数据，支持精准导入或全量导入到 Codex_API / Claude_API。
 - 导入生成的预设应用后，直接实时同步写入终端用户的 `~/.codex/config.toml`、`~/.codex/auth.json` 或 `~/.claude/settings.json`。
 

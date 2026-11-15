@@ -96,6 +96,8 @@ fi
 # ---------------------------------------------------------------------------
 # 0. 阻止项目图标身份、回退渲染或静态资源版本回归进入运行环境
 # ---------------------------------------------------------------------------
+log "running terminal scroll regression gate"
+bash "$SCRIPT_DIR/repo-check.sh" --terminal-scroll
 log "running workspace icon deployment gate"
 bash "$SCRIPT_DIR/check-workspace-icon-gate.sh"
 

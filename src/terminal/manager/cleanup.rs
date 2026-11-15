@@ -66,6 +66,9 @@ impl TerminalManager {
                     state.sessions_by_id.remove(&candidate.id);
                     remove_session_from_path_locked(&mut state, &candidate.path, &candidate.id);
                     state.input_histories.remove(&candidate.id);
+                    state.input_history_cleared_at.remove(&candidate.id);
+                    state.terminal_messages_cleared_at.remove(&candidate.id);
+                    state.compile_notifications_cleared_at.remove(&candidate.id);
                     state.output_observations.remove(&candidate.id);
                     let retired = state.live_sessions.remove(&candidate.id);
                     (true, retired)

@@ -164,6 +164,8 @@ const {
   DEFAULT_TERMINAL_AUTO_CONTINUE_BACKOFF_MAX_MINUTES,
   DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
   DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
+  DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+  DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
   DEFAULT_TERMINAL_FAB_ACTION_COLOR,
   DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
   DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
@@ -225,6 +227,8 @@ const {
   normalizeTerminalUser,
   normalizeThemeMode,
   readStoredThemeMode,
+  readStoredFontSizeTiers,
+  readStoredTerminalSoftKeyboardScale,
   resolveThemeMode,
 } = globalThis.WebClxTerminalSettings;
 const {
@@ -276,6 +280,7 @@ const RESERVED_TERMINAL_DEFAULT_ENV_KEYS = new Set([
   "TERM",
 ]);
 const DEFAULT_SERVER_PORT_AUTO_INCREMENT = true;
+const DEFAULT_TERMINAL_TASK_TIMEOUT_SECS = 30;
 const DEFAULT_COMPILE_COMMAND_TIMEOUT_SECS = 600;
 const DEFAULT_COMPILE_MAX_CONCURRENCY = 5;
 const DEFAULT_COMPILE_ENVIRONMENT = Object.freeze([]);
@@ -312,6 +317,7 @@ const DEFAULT_TERMINAL_ERROR_KEYWORDS = Object.freeze([
   "unexpected status 503 Service Unavailable: Service temporarily unavailable,",
   "503 Service Unavailable",
   "404 Not Found",
+  "403 request illegal",
   "Server tool \\\"openrouter:web_search\\\" failed",
 ]);
 const TERMINAL_ERROR_KEYWORD_ACTION_CONTINUE = "continue";
@@ -326,6 +332,7 @@ const DEFAULT_TERMINAL_ERROR_KEYWORD_ACTIONS = Object.freeze([
   { keyword: "ran out of room in the model's context window", action: TERMINAL_ERROR_KEYWORD_ACTION_COMPACT_THEN_CONTINUE },
   { keyword: "last status: 404", action: TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY },
   { keyword: "404 Not Found", action: TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY },
+  { keyword: "403 request illegal", action: TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY },
 ]);
 const DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS = Object.freeze([
   "限额将在 {time} 重置",
@@ -398,8 +405,9 @@ const state = {
   showDotEntries: false,
   showAllWorkspaceSessions: true,
   terminalNewSessionBehavior: "dialog",
+  terminalAccountSort: "credits",
   desktopTerminalSoftKeyboardEnabled: true,
-  terminalSoftKeyboardScale: DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
+  terminalSoftKeyboardScale: readStoredTerminalSoftKeyboardScale(),
   terminalFloatingButtonOffsetVh: DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
   terminalFabActionColor: DEFAULT_TERMINAL_FAB_ACTION_COLOR,
   terminalFabActionOpacity: DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
@@ -413,6 +421,9 @@ const state = {
   terminalAutoContinueRespectManualInterrupt:
     DEFAULT_TERMINAL_AUTO_CONTINUE_RESPECT_MANUAL_INTERRUPT,
   terminalAutoCompactSkipCodebuddy: DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY,
+  terminalReportDebounceSeconds: DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS,
+  terminalMessageQueueSeconds: DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS,
+  terminalTaskTimeoutSecs: DEFAULT_TERMINAL_TASK_TIMEOUT_SECS,
   terminalAutoContinueTimePatterns: [...DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS],
   terminalAutoContinueActiveWindow: "",
   terminalScheduledInputAvoidWindow: DEFAULT_TERMINAL_SCHEDULED_INPUT_AVOID_WINDOW,
@@ -438,11 +449,11 @@ const state = {
   showFullPath: DEFAULT_SHOW_FULL_PATH,
   workspaceBrowserIconPath: DEFAULT_WORKSPACE_BROWSER_ICON_PATH,
   terminalWorkspaceIconPath: DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
-  terminalGroupManagerEmoji: "👑",
-  terminalGroupExecutorEmojiMode: "random",
-  terminalGroupExecutorEmoji: "⚙️",
+  terminalGroupManagerEmoji: "🔱",
+  terminalGroupExecutorEmojiMode: "fixed",
+  terminalGroupExecutorEmoji: "🚀",
   themeMode: readStoredThemeMode(),
-  fontSizeTiers: [...DEFAULT_FONT_SIZE_TIERS],
+  fontSizeTiers: readStoredFontSizeTiers(),
   proxyPresets: [],
   presetTableSort: new Map(),
   activeProxyId: null,
@@ -637,6 +648,7 @@ const settingsCurrentUserEl = document.getElementById("settings-current-user");
 const settingsUserHomeEl = document.getElementById("settings-user-home");
 const settingsConfigFileEl = document.getElementById("settings-config-file");
 const serverPortAutoIncrementInputEl = document.getElementById("server-port-auto-increment-input");
+const terminalTaskTimeoutSecsInputEl = document.getElementById("terminal-task-timeout-secs-input");
 const compileCommandTimeoutInputEl = document.getElementById("compile-command-timeout-input");
 const compileMaxConcurrencyInputEl = document.getElementById("compile-max-concurrency-input");
 const compileEnvironmentInputEl = document.getElementById("compile-environment-input");
@@ -678,6 +690,9 @@ const workspaceShowHiddenInputEl = document.getElementById("workspace-show-hidde
 const showAllWorkspaceSessionsInputEl = document.getElementById("show-all-workspace-sessions-input");
 const terminalNewSessionBehaviorInputEl = document.getElementById(
   "terminal-new-session-behavior-input",
+);
+const terminalAccountSortInputEl = document.getElementById(
+  "terminal-account-sort-input",
 );
 const desktopTerminalSoftKeyboardInputEl = document.getElementById(
   "desktop-terminal-soft-keyboard-input",

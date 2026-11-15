@@ -54,6 +54,7 @@ fn active_fallback_warning_only_matches_legacy_bare_tokens() {
 async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
     let (base_url, requests) = spawn_openai_chat_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-deepseek-chat".to_string(),
         name: "DeepSeek Chat".to_string(),
@@ -77,6 +78,7 @@ async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset.clone(),
@@ -117,6 +119,7 @@ async fn deepseek_chat_proxy_backfills_reasoning_for_synthetic_tool_history() {
 async fn codex_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
     let (base_url, requests) = spawn_openai_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-local-proxy".to_string(),
         name: "Local Proxy Preset".to_string(),
@@ -140,6 +143,7 @@ async fn codex_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset.clone(),
@@ -174,6 +178,7 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
     let (active_base_url, active_requests) = spawn_openai_mock_server().await;
     let (test_base_url, test_requests) = spawn_openai_mock_server().await;
     let active_preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-active-minimax".to_string(),
         name: "Active MiniMax".to_string(),
@@ -197,8 +202,10 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let test_preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-test-deepseek".to_string(),
         name: "Test DeepSeek".to_string(),
@@ -222,6 +229,7 @@ async fn codex_proxy_route_can_override_active_preset_from_test_header() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_presets_and_proxy_settings(
         vec![active_preset.clone(), test_preset.clone()],
@@ -256,6 +264,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
     let (old_base_url, old_requests) = spawn_openai_mock_server().await;
     let (new_base_url, new_requests) = spawn_openai_mock_server().await;
     let old_preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-old-local".to_string(),
         name: "Old Local Proxy".to_string(),
@@ -279,8 +288,10 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let new_preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-new-local".to_string(),
         name: "New Local Proxy".to_string(),
@@ -304,6 +315,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_presets_and_proxy_settings(
         vec![old_preset.clone(), new_preset.clone()],
@@ -339,6 +351,7 @@ async fn codex_proxy_route_uses_preset_id_from_local_proxy_bearer_token() {
 async fn claude_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() {
     let (base_url, requests) = spawn_anthropic_mock_server().await;
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-local-proxy".to_string(),
         name: "Claude Local Proxy Preset".to_string(),
@@ -359,6 +372,7 @@ async fn claude_proxy_route_keeps_forwarding_when_toggle_disabled_after_apply() 
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_proxy_settings(
         preset.clone(),
@@ -395,6 +409,7 @@ async fn claude_proxy_route_uses_preset_id_from_local_proxy_x_api_key() {
     let (old_base_url, old_requests) = spawn_anthropic_mock_server().await;
     let (new_base_url, new_requests) = spawn_anthropic_mock_server().await;
     let old_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-old-local".to_string(),
         name: "Old Claude Local Proxy".to_string(),
@@ -415,8 +430,10 @@ async fn claude_proxy_route_uses_preset_id_from_local_proxy_x_api_key() {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let new_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-new-local".to_string(),
         name: "New Claude Local Proxy".to_string(),
@@ -437,6 +454,7 @@ async fn claude_proxy_route_uses_preset_id_from_local_proxy_x_api_key() {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_presets_and_proxy_settings(
         vec![old_preset.clone(), new_preset.clone()],
@@ -471,6 +489,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
     let (minimax_base_url, minimax_requests) = spawn_anthropic_mock_server().await;
     let (glm_base_url, glm_requests) = spawn_anthropic_mock_server().await;
     let minimax_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-minimax".to_string(),
         name: "MiniMax".to_string(),
@@ -491,8 +510,10 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let glm_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-glm".to_string(),
         name: "GLM".to_string(),
@@ -513,6 +534,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_presets_and_proxy_settings(
         vec![minimax_preset, glm_preset.clone()],
@@ -548,6 +570,7 @@ async fn claude_dynamic_relay_token_routes_to_request_model_before_active_preset
 async fn claude_openai_chat_conversion_routes_messages_to_chat_completions() {
     let (base_url, requests) = spawn_openai_chat_mock_server().await;
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-openai-chat".to_string(),
         name: "OpenAI Chat For Claude".to_string(),
@@ -568,6 +591,7 @@ async fn claude_openai_chat_conversion_routes_messages_to_chat_completions() {
         use_local_proxy: true,
         access_mode: Some(auth_core::ClaudeAccessMode::OpenaiChat),
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_presets_and_proxy_settings(
         vec![preset.clone()],
@@ -617,6 +641,7 @@ async fn claude_openai_chat_conversion_routes_messages_to_chat_completions() {
 async fn claude_openai_responses_conversion_routes_messages_to_responses() {
     let (base_url, requests) = spawn_openai_responses_mock_server().await;
     let preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-openai-responses".to_string(),
         name: "OpenAI Responses For Claude".to_string(),
@@ -637,6 +662,7 @@ async fn claude_openai_responses_conversion_routes_messages_to_responses() {
         use_local_proxy: true,
         access_mode: Some(auth_core::ClaudeAccessMode::OpenaiResponses),
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_presets_and_proxy_settings(
         vec![preset.clone()],
@@ -687,6 +713,7 @@ async fn claude_proxy_route_uses_request_model_before_active_fallback() {
     let (minimax_base_url, minimax_requests) = spawn_anthropic_mock_server().await;
     let (glm_base_url, glm_requests) = spawn_anthropic_mock_server().await;
     let minimax_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-minimax".to_string(),
         name: "MiniMax".to_string(),
@@ -707,8 +734,10 @@ async fn claude_proxy_route_uses_request_model_before_active_fallback() {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let glm_preset = StoredClaudePreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "claude-glm".to_string(),
         name: "GLM".to_string(),
@@ -729,6 +758,7 @@ async fn claude_proxy_route_uses_request_model_before_active_fallback() {
         use_local_proxy: false,
         access_mode: None,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_claude_presets_and_proxy_settings(
         vec![minimax_preset, glm_preset.clone()],
@@ -867,6 +897,7 @@ fn test_state_with_claude_presets_and_proxy_settings(
 async fn anthropic_responses_replaces_placeholder_bearer_with_preset_key() {
     let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-anthropic-placeholder".to_string(),
         name: "Anthropic Placeholder".to_string(),
@@ -890,6 +921,7 @@ async fn anthropic_responses_replaces_placeholder_bearer_with_preset_key() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let preset_id = preset.id.clone();
     let mut later_preset = preset.clone();
@@ -944,6 +976,7 @@ async fn anthropic_responses_replaces_placeholder_bearer_with_preset_key() {
 async fn anthropic_responses_legacy_token_matches_unique_anthropic_model_after_switch() {
     let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
     let mut anthropic_preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-anthropic-legacy".to_string(),
         name: "Anthropic Legacy GLM".to_string(),
@@ -967,6 +1000,7 @@ async fn anthropic_responses_legacy_token_matches_unique_anthropic_model_after_s
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     anthropic_preset
         .config_overrides
@@ -1022,6 +1056,7 @@ async fn anthropic_responses_legacy_token_matches_unique_anthropic_model_after_s
 async fn anthropic_responses_preserves_real_client_bearer() {
     let (base_url, requests) = spawn_anthropic_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-anthropic-client-bearer".to_string(),
         name: "Anthropic Client Bearer".to_string(),
@@ -1045,6 +1080,7 @@ async fn anthropic_responses_preserves_real_client_bearer() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset,
@@ -1095,6 +1131,7 @@ async fn openai_upstream_proxy_forwards_client_bearer_instead_of_preset_key() {
     // 客户端带真实非占位 Bearer → 上游应收到客户端 token，不是预设的 sk-test。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-preset-key-test".to_string(),
         name: "Preset Key Test".to_string(),
@@ -1118,6 +1155,7 @@ async fn openai_upstream_proxy_forwards_client_bearer_instead_of_preset_key() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset,
@@ -1157,6 +1195,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_placeholder_tok
     // 占位 token (webclx-local-api-proxy:<id>) 是预设身份标识, 必须回到预设凭据。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-placeholder-test".to_string(),
         name: "Placeholder Test".to_string(),
@@ -1180,6 +1219,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_placeholder_tok
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let preset_id = preset.id.clone();
     let state = test_state_with_api_proxy_settings(
@@ -1218,6 +1258,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_no_credential()
     // 无凭据 → 预设兜底 (旧的本机直连客户端行为不变)。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-no-cred-test".to_string(),
         name: "No Cred Test".to_string(),
@@ -1241,6 +1282,7 @@ async fn openai_upstream_proxy_uses_preset_key_when_client_sends_no_credential()
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset,
@@ -1275,6 +1317,7 @@ async fn openai_upstream_proxy_injects_account_id_and_access_token_for_oauth_pre
     // OAuth 预设 → 使用 preset.base_url 上游 + 注入 access_token + account_id。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-oauth-test".to_string(),
         name: "OAuth Account".to_string(),
@@ -1298,6 +1341,7 @@ async fn openai_upstream_proxy_injects_account_id_and_access_token_for_oauth_pre
         access_mode: Some(ApiAccessMode::ChatgptOauth),
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset,
@@ -1341,6 +1385,7 @@ async fn openai_upstream_proxy_rejects_non_loopback_when_gateway_disabled() {
     // gateway_listen_non_loopback=false (默认) + 非 loopback → 403。
     let (base_url, _requests) = spawn_openai_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-gateway-off-test".to_string(),
         name: "Gateway Off Test".to_string(),
@@ -1364,6 +1409,7 @@ async fn openai_upstream_proxy_rejects_non_loopback_when_gateway_disabled() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_api_proxy_settings(
         preset,
@@ -1394,6 +1440,7 @@ async fn openai_upstream_proxy_allows_non_loopback_when_gateway_enabled() {
     // gateway_listen_non_loopback=true + 非 loopback → 放行。
     let (base_url, requests) = spawn_openai_auth_capturing_mock_server().await;
     let preset = StoredApiPreset {
+        switch_history: Vec::new(),
         interchange_source: None,
         id: "api-gateway-on-test".to_string(),
         name: "Gateway On Test".to_string(),
@@ -1417,6 +1464,7 @@ async fn openai_upstream_proxy_allows_non_loopback_when_gateway_enabled() {
         access_mode: None,
         favorite: false,
         switch_count: 0,
+        last_switch_at: None,
     };
     let state = test_state_with_gateway_enabled_api_proxy_settings(
         preset,

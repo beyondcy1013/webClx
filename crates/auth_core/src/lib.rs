@@ -71,14 +71,15 @@ pub use selection::{
 #[cfg(test)]
 pub(crate) use storage::upsert_model_catalog_entry_in_value;
 pub use storage::{
-    bump_switch_count, clear_config_provider, current_timestamp_secs, generate_preset_id,
+    SWITCH_HISTORY_MAX_ENTRIES, SWITCH_HISTORY_RETENTION_MS, bump_switch_count,
+    clear_config_provider, current_timestamp_secs, effective_switch_history, generate_preset_id,
     normalize_api_preset, normalize_auth_preset, normalize_claude_preset,
     persist_api_presets_async, persist_auth_presets_async, persist_claude_presets_async,
-    persist_upstream_proxy_settings, resolve_api_preset_name, resolve_auth_preset_name,
-    resolve_claude_preset_name, sync_api_model_catalog, sync_api_preset_config,
-    sync_auth_preset_config, validate_api_auth_file_sync, validate_api_key_sync,
-    validate_auth_file_sync, write_api_auth_file, write_claude_settings_file,
-    write_login_auth_file, write_opencode_config_file,
+    persist_upstream_proxy_settings, push_switch_event, resolve_api_preset_name,
+    resolve_auth_preset_name, resolve_claude_preset_name, sync_api_model_catalog,
+    sync_api_preset_config, sync_auth_preset_config, validate_api_auth_file_sync,
+    validate_api_key_sync, validate_auth_file_sync, write_api_auth_file,
+    write_claude_settings_file, write_login_auth_file, write_opencode_config_file,
 };
 pub(crate) use storage::{suggest_api_label, validate_auth_file};
 
@@ -204,6 +205,7 @@ pub fn preset_summary(
         secondary_config_value,
         auth: preset.auth.clone(),
         switch_count: preset.switch_count,
+        last_switch_at: preset.last_switch_at,
     }
 }
 
@@ -304,6 +306,7 @@ fn api_preset_summary_with_active(
         active,
         favorite: preset.favorite,
         switch_count: preset.switch_count,
+        last_switch_at: preset.last_switch_at,
     }
 }
 
@@ -453,6 +456,8 @@ fn claude_preset_summary_with_active(
         saved_at: preset.saved_at,
         active,
         switch_count: preset.switch_count,
+        last_switch_at: preset.last_switch_at,
+        switch_history: effective_switch_history(&preset.switch_history, preset.last_switch_at),
     }
 }
 

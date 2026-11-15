@@ -1260,7 +1260,7 @@ mod tests {
             "an installed local CLI must authenticate without requiring token environment variables"
         );
         assert_eq!(
-            local_api_token_from_sources("http://HOST:PORT", None, None, Some(&executable),),
+            local_api_token_from_sources("http://192.168.3.2:11111", None, None, Some(&executable),),
             None,
             "the installation-local token must never be sent to a remote webClx URL"
         );

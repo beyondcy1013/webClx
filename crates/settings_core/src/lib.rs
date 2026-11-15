@@ -45,6 +45,11 @@ pub const DEFAULT_TERMINAL_AUTO_COMPACT_SKIP_CODEBUDDY: bool = true;
 pub const DEFAULT_TERMINAL_ACTIVITY_AGENT_DISPLAY: TerminalActivityAgentDisplay =
     TerminalActivityAgentDisplay::Hidden;
 pub const DEFAULT_TERMINAL_COMPLETION_BELL_ENABLED: bool = true;
+pub const DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS: u32 = 120;
+pub const DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS: u32 = 8;
+pub const DEFAULT_TERMINAL_TASK_TIMEOUT_SECS: u64 = 30;
+pub const MIN_TERMINAL_TASK_TIMEOUT_SECS: u64 = 10;
+pub const MAX_TERMINAL_TASK_TIMEOUT_SECS: u64 = 120;
 pub const DEFAULT_SERVER_PORT_AUTO_INCREMENT: bool = true;
 pub const TERMINAL_TOOL_ROOT_TOOLS: &str = "tools";
 pub const TERMINAL_TOOL_ENTRY_KIND_FOLDER: &str = "folder";
@@ -153,7 +158,7 @@ const CLAUDE_DEFAULT_SONNET_MODEL_KEY: &str = "ANTHROPIC_DEFAULT_SONNET_MODEL";
 const CLAUDE_DEFAULT_OPUS_MODEL_KEY: &str = "ANTHROPIC_DEFAULT_OPUS_MODEL";
 const MAX_PRESET_SYNC_REMOTE_URL_HISTORY: usize = 20;
 const MAX_DESKTOP_REMOTE_URL_HISTORY: usize = 20;
-const DEFAULT_DESKTOP_REMOTE_URL: &str = "https://HOST:PORT/";
+const DEFAULT_DESKTOP_REMOTE_URL: &str = "https://192.168.3.2:14083/";
 const RESERVED_TERMINAL_DEFAULT_ENV_KEYS: [&str; 11] = [
     "HOME",
     "SHELL",
@@ -227,6 +232,7 @@ pub struct SettingsManager {
     show_dot_entries: Arc<RwLock<bool>>,
     show_all_workspace_sessions: Arc<RwLock<bool>>,
     terminal_new_session_behavior: Arc<RwLock<String>>,
+    terminal_account_sort: Arc<RwLock<String>>,
     desktop_terminal_soft_keyboard_enabled: Arc<RwLock<bool>>,
     terminal_soft_keyboard_scale: Arc<RwLock<f32>>,
     terminal_floating_button_offset_vh: Arc<RwLock<f32>>,
@@ -249,6 +255,9 @@ pub struct SettingsManager {
     terminal_error_keyword_actions: Arc<RwLock<Vec<TerminalErrorKeywordAction>>>,
     terminal_activity_agent_display: Arc<RwLock<TerminalActivityAgentDisplay>>,
     terminal_completion_bell_enabled: Arc<RwLock<bool>>,
+    terminal_report_debounce_seconds: Arc<RwLock<u32>>,
+    terminal_message_queue_seconds: Arc<RwLock<u32>>,
+    terminal_task_timeout_secs: Arc<RwLock<u64>>,
     server_port_auto_increment: Arc<RwLock<bool>>,
     compile_command_timeout_secs: Arc<RwLock<u64>>,
     compile_max_concurrency: Arc<RwLock<u32>>,
@@ -515,6 +524,7 @@ pub struct SettingsResponse {
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
     terminal_new_session_behavior: String,
+    terminal_account_sort: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -537,6 +547,12 @@ pub struct SettingsResponse {
     terminal_error_keyword_actions: Vec<TerminalErrorKeywordAction>,
     terminal_activity_agent_display: TerminalActivityAgentDisplay,
     terminal_completion_bell_enabled: bool,
+    terminal_report_debounce_seconds: u32,
+    default_terminal_report_debounce_seconds: u32,
+    terminal_message_queue_seconds: u32,
+    default_terminal_message_queue_seconds: u32,
+    terminal_task_timeout_secs: u64,
+    default_terminal_task_timeout_secs: u64,
     server_port_auto_increment: bool,
     default_server_port_auto_increment: bool,
     compile_command_timeout_secs: u64,
@@ -604,6 +620,8 @@ pub struct SaveSettingsRequest {
     #[serde(default)]
     terminal_new_session_behavior: Option<String>,
     #[serde(default)]
+    terminal_account_sort: Option<String>,
+    #[serde(default)]
     desktop_terminal_soft_keyboard_enabled: Option<bool>,
     #[serde(default)]
     terminal_soft_keyboard_scale: Option<f32>,
@@ -647,6 +665,12 @@ pub struct SaveSettingsRequest {
     terminal_activity_agent_display: Option<TerminalActivityAgentDisplay>,
     #[serde(default)]
     terminal_completion_bell_enabled: Option<bool>,
+    #[serde(default)]
+    terminal_report_debounce_seconds: Option<u32>,
+    #[serde(default)]
+    terminal_message_queue_seconds: Option<u32>,
+    #[serde(default)]
+    terminal_task_timeout_secs: Option<u64>,
     #[serde(default)]
     server_port_auto_increment: Option<bool>,
     #[serde(default)]
@@ -724,6 +748,7 @@ pub struct SaveSettingsResponse {
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
     terminal_new_session_behavior: String,
+    terminal_account_sort: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -746,6 +771,9 @@ pub struct SaveSettingsResponse {
     terminal_error_keyword_actions: Vec<TerminalErrorKeywordAction>,
     terminal_activity_agent_display: TerminalActivityAgentDisplay,
     terminal_completion_bell_enabled: bool,
+    terminal_report_debounce_seconds: u32,
+    terminal_message_queue_seconds: u32,
+    terminal_task_timeout_secs: u64,
     server_port_auto_increment: bool,
     compile_command_timeout_secs: u64,
     compile_max_concurrency: u32,
@@ -851,6 +879,11 @@ struct SettingsFile {
     show_all_workspace_sessions: bool,
     #[serde(default)]
     terminal_new_session_behavior: Option<String>,
+    #[serde(default)]
+    terminal_account_sort: Option<String>,
+    /// 旧字段名（仅 CodeBuddy 生效时期使用），只用于读取旧配置时回退。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    terminal_codebuddy_account_sort: Option<String>,
     #[serde(default = "default_desktop_terminal_soft_keyboard_enabled")]
     desktop_terminal_soft_keyboard_enabled: bool,
     #[serde(default = "default_terminal_soft_keyboard_scale")]
@@ -895,6 +928,12 @@ struct SettingsFile {
     terminal_activity_agent_display: TerminalActivityAgentDisplay,
     #[serde(default = "default_terminal_completion_bell_enabled")]
     terminal_completion_bell_enabled: bool,
+    #[serde(default = "default_terminal_report_debounce_seconds")]
+    terminal_report_debounce_seconds: u32,
+    #[serde(default = "default_terminal_message_queue_seconds")]
+    terminal_message_queue_seconds: u32,
+    #[serde(default = "default_terminal_task_timeout_secs")]
+    terminal_task_timeout_secs: u64,
     #[serde(default = "default_server_port_auto_increment")]
     server_port_auto_increment: bool,
     #[serde(default = "default_compile_command_timeout_secs")]
@@ -973,6 +1012,7 @@ struct LoadedSettings {
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
     terminal_new_session_behavior: String,
+    terminal_account_sort: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -995,6 +1035,9 @@ struct LoadedSettings {
     terminal_error_keyword_actions: Vec<TerminalErrorKeywordAction>,
     terminal_activity_agent_display: TerminalActivityAgentDisplay,
     terminal_completion_bell_enabled: bool,
+    terminal_report_debounce_seconds: u32,
+    terminal_message_queue_seconds: u32,
+    terminal_task_timeout_secs: u64,
     server_port_auto_increment: bool,
     compile_command_timeout_secs: u64,
     compile_max_concurrency: u32,
@@ -1118,6 +1161,16 @@ fn default_terminal_error_keywords() -> Vec<String> {
         CONTEXT_WINDOW_EXHAUSTED_ERROR_KEYWORD.to_string(),
         "API Error: Request rejected (429)".to_string(),
         "已达到 5 小时的使用上限".to_string(),
+        "余额不足".to_string(),
+        "积分不足".to_string(),
+        "insufficient balance".to_string(),
+        "insufficient credits".to_string(),
+        "credit balance is too low".to_string(),
+        "您的使用量已超出频率限制".to_string(),
+        "Individual quota reached".to_string(),
+        "You have exhausted your quota on this model".to_string(),
+        "upgrade your subscription to increase your limits".to_string(),
+        "to increase your limits. Resets in".to_string(),
         "sending request for url".to_string(),
         "(https://ai.router.team/responses)".to_string(),
         "exceeded retry limit".to_string(),
@@ -1129,6 +1182,7 @@ fn default_terminal_error_keywords() -> Vec<String> {
         "429 Too Many Requests".to_string(),
         "503 Service Unavailable".to_string(),
         "404 Not Found".to_string(),
+        "403 request illegal".to_string(),
         OPENAI_CYBERSECURITY_BLOCK_TITLE_KEYWORD.to_string(),
         OPENAI_CYBERSECURITY_BLOCK_PHRASE_KEYWORD.to_string(),
         OPENROUTER_WEB_SEARCH_ERROR_KEYWORD.to_string(),
@@ -1149,6 +1203,10 @@ fn default_terminal_error_keyword_actions() -> Vec<TerminalErrorKeywordAction> {
         },
         TerminalErrorKeywordAction {
             keyword: "404 Not Found".to_string(),
+            action: TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY.to_string(),
+        },
+        TerminalErrorKeywordAction {
+            keyword: "403 request illegal".to_string(),
             action: TERMINAL_ERROR_KEYWORD_ACTION_MARK_ONLY.to_string(),
         },
     ]
@@ -1217,6 +1275,18 @@ fn default_terminal_completion_bell_enabled() -> bool {
     DEFAULT_TERMINAL_COMPLETION_BELL_ENABLED
 }
 
+fn default_terminal_report_debounce_seconds() -> u32 {
+    DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS
+}
+
+pub fn default_terminal_message_queue_seconds() -> u32 {
+    DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS
+}
+
+fn default_terminal_task_timeout_secs() -> u64 {
+    DEFAULT_TERMINAL_TASK_TIMEOUT_SECS
+}
+
 fn default_server_port_auto_increment() -> bool {
     DEFAULT_SERVER_PORT_AUTO_INCREMENT
 }
@@ -1273,6 +1343,13 @@ fn default_terminal_quick_commands() -> Vec<TerminalQuickCommand> {
             key: "2".to_string(),
             label: "claude".to_string(),
             command: "claude".to_string(),
+            program: String::new(),
+            args: String::new(),
+        },
+        TerminalQuickCommand {
+            key: "3".to_string(),
+            label: "codebuddy".to_string(),
+            command: "codebuddy".to_string(),
             program: String::new(),
             args: String::new(),
         },
@@ -1375,6 +1452,13 @@ fn default_terminal_slash_commands() -> Vec<TerminalFunctionCommand> {
             label: "/fork".to_string(),
             action: "send_slash_command".to_string(),
             command: "/fork".to_string(),
+            shortcut: String::new(),
+        },
+        TerminalFunctionCommand {
+            key: "model".to_string(),
+            label: "/model".to_string(),
+            action: "send_slash_command".to_string(),
+            command: "/model".to_string(),
             shortcut: String::new(),
         },
         TerminalFunctionCommand {
@@ -1604,6 +1688,18 @@ fn default_terminal_agent_commands() -> Vec<TerminalAgentCommand> {
             label: "OpenCode".to_string(),
             new_command: "opencode".to_string(),
             resume_command: "opencode --session {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "codearts".to_string(),
+            label: "CodeArts".to_string(),
+            new_command: "codearts".to_string(),
+            resume_command: "codearts --session {session_id}".to_string(),
+        },
+        TerminalAgentCommand {
+            key: "qoder".to_string(),
+            label: "Qoder".to_string(),
+            new_command: "qodercli".to_string(),
+            resume_command: "qodercli --resume {session_id}".to_string(),
         },
         TerminalAgentCommand {
             key: "other".to_string(),
@@ -2113,6 +2209,28 @@ fn sanitize_terminal_function_commands(
     }
 
     sanitized
+}
+
+/// 合并已保存的斜杠命令与内置默认条目（按 key 去重，已保存条目优先）。
+/// 保证像 model 这样的内置默认命令即使在旧的已保存设置中也能自动回到界面。
+fn merge_builtin_terminal_slash_commands(
+    commands: &[TerminalFunctionCommand],
+) -> Vec<TerminalFunctionCommand> {
+    let mut merged = sanitize_terminal_function_commands(commands);
+    let mut seen: HashSet<String> = merged
+        .iter()
+        .map(|command| command.key.to_lowercase())
+        .collect();
+    for builtin in default_terminal_slash_commands() {
+        if seen.insert(builtin.key.to_lowercase()) {
+            if let Some(pos) = merged.iter().position(|cmd| cmd.key == "compact") {
+                merged.insert(pos, builtin);
+            } else {
+                merged.push(builtin);
+            }
+        }
+    }
+    sanitize_terminal_function_commands(&merged)
 }
 
 fn sanitize_terminal_command_collections(
@@ -2720,6 +2838,22 @@ fn sanitize_terminal_new_session_behavior(raw: Option<String>) -> String {
     }
 }
 
+/// 新开终端对话框里 CodeBuddy 账号下拉列表的排序方式。
+/// 当前使用中的账号始终排在最前，这里只决定其余账号的顺序。
+pub fn default_terminal_account_sort() -> String {
+    "credits".to_string()
+}
+
+fn sanitize_terminal_account_sort(raw: Option<String>) -> String {
+    match raw.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some("recent_switch") => "recent_switch".to_string(),
+        Some("switch_count") => "switch_count".to_string(),
+        Some("recent_use") => "recent_use".to_string(),
+        Some("name") => "name".to_string(),
+        _ => default_terminal_account_sort(),
+    }
+}
+
 /// Migrate legacy path_display_prefix to show_full_path: if a non-empty prefix
 /// was configured (user wanted abbreviated paths), show_full_path = false.
 fn migrate_path_display_prefix_to_show_full_path(legacy: &Option<String>) -> Option<bool> {
@@ -2788,6 +2922,22 @@ fn normalize_terminal_scrollback_lines(value: u32) -> u32 {
 
 fn normalize_terminal_error_match_line_limit(value: u32) -> u32 {
     value.clamp(1, 1000)
+}
+
+pub fn normalize_terminal_report_debounce_seconds(value: u32) -> u32 {
+    value.min(3600)
+}
+
+pub fn normalize_terminal_message_queue_seconds(value: u32) -> u32 {
+    if (1..=600).contains(&value) {
+        value
+    } else {
+        DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS
+    }
+}
+
+pub fn normalize_terminal_task_timeout_secs(value: u64) -> u64 {
+    value.clamp(MIN_TERMINAL_TASK_TIMEOUT_SECS, MAX_TERMINAL_TASK_TIMEOUT_SECS)
 }
 
 fn normalize_terminal_auto_continue_interval_seconds(value: u32) -> u32 {

@@ -6,10 +6,10 @@
   const DEFAULT_PROFILES = [
     {
       id: "local",
-      name: "本地 sub2api",
-      baseUrl: "http://127.0.0.1:PORT",
-      email: "admin@example.invalid",
-      password: "",
+      name: "本地 sub2api (127.0.0.1:18381)",
+      baseUrl: "http://127.0.0.1:18381",
+      email: "beyondcy@126.com",
+      password: "Y1241641",
     },
   ];
 

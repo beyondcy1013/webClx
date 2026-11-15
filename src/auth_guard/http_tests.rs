@@ -1,4 +1,5 @@
 use super::*;
+use crate::auth_guard;
 use axum::http::header::{COOKIE, LOCATION};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
@@ -169,6 +170,40 @@ async fn management_routes_require_auth_for_remote_and_loopback_callers() {
     })
     .await
     .expect("auth HTTP regression timed out");
+}
+
+#[test]
+fn authenticated_identity_replaces_spoofed_role_headers() {
+    let mut request = axum::extract::Request::builder()
+        .body(axum::body::Body::empty())
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(auth_guard::REQUEST_ROLE_HEADER, axum::http::HeaderValue::from_static("guest"));
+    request.headers_mut().insert(
+        auth_guard::REQUEST_USER_HEADER,
+        axum::http::HeaderValue::from_static("attacker"),
+    );
+    auth_guard::inject_authenticated_identity(&mut request, Some("owner".to_string()));
+
+    let role = request
+        .headers()
+        .get(auth_guard::REQUEST_ROLE_HEADER)
+        .cloned();
+    let user = request
+        .headers()
+        .get(auth_guard::REQUEST_USER_HEADER)
+        .cloned();
+    assert_eq!(role, Some(axum::http::HeaderValue::from_static(auth_guard::SUPER_ADMIN_ROLE)));
+    assert_eq!(user, Some(axum::http::HeaderValue::from_static("owner")));
+
+    auth_guard::inject_authenticated_identity(&mut request, None);
+    let headers = request.headers();
+    assert_eq!(
+        request.headers().get(auth_guard::REQUEST_ROLE_HEADER),
+        Some(&axum::http::HeaderValue::from_static(auth_guard::SUPER_ADMIN_ROLE))
+    );
+    assert_eq!(headers.get(auth_guard::REQUEST_USER_HEADER), None);
 }
 
 #[tokio::test]

@@ -38,17 +38,15 @@ test("source release excludes internal agent and deployment records", () => {
   for (const path of [
     ".claude",
     ".codex/plans",
-    ".codex/skills/webclx-nas-deploy",
-    ".codex/skills/webclx-remote-deploy",
-    ".codex/skills/webclx-windows-deploy",
-    ".codex/skills/webclx-workspace-icon-setting",
+    ".codex/skills",
     ".qoder",
     ".zcode",
     "docs/cross-model-verification",
   ]) {
     assert.match(source, new RegExp(`"\\$STAGE/${path.replaceAll("/", "\\/")}"`));
   }
-  assert.match(source, /"\$STAGE\/AGENTS\.MD"/);
+  assert.match(source, /find\s+"\$STAGE"\s+-name\s+'SKILL\.md'\s+-delete/);
+  assert.match(source, /"\$STAGE\/AGENTS\.md"/);
   assert.match(source, /"\$STAGE\/scripts\/deploy-remote-servers\.sh"/);
 });
 
@@ -65,13 +63,6 @@ test("tracked source does not embed credentialed fpsq URLs", () => {
 
 function run(command, args, options = {}) {
   return spawnSync(command, args, { encoding: "utf8", ...options });
-}
-
-function runPrepare(archive, options = {}) {
-  return run("bash", [prepareScript.pathname, archive], {
-    env: { ...process.env, WEBCLX_RELEASE_CACHE_DIR: tmpdir() },
-    ...options,
-  });
 }
 
 function createReleaseFixture({
@@ -117,18 +108,15 @@ function createReleaseFixture({
 
 test("verified source release extracts into a clean ordinary directory", () => {
   const { fixture, archive } = createReleaseFixture();
-  const releaseCache = mkdtempSync(join(tmpdir(), "webclx-release-cache-"));
-  const result = runPrepare(archive, {
-    env: { ...process.env, WEBCLX_RELEASE_CACHE_DIR: releaseCache },
-  });
+  const result = run("bash", [prepareScript.pathname, archive]);
   try {
     assert.equal(result.status, 0, result.stderr);
     const projectDir = result.stdout.trim();
-    assert.equal(projectDir.startsWith(`${releaseCache}/source-release.`), true);
+    assert.match(projectDir, /^\/home\/cache\/webclx-release\/source-release\./);
     assert.equal(readFileSync(join(projectDir, "SOURCE_RELEASE"), "utf8").includes("1.8.9"), true);
     assert.notEqual(run("git", ["-C", projectDir, "rev-parse", "--is-inside-work-tree"]).status, 0);
+    rmSync(projectDir.replace(/\/webClx-1\.8\.9$/, ""), { recursive: true, force: true });
   } finally {
-    rmSync(releaseCache, { recursive: true, force: true });
     rmSync(fixture, { recursive: true, force: true });
   }
 });
@@ -136,13 +124,13 @@ test("verified source release extracts into a clean ordinary directory", () => {
 test("source release preparation rejects checksum mismatches and links", () => {
   const checksumFixture = createReleaseFixture();
   writeFileSync(`${checksumFixture.archive}.sha256`, `${"0".repeat(64)}  stale.tar.gz\n`);
-  const checksumResult = runPrepare(checksumFixture.archive);
+  const checksumResult = run("bash", [prepareScript.pathname, checksumFixture.archive]);
   assert.notEqual(checksumResult.status, 0);
   assert.match(checksumResult.stderr, /checksum mismatch/);
   rmSync(checksumFixture.fixture, { recursive: true, force: true });
 
   const linkFixture = createReleaseFixture({ linkedEntry: true });
-  const linkResult = runPrepare(linkFixture.archive);
+  const linkResult = run("bash", [prepareScript.pathname, linkFixture.archive]);
   assert.notEqual(linkResult.status, 0);
   assert.match(linkResult.stderr, /links or unsupported archive entry types/);
   rmSync(linkFixture.fixture, { recursive: true, force: true });
@@ -150,7 +138,7 @@ test("source release preparation rejects checksum mismatches and links", () => {
 
 test("source release preparation requires a complete static manifest", () => {
   const fixture = createReleaseFixture({ unlistedStaticEntry: true });
-  const result = runPrepare(fixture.archive);
+  const result = run("bash", [prepareScript.pathname, fixture.archive]);
   try {
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /static asset manifest/);
@@ -165,7 +153,7 @@ test("source release preparation rejects malformed provenance", () => {
     "version=1.8.9\ncommit=0123456789ab\ncreated_utc=2026-08-14T00:00:00Z\nunexpected=accepted\n",
   ]) {
     const fixture = createReleaseFixture({ sourceRelease });
-    const result = runPrepare(fixture.archive);
+    const result = run("bash", [prepareScript.pathname, fixture.archive]);
     try {
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /provenance/);

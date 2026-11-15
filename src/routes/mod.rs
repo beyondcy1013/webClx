@@ -1,12 +1,14 @@
 mod agent;
 mod artifacts;
 mod auth;
+mod codearts;
 mod codebuddy;
 mod codex_task;
 mod collaboration;
 mod cymusic_diagnostics;
 mod frp;
 mod gateway;
+mod native_login;
 mod opencode;
 mod operations;
 mod pages;
@@ -31,6 +33,8 @@ pub(super) fn app(state: AppState) -> Router {
         .merge(auth::routes())
         .merge(codebuddy::routes())
         .merge(opencode::routes())
+        .merge(codearts::routes())
+        .merge(native_login::routes())
         .merge(crate::agy::routes())
         .merge(crate::devin::routes())
         .merge(codex_task::routes())

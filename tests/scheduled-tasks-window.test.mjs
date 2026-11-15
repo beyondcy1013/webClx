@@ -41,7 +41,15 @@ test("terminal opens the shared task manager as an in-page lightweight dialog", 
     terminalHtml,
     /id="unified-task-dialog-scope"[\s\S]*?data-unified-task-view="current"[\s\S]*?当前目录[\s\S]*?data-unified-task-view="all"[\s\S]*?全部/,
   );
-  assert.match(terminalHtml, /定时任务统一管理器/);
+  assert.match(
+    terminalHtml,
+    /id="terminal-scheduled-tasks-dialog"[\s\S]*?<h2 id="terminal-scheduled-tasks-title">定时消息管理器<\/h2>/,
+  );
+  assert.doesNotMatch(
+    terminalHtml,
+    /id="terminal-scheduled-tasks-dialog"[\s\S]{0,300}?<p class="section-label">定时<\/p>/,
+    "the dialog must show a single title instead of a repeated section label above it",
+  );
   assert.match(terminalHtml, /app-unified-tasks\.js\?v=/);
 });
 
@@ -100,7 +108,12 @@ test("server tasks can send immediately and cancel without horizontal scrolling"
   );
   assert.match(
     unifiedTasksJs,
-    /async function runUnifiedTaskNow\(taskId\) \{[\s\S]*?const task = findUnifiedTask\(taskId\);[\s\S]*?data: scheduledInputBody\(task\),[\s\S]*?\/input`[\s\S]*?if \(task\.sendEnter\) \{[\s\S]*?\/enter`[\s\S]*?cancelUnifiedTaskBySource\("server", taskId\);[\s\S]*?定时任务已立即发送并取消。/,
+    /async function runUnifiedTaskNow\(taskId\) \{[\s\S]*?const task = findUnifiedTask\(taskId\);[\s\S]*?data: scheduledInputBody\(task\),[\s\S]*?\/input`[\s\S]*?if \(task\.sendEnter\) \{[\s\S]*?\/enter`[\s\S]*?deleteUnifiedTaskBySource\("server", taskId\);[\s\S]*?定时任务已立即发送，已从列表移除。/,
+  );
+  assert.doesNotMatch(
+    unifiedTasksJs,
+    /async function runUnifiedTaskNow\(taskId\) \{[\s\S]{0,2500}?cancelUnifiedTaskBySource\(/,
+    "run-now must not reuse the confirm-gated cancel path after the message is already sent",
   );
   assert.match(
     unifiedTasksJs,
@@ -112,7 +125,7 @@ test("server tasks can send immediately and cancel without horizontal scrolling"
   );
   assert.match(
     settingsCss,
-    /\.terminal-scheduled-tasks-dialog \{[\s\S]*?width: min\(680px, calc\(100vw - 28px\)\);[\s\S]*?max-height: min\(77dvh, 700px\);/,
+    /\.terminal-scheduled-tasks-dialog \{[\s\S]*?width: min\(860px, calc\(100vw - 28px\)\);[\s\S]*?max-height: min\(77dvh, 700px\);/,
   );
   assert.match(
     settingsCss,
@@ -120,7 +133,11 @@ test("server tasks can send immediately and cancel without horizontal scrolling"
   );
   assert.match(
     settingsCss,
-    /\.terminal-scheduled-tasks-form \.unified-task-table th:nth-child\(1\),[\s\S]*?\.terminal-scheduled-tasks-form \.unified-task-table td:nth-child\(1\) \{ width: 178px; \}/,
+    /\.terminal-scheduled-tasks-form \.unified-task-table th:nth-child\(1\),[\s\S]*?\.terminal-scheduled-tasks-form \.unified-task-table td:nth-child\(1\) \{ width: 124px; \}/,
+  );
+  assert.match(
+    settingsCss,
+    /\.terminal-scheduled-tasks-form \.unified-task-table th:nth-child\(3\),[\s\S]*?\.terminal-scheduled-tasks-form \.unified-task-table td:nth-child\(3\) \{ width: 260px; \}/,
   );
   assert.match(
     terminalHtml,
@@ -177,5 +194,23 @@ test("remaining time uses a numeric hours-minutes-seconds format", () => {
   assert.match(
     unifiedTasksJs,
     /return `\$\{hours\}:\$\{String\(minutes\)\.padStart\(2, "0"\)\}:\$\{String\(seconds\)\.padStart\(2, "0"\)\}`;/,
+  );
+});
+
+test("due time formatting removes year field", () => {
+  assert.match(
+    unifiedTasksJs,
+    /function formatUnifiedTaskDue\(dueAtMs\)[\s\S]*?\$\{month\}-\$\{day\} \$\{hours\}:\$\{minutes\}:\$\{seconds\}/,
+  );
+});
+
+test("double-clicking a task triggers edit mode", () => {
+  assert.match(
+    unifiedTasksJs,
+    /taskListEl\?\.addEventListener\("dblclick"[\s\S]*?row\.dataset\.taskId[\s\S]*?editUnifiedTask\(/,
+  );
+  assert.match(
+    settingsCss,
+    /\.terminal-scheduled-tasks-form \.unified-task-table tbody tr \{[\s\S]*?cursor:\s*pointer;/,
   );
 });

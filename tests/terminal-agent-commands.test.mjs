@@ -24,10 +24,10 @@ const specifiedTask = readFileSync(
 const styles = readFileSync(new URL("../static/styles-terminal.css", import.meta.url), "utf8");
 
 test("terminal agent commands use built-in defaults when unconfigured", () => {
-  assert.equal(DEFAULT_TERMINAL_AGENT_COMMANDS.length, 9);
+  assert.equal(DEFAULT_TERMINAL_AGENT_COMMANDS.length, 11);
   assert.deepEqual(
     normalizeTerminalAgentCommands(undefined).map((item) => item.key),
-    ["codex", "cdx", "claude", "codebuddy", "devin", "agy", "cline", "opencode", "other"],
+    ["codex", "cdx", "claude", "codebuddy", "devin", "agy", "cline", "opencode", "codearts", "qoder", "other"],
   );
   assert.deepEqual(
     normalizeTerminalAgentCommands([]),

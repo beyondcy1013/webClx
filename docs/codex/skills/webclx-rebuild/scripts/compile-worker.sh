@@ -41,6 +41,9 @@ MAX_CONCURRENCY="${WEBCLX_COMPILE_MAX_CONCURRENCY:-5}"
 CALLBACK_RETRY_COUNT="${WEBCLX_CALLBACK_RETRY_COUNT:-300}"
 CALLBACK_RETRY_MAX_TIME="${WEBCLX_CALLBACK_RETRY_MAX_TIME:-300}"
 TERMINAL_CALLBACK_HTTP_TIMEOUT="${WEBCLX_TERMINAL_CALLBACK_HTTP_TIMEOUT:-45}"
+# Window used when looking for a real build that was already in flight when a
+# warm-up was requested; older runs cannot have overlapped a fresh request.
+PRECOMPILE_AHEAD_WINDOW_MIN=360
 
 local_token_file() {
   if [ -n "${WEBCLX_LOCAL_TOKEN_FILE:-}" ]; then
@@ -116,6 +119,9 @@ fi
 
 REQUESTS_DIR="$QUEUE_DIR/requests"
 RUNS_DIR="$QUEUE_DIR/runs"
+# Newest real build request per project (written by the queue API). A precompile
+# warm-up yields to it instead of rewriting the shared target directory.
+SUPERSEDE_DIR="$QUEUE_DIR/supersede"
 LOCK_FILE="$QUEUE_DIR/worker.lock"
 CLAIM_LOCK_FILE="$QUEUE_DIR/claim.lock"
 RESOURCE_LOCKS_DIR="$QUEUE_DIR/resource-locks"
@@ -194,7 +200,7 @@ if [[ ! "$CALLBACK_RETRY_MAX_TIME" =~ ^[0-9]+$ ]] || [ "$CALLBACK_RETRY_MAX_TIME
   CALLBACK_RETRY_MAX_TIME=300
 fi
 
-mkdir -p "$REQUESTS_DIR" "$RUNS_DIR" "$WORK_TMP_DIR" "$WORK_CARGO_TARGET_DIR" "$RESOURCE_LOCKS_DIR" "$SLOT_LOCKS_DIR"
+mkdir -p "$REQUESTS_DIR" "$RUNS_DIR" "$SUPERSEDE_DIR" "$WORK_TMP_DIR" "$WORK_CARGO_TARGET_DIR" "$RESOURCE_LOCKS_DIR" "$SLOT_LOCKS_DIR"
 DEPLOY_TARGET_LOCK_FDS=()
 declare -A SPEC_ENV_ORIGINAL_PRESENT=()
 declare -A SPEC_ENV_ORIGINAL_VALUES=()
@@ -595,6 +601,250 @@ spec_key() {
   sha256sum | awk '{print $1}'
 }
 
+project_supersede_marker_path() {
+  local project_dir="$1"
+  printf '%s/%s.json\n' "$SUPERSEDE_DIR" \
+    "$(printf '%s' "$project_dir" | sha256sum | awk '{print $1}')"
+}
+
+# A run is a warm-up run only when every request it absorbed is a precompile
+# request. A run that also carries a real compile/deploy request must never be
+# cancelled for a newer request.
+run_precompile_only() {
+  local run_dir="$1"
+  local file request_id seen=0
+  while IFS= read -r -d '' file; do
+    request_id=$(json_get "$file" '.request_id')
+    [ -n "$request_id" ] || continue
+    if [ "$(json_get "$file" '.purpose')" != "precompile" ]; then
+      return 1
+    fi
+    seen=1
+  done < <(find "$run_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  [ "$seen" -eq 1 ]
+}
+
+# Newest precompile request absorbed by this run, as "<requested_at> <id>".
+run_precompile_latest() {
+  local run_dir="$1"
+  local file request_id value latest_at="" latest_id=""
+  while IFS= read -r -d '' file; do
+    request_id=$(json_get "$file" '.request_id')
+    [ -n "$request_id" ] || continue
+    if [ "$(json_get "$file" '.purpose')" != "precompile" ]; then
+      continue
+    fi
+    value=$(json_get "$file" '.requested_at')
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    if [ -z "$latest_id" ] || [ "$value" -gt "$latest_at" ] \
+       || { [ "$value" -eq "$latest_at" ] && [[ "$request_id" > "$latest_id" ]]; }; then
+      latest_at="$value"
+      latest_id="$request_id"
+    fi
+  done < <(find "$run_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  [ -n "$latest_id" ] || return 1
+  printf '%s %s\n' "$latest_at" "$latest_id"
+}
+
+# Earliest precompile request absorbed by this run, as "<requested_at> <id>".
+run_precompile_earliest() {
+  local run_dir="$1"
+  local file request_id value earliest_at="" earliest_id=""
+  while IFS= read -r -d '' file; do
+    request_id=$(json_get "$file" '.request_id')
+    [ -n "$request_id" ] || continue
+    if [ "$(json_get "$file" '.purpose')" != "precompile" ]; then
+      continue
+    fi
+    value=$(json_get "$file" '.requested_at')
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    if [ -z "$earliest_id" ] || [ "$value" -lt "$earliest_at" ]; then
+      earliest_at="$value"
+      earliest_id="$request_id"
+    fi
+  done < <(find "$run_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  [ -n "$earliest_id" ] || return 1
+  printf '%s %s\n' "$earliest_at" "$earliest_id"
+}
+
+# First real (non-prewarm) request for the project found in a run directory.
+run_real_request_id() {
+  local run_dir="$1"
+  local project_dir="$2"
+  local file request_id
+  while IFS= read -r -d '' file; do
+    request_id=$(json_get "$file" '.request_id')
+    [ -n "$request_id" ] || continue
+    [ "$(json_get "$file" '.project_dir')" = "$project_dir" ] || continue
+    if [ "$(json_get "$file" '.purpose')" != "precompile" ]; then
+      printf '%s\n' "$request_id"
+      return 0
+    fi
+  done < <(find "$run_dir" -maxdepth 1 -type f -name '*.json' -print0)
+  return 1
+}
+
+# A warm-up that was queued behind a real build of the same project has nothing
+# left to warm once that build runs, and only adds queue time. Report the real
+# request that was already queued or running when this warm-up was submitted.
+precompile_behind_real_build() {
+  local project_dir="$1"
+  local run_dir="$2"
+  local earliest_pair earliest_at candidate_id candidate_dir finish_mtime
+  local file requested
+  earliest_pair=$(run_precompile_earliest "$run_dir") || return 1
+  earliest_at="${earliest_pair%% *}"
+
+  for file in "$REQUESTS_DIR"/*.json; do
+    [ -f "$file" ] || continue
+    [ "$(json_get "$file" '.project_dir')" = "$project_dir" ] || continue
+    if [ "$(json_get "$file" '.purpose')" = "precompile" ]; then
+      continue
+    fi
+    requested=$(json_get "$file" '.requested_at')
+    [[ "$requested" =~ ^[0-9]+$ ]] || requested=0
+    [ "$requested" -le "$earliest_at" ] || continue
+    candidate_id=$(json_get "$file" '.request_id')
+    [ -n "$candidate_id" ] || continue
+    printf '%s ahead\n' "$candidate_id"
+    return 0
+  done
+
+  while IFS= read -r -d '' candidate_dir; do
+    [ "$candidate_dir" != "$run_dir" ] || continue
+    candidate_id=$(run_real_request_id "$candidate_dir" "$project_dir") || continue
+    if [ ! -f "$candidate_dir/run-finished-at" ]; then
+      printf '%s ahead\n' "$candidate_id"
+      return 0
+    fi
+    finish_mtime=$(stat -c %Y "$candidate_dir/run-finished-at" 2>/dev/null || echo 0)
+    if [ "$finish_mtime" -ge "$earliest_at" ]; then
+      printf '%s ahead\n' "$candidate_id"
+      return 0
+    fi
+  done < <(find "$RUNS_DIR" -mindepth 1 -maxdepth 1 -type d -mmin -"$PRECOMPILE_AHEAD_WINDOW_MIN" -print0 2>/dev/null)
+  return 1
+}
+
+# Newest build request for the project, as "<requested_at> <id> <purpose>".
+# Prewarm requests supersede older prewarms as well: a warm-up is expendable and
+# the newest click already reflects the state the user wants warmed. Both the
+# sticky queue-API marker and the pending request files are consulted: a request
+# may already have been claimed by another worker and left the requests
+# directory while this warm-up runs.
+newest_build_request_for_project() {
+  local project_dir="$1"
+  local marker file candidate_id candidate_at candidate_purpose
+  local newest_at="" newest_id="" newest_purpose=""
+  marker="$(project_supersede_marker_path "$project_dir")"
+  if [ -f "$marker" ]; then
+    candidate_id=$(json_get "$marker" '.request_id')
+    candidate_at=$(json_get "$marker" '.requested_at')
+    candidate_purpose=$(json_get "$marker" '.purpose')
+    [[ "$candidate_at" =~ ^[0-9]+$ ]] || candidate_at=0
+    if [ -n "$candidate_id" ]; then
+      newest_at="$candidate_at"
+      newest_id="$candidate_id"
+      newest_purpose="$candidate_purpose"
+    fi
+  fi
+  while IFS= read -r -d '' file; do
+    [ "$(json_get "$file" '.project_dir')" = "$project_dir" ] || continue
+    candidate_id=$(json_get "$file" '.request_id')
+    [ -n "$candidate_id" ] || continue
+    candidate_at=$(json_get "$file" '.requested_at')
+    [[ "$candidate_at" =~ ^[0-9]+$ ]] || candidate_at=0
+    candidate_purpose=$(json_get "$file" '.purpose')
+    if [ -z "$newest_id" ] || [ "$candidate_at" -gt "$newest_at" ] \
+       || { [ "$candidate_at" -eq "$newest_at" ] && [[ "$candidate_id" > "$newest_id" ]]; }; then
+      newest_at="$candidate_at"
+      newest_id="$candidate_id"
+      newest_purpose="$candidate_purpose"
+    fi
+  done < <(find "$REQUESTS_DIR" -maxdepth 1 -type f -name '*.json' -print0 2>/dev/null)
+  [ -n "$newest_id" ] || return 1
+  printf '%s %s %s\n' "$newest_at" "$newest_id" "${newest_purpose:-compile}"
+}
+
+# Print "<id> <purpose>" of the request that supersedes this warm-up run, if any.
+precompile_superseded_by() {
+  local project_dir="$1"
+  local run_dir="$2"
+  local latest_pair latest_at latest_id newer_pair newer_at newer_id newer_purpose
+  latest_pair=$(run_precompile_latest "$run_dir") || return 1
+  latest_at="${latest_pair%% *}"
+  latest_id="${latest_pair#* }"
+  newer_pair=$(newest_build_request_for_project "$project_dir") || return 1
+  read -r newer_at newer_id newer_purpose <<<"$newer_pair"
+  if [ "$newer_at" -gt "$latest_at" ] \
+     || { [ "$newer_at" -eq "$latest_at" ] && [[ "$newer_id" > "$latest_id" ]]; }; then
+    printf '%s %s\n' "$newer_id" "${newer_purpose:-compile}"
+    return 0
+  fi
+  return 1
+}
+
+# Record a warm-up that was skipped before it built, so the run summary and the
+# callback can explain why instead of reporting a successful compile.
+record_precompile_cancellation() {
+  local run_dir="$1"
+  local key="$2"
+  local project="$3"
+  local spec_log_file="$4"
+  local cancelled_by="$5"
+  local cancelled_purpose="$6"
+  local reason="$7"
+  local started_at
+  started_at="$(date '+%F %T')"
+  {
+    echo "===== project=$project key=$key ====="
+    echo "purpose=precompile"
+    echo "precompile_superseded_by=$cancelled_by ($cancelled_purpose)"
+    echo "skipped: $reason"
+    echo
+  } >>"$spec_log_file"
+  printf '%s\n' "$spec_log_file" >"$run_dir/log-$key.path"
+  printf '%s\n' "$started_at" >"$run_dir/started-$key"
+  printf '%s\n' 0 >"$run_dir/status-$key"
+  printf '%s\n' "$started_at" >"$run_dir/finished-$key"
+  printf '%s %s\n' "$cancelled_by" "$cancelled_purpose" >"$run_dir/precompile-superseded-$key"
+}
+
+# Stop the whole build tree (subshell -> timeout -> cargo/rustc) without
+# touching the worker process group itself.
+kill_process_tree() {
+  local pid="$1"
+  local signal="$2"
+  local child
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_process_tree "$child" "$signal"
+  done
+  kill -"$signal" "$pid" 2>/dev/null || true
+}
+
+# Watch a warm-up build for a newer same-project build request and stop it before
+# it can relink artifacts that the newer request is about to produce.
+watch_precompile_supersede() {
+  local project_dir="$1"
+  local run_dir="$2"
+  local key="$3"
+  local pid_file="$run_dir/build-pid-$key"
+  local canceller canceller_pair canceller_purpose
+  while [ -f "$pid_file" ]; do
+    if canceller_pair=$(precompile_superseded_by "$project_dir" "$run_dir"); then
+      read -r canceller canceller_purpose <<<"$canceller_pair"
+      printf '%s %s\n' "$canceller" "${canceller_purpose:-compile}" >"$run_dir/precompile-superseded-$key"
+      echo "precompile superseded by request $canceller ($canceller_purpose); stopping the warm-up build"
+      kill_process_tree "$(cat "$pid_file" 2>/dev/null || true)" TERM
+      sleep 2
+      kill_process_tree "$(cat "$pid_file" 2>/dev/null || true)" KILL
+      return 0
+    fi
+    sleep 1
+  done
+}
+
 newer_successful_deploy_request() {
   local current_requested_at="$1"
   local current_request_id="$2"
@@ -987,7 +1237,7 @@ notify_external_callback() {
 notify_request_file() {
   local file="$1"
   local source_terminal_id source_terminal_name source_tmux_session tmux_derived_id notify_target request_id delivery_id fallback_delivery_id final_message fallback_message note spec key request_kind project project_dir project_path status started_at finished_at
-  local install_report request_log_file log_label report_label report_summary summary next_step run_context subject message toast_message toast_tone lock_key lock_file shown_started_at shown_finished_at is_noop_deploy notification_failed error_summary superseded_by callback_state callback_payload
+  local install_report request_log_file log_label report_label report_summary summary next_step run_context subject message toast_message toast_tone lock_key lock_file shown_started_at shown_finished_at is_noop_deploy notification_failed error_summary superseded_by precompile_cancelled_by precompile_cancelled_purpose callback_state callback_payload
   source_terminal_id=$(json_get "$file" '.source_terminal_id')
   source_terminal_name=$(json_get "$file" '.source_terminal_name')
   source_tmux_session=$(json_get "$file" '.source_tmux_session')
@@ -1028,6 +1278,11 @@ notify_request_file() {
   request_log_file=$(cat "$run_dir/log-$key.path" 2>/dev/null || echo "$log_file")
   status=$(cat "$run_dir/status-$key" 2>/dev/null || echo 1)
   superseded_by=$(cat "$run_dir/deploy-superseded-$key" 2>/dev/null || echo "")
+  precompile_cancelled_by=""
+  precompile_cancelled_purpose=""
+  if [ -f "$run_dir/precompile-superseded-$key" ]; then
+    read -r precompile_cancelled_by precompile_cancelled_purpose <"$run_dir/precompile-superseded-$key" || true
+  fi
   started_at=$(cat "$run_dir/started-$key" 2>/dev/null || echo "")
   finished_at=$(cat "$run_dir/finished-$key" 2>/dev/null || echo "")
   install_report=$(cat "$run_dir/install-report-$key.path" 2>/dev/null || echo "")
@@ -1048,7 +1303,19 @@ notify_request_file() {
   if [ -f "$run_dir/timedout-$key" ]; then
     timedout_label="$(cat "$run_dir/timedout-$key" 2>/dev/null || echo "")"
   fi
-  if [ "$status" -eq 0 ] && [ -n "$superseded_by" ]; then
+  if [ -n "$precompile_cancelled_by" ]; then
+    if [ "$precompile_cancelled_purpose" = "ahead" ]; then
+      summary="预编译预热已取消（同项目正式编译 ${precompile_cancelled_by} 已在前，预热无增益）"
+      next_step="正式编译已在预热之前排队或正在运行，预热不会让它更快；本次预热未执行，需要时可在此次编译完成后再预热。"
+    elif [ "$precompile_cancelled_purpose" = "precompile" ]; then
+      summary="预编译预热已取消（同项目出现新的预热请求 ${precompile_cancelled_by}）"
+      next_step="本次预热提前停止，由更新的预热请求 ${precompile_cancelled_by} 继续热构建缓存；正式构建产物未受影响。"
+    else
+      summary="预编译预热已取消（同项目出现新的编译请求 ${precompile_cancelled_by}）"
+      next_step="预热已停止，正式构建产物改由请求 ${precompile_cancelled_by} 重新生成；如原任务依赖该构建，请等待该请求的回调。"
+    fi
+    toast_tone="ok"
+  elif [ "$status" -eq 0 ] && [ -n "$superseded_by" ]; then
     summary="部署已跳过（被较新成功请求取代）"
     next_step="较新请求 ${superseded_by} 已成功部署，本请求未执行安装，避免旧版本回滚。"
     toast_tone="ok"
@@ -1102,6 +1369,13 @@ notify_request_file() {
   if [ -n "$superseded_by" ]; then
     message="$message；替代请求：${superseded_by}"
   fi
+  if [ -n "$precompile_cancelled_by" ]; then
+    if [ "$precompile_cancelled_purpose" = "ahead" ]; then
+      message="$message；取消原因：同项目正式编译 ${precompile_cancelled_by} 已在前"
+    else
+      message="$message；取消原因：同项目请求 ${precompile_cancelled_by} 已进入编译队列"
+    fi
+  fi
   if [ -n "$error_summary" ]; then
     message="$message；关键错误：${error_summary}"
   fi
@@ -1122,7 +1396,7 @@ notify_request_file() {
   if [[ "$notify_target" == http://* || "$notify_target" == https://* ]]; then
     callback_state="failed"
     if [ "$status" -eq 0 ]; then
-      if [ -n "$superseded_by" ]; then
+      if [ -n "$precompile_cancelled_by" ] || [ -n "$superseded_by" ]; then
         callback_state="superseded"
       else
         callback_state="succeeded"
@@ -1143,10 +1417,16 @@ notify_request_file() {
       --arg log_path "$request_log_file" \
       --arg install_report "$install_report" \
       --arg superseded_by "$superseded_by" \
+      --arg cancelled_by "$precompile_cancelled_by" \
       --arg started_at "$started_at" \
       --arg finished_at "$finished_at" \
       --arg note "$note" \
-      '{request_id:$request_id,request_kind:$request_kind,state:$state,project:$project,project_path:$project_path,project_dir:$project_dir,exit_status:$exit_status,message:$message,query_url:$query_url,log_path:$log_path,install_report:$install_report,superseded_by:$superseded_by,started_at:$started_at,finished_at:$finished_at,note:$note}')
+      '{request_id:$request_id,request_kind:$request_kind,state:$state,project:$project,project_path:$project_path,project_dir:$project_dir,exit_status:$exit_status,message:$message,query_url:$query_url,log_path:$log_path,install_report:$install_report,superseded_by:$superseded_by,cancelled_by:$cancelled_by,started_at:$started_at,finished_at:$finished_at,note:$note}')
+    if [ -n "$precompile_cancelled_by" ]; then
+      # A cancelled warm-up must not deliver a message anywhere; its state is
+      # available through the query API instead.
+      return "$notification_failed"
+    fi
     if ! notify_external_callback "$notify_target" "$callback_payload"; then
       echo "failed external callback source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name notify_target=$notify_target request=$request_id" >>"$log_file"
       notification_failed=1
@@ -1161,6 +1441,11 @@ notify_request_file() {
     if ! notify_terminal_toast "$notify_target" "$toast_message" "$toast_tone"; then
       echo "failed to notify source terminal toast source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name source_tmux_session=$source_tmux_session notify_target=$notify_target request=$request_id" >>"$log_file"
       callback_failed=1
+    fi
+    # A cancelled warm-up is reported by toast only: it must not inject a
+    # terminal message that arrives as a new user turn for the agent.
+    if [ -n "$precompile_cancelled_by" ]; then
+      exit "$callback_failed"
     fi
     if ! notify_terminal "$notify_target" "$final_message" "$delivery_id" "$request_id"; then
       echo "failed to notify source terminal source_terminal_id=$source_terminal_id source_terminal_name=$source_terminal_name source_tmux_session=$source_tmux_session notify_target=$notify_target request=$request_id" >>"$log_file"
@@ -1670,6 +1955,24 @@ while true; do
       spec_file_suffix="1"
     fi
     spec_log_file="$run_output_dir/build-$spec_file_suffix.log"
+    # A queued warm-up must not start once the same project already has a newer
+    # real build request: that request owns the shared build artifacts now.
+    if [ "$request_kind" = "compile" ] && run_precompile_only "$run_dir"; then
+      if precompile_cancel_pair=$(precompile_superseded_by "$project_dir" "$run_dir"); then
+        read -r precompile_canceller precompile_cancel_purpose <<<"$precompile_cancel_pair"
+        record_precompile_cancellation "$run_dir" "$key" "$project" "$spec_log_file" \
+          "$precompile_canceller" "${precompile_cancel_purpose:-compile}" \
+          "a newer same-project request is already queued"
+        continue
+      fi
+      if precompile_ahead_pair=$(precompile_behind_real_build "$project_dir" "$run_dir"); then
+        read -r precompile_canceller precompile_cancel_purpose <<<"$precompile_ahead_pair"
+        record_precompile_cancellation "$run_dir" "$key" "$project" "$spec_log_file" \
+          "$precompile_canceller" "ahead" \
+          "a real build for the same project was already queued or running"
+        continue
+      fi
+    fi
     command_json=$(printf '%s' "$spec" | jq -c '.command')
     install_command_json=$(printf '%s' "$spec" | jq -c '.install_command // []')
     audit_paths_json=$(printf '%s' "$spec" | jq -c '.audit_paths // []')
@@ -1744,6 +2047,26 @@ while true; do
     done < <(find "$run_dir" -maxdepth 1 -type f -name '*.json' -print0)
     release_coalescing_lock
     flock -u 7
+    # A warm-up that waited for the shared build lock may have been superseded
+    # while queueing: never start it once a newer real request exists.
+    if [ "$request_kind" = "compile" ] && run_precompile_only "$run_dir"; then
+      if precompile_cancel_pair=$(precompile_superseded_by "$project_dir" "$run_dir"); then
+        read -r precompile_canceller precompile_cancel_purpose <<<"$precompile_cancel_pair"
+        record_precompile_cancellation "$run_dir" "$key" "$project" "$spec_log_file" \
+          "$precompile_canceller" "${precompile_cancel_purpose:-compile}" \
+          "superseded while waiting for the build lock"
+        release_build_locks
+        continue
+      fi
+      if precompile_ahead_pair=$(precompile_behind_real_build "$project_dir" "$run_dir"); then
+        read -r precompile_canceller precompile_cancel_purpose <<<"$precompile_ahead_pair"
+        record_precompile_cancellation "$run_dir" "$key" "$project" "$spec_log_file" \
+          "$precompile_canceller" "ahead" \
+          "a real build for the same project was already queued or running"
+        release_build_locks
+        continue
+      fi
+    fi
     audit_paths_file="$run_dir/install-audit-paths-$key.txt"
     before_file="$run_dir/install-before-$key.json"
     after_file="$run_dir/install-after-$key.json"
@@ -1791,12 +2114,38 @@ while true; do
         write_run_progress "$project" "compile" "$spec_index" "$spec_count" "$command_json" "" "" "" "$spec_log_file"
         monitor_cargo_progress "$project" "$spec_index" "$spec_count" "$command_json" "$spec_log_file" &
         progress_monitor_pid=$!
-        (cd "$project_dir" && TMPDIR="$spec_tmp_dir" run_command_with_timeout "$run_dir/timedout-$key" "${command[@]}")
+        (
+          cd "$project_dir"
+          export TMPDIR="$spec_tmp_dir"
+          run_command_with_timeout "$run_dir/timedout-$key" "${command[@]}"
+        ) &
+        build_pid=$!
+        printf '%s\n' "$build_pid" >"$run_dir/build-pid-$key"
+        precompile_watch_pid=""
+        # Start the watcher only after the pid file exists: its loop is gated on
+        # that file, so starting it earlier can exit before the build is recorded.
+        if [ "$request_kind" = "compile" ] && run_precompile_only "$run_dir"; then
+          # A warm-up build is expendable: a newer real request for the same
+          # project stops it here, before the final link replaces artifacts that
+          # request is going to produce.
+          watch_precompile_supersede "$project_dir" "$run_dir" "$key" &
+          precompile_watch_pid=$!
+        fi
+        wait "$build_pid"
         compile_status=$?
+        rm -f "$run_dir/build-pid-$key"
+        if [ -n "$precompile_watch_pid" ]; then
+          kill "$precompile_watch_pid" 2>/dev/null || true
+          wait "$precompile_watch_pid" 2>/dev/null || true
+        fi
         kill "$progress_monitor_pid" 2>/dev/null || true
         wait "$progress_monitor_pid" 2>/dev/null || true
         update_cargo_progress_from_log "$project" "$spec_index" "$spec_count" "$command_json" "$spec_log_file"
-        if [ "$compile_status" -ne 0 ]; then
+        if [ -f "$run_dir/precompile-superseded-$key" ]; then
+          echo "precompile build stopped: superseded by request $(cat "$run_dir/precompile-superseded-$key" 2>/dev/null || true)"
+          rm -f "$run_dir/timedout-$key"
+          true
+        elif [ "$compile_status" -ne 0 ]; then
           echo "compile command failed with status=$compile_status"
           [ -f "$run_dir/timedout-$key" ] && echo "compile command timed out after $(cat "$run_dir/timedout-$key")"
           false

@@ -1,0 +1,38 @@
+{
+  "request_id": "083451-18e6d5ff3841905b",
+  "commit": "13c3762959db4af7ef640bf448a1d6a431a4e895",
+  "binary_hashes": {
+    "running": "f561fbe1fe1f2213dd937106cc8c28e0c294b392b0f11cfe70a7d568ec1d98eb",
+    "installed": "f561fbe1fe1f2213dd937106cc8c28e0c294b392b0f11cfe70a7d568ec1d98eb",
+    "built": "f561fbe1fe1f2213dd937106cc8c28e0c294b392b0f11cfe70a7d568ec1d98eb"
+  },
+  "static": {
+    "terminal-sessions.js": "c1cf379057148f7827a3c9004ce1e0746b3c5963d7fb1bd1e618925ff1e76c88",
+    "terminal-dialogs.js": "dfa64004e03b918943dbc184f15aece23cdce5ff4d4a3ef61903fc0210ed3549",
+    "terminal-session-render.js": "34bdf08100c977638c9d74e27fcce4ea20fdfe40276f3ad84e22b52690e01163",
+    "workspace-project-icons.js": "41de2ce372b9cd55a4013fe2b274358f99e964cdfbaf3bd3a327af72c18a7be4"
+  },
+  "saved_roles": {
+    "s15835": "超级管理员",
+    "s15836": "普通管理员"
+  },
+  "roles_survive_edit": true,
+  "chinese_role_save": true,
+  "fixture_ids": [
+    "s15835",
+    "s15836"
+  ],
+  "cleanup_errors": [],
+  "remaining_live": [],
+  "remaining_restore": [],
+  "verification_date": "2026-11-11",
+  "run_id": "20261111T083456-2159726-3462",
+  "checks": {
+    "rust_role_tests_passed": 2,
+    "node_regressions_passed": 29,
+    "skill_role_tests_passed": 3,
+    "desktop_mobile_browser": "passed",
+    "terminal_scroll_passed": 9,
+    "unrelated_tracked_work_restored_exactly": true
+  }
+}

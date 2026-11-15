@@ -15,9 +15,28 @@
           document.documentElement.dataset.theme = theme;
           document.documentElement.style.colorScheme = theme;
         } catch {}
+        try {
+          const rawTiers = window.localStorage.getItem("webclx:font-size-tiers");
+          if (rawTiers) {
+            const tiers = JSON.parse(rawTiers);
+            if (Array.isArray(tiers) && tiers.length >= 4) {
+              const rootStyle = document.documentElement.style;
+              rootStyle.setProperty("--font-size-tier-1", `${tiers[0]}rem`);
+              rootStyle.setProperty("--font-size-tier-2", `${tiers[1]}rem`);
+              rootStyle.setProperty("--font-size-tier-3", `${tiers[2]}rem`);
+              rootStyle.setProperty("--font-size-tier-4", `${tiers[3]}rem`);
+              const rawScale = window.localStorage.getItem("webclx:terminal-soft-keyboard-scale");
+              const scale = Number(rawScale) > 0 ? Number(rawScale) : 1.08;
+              rootStyle.setProperty(
+                "--terminal-key-font-size",
+                `${Math.round(tiers[2] * scale * 100) / 100}rem`,
+              );
+            }
+          }
+        } catch {}
       })();
     </script>
-    <link rel="stylesheet" href="/assets/styles-base.css?v=20260925nav1" />
+    <link rel="stylesheet" href="/assets/styles-base.css?v=20261025-android-language-once" />
     <link rel="stylesheet" href="/assets/styles-settings.css?v=20260925nav1" />
     <link rel="stylesheet" href="/assets/styles-auth.css?v=20260925nav1" />
     <link rel="stylesheet" href="/assets/styles-terminal.css?v=20260817a" />
@@ -71,7 +90,7 @@
         .agent-profile-field.full { grid-column: auto; }
       }
     </style>
-    <script defer src="/assets/i18n.js?v=20260816m"></script>
+    <script defer src="/assets/i18n.js?v=20261025-android-language-once"></script>
     <script defer src="/assets/agent-terminal-profiles.js?v=20260817a"></script>
   </head>
   <body class="app-shell">
@@ -83,7 +102,6 @@
           <a class="tab-button topbar-link-button" href="/workspace_history">历史工作区</a>
           <a class="tab-button topbar-link-button" href="/codex_api">LLM_API</a>
           <a class="tab-button topbar-link-button" href="/settings">设置</a>
-          <a class="tab-button topbar-link-button active" href="/agent" aria-current="page">DeepSeek Agent</a>
           <a class="tab-button topbar-link-button" href="/collaboration">智能体协作</a>
           <a class="tab-button topbar-link-button" href="/archives">归档列表</a>
           <a class="tab-button topbar-link-button" href="/downloads">编译产物</a>

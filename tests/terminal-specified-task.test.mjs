@@ -345,7 +345,7 @@ test("new terminal preview loads the current path numbering from the backend", a
     },
     state: {
       activeSessionId: "",
-      currentPath: "webClx",
+      currentPath: "tools/webClx",
       workspaceDir: "/home/codes",
       workspaceHistory: [],
       favoritePaths: [],
@@ -355,9 +355,9 @@ test("new terminal preview loads the current path numbering from the backend", a
       requestedUrls.push(url);
       return {
         sessions: [
-          { name: "webClx_1_工作中终端下拉列表的顺序", path: "webClx" },
-          { name: "webClx_14", path: "webClx" },
-          { name: "webClx_15_终端如何与deepseek agent通讯", path: "webClx" },
+          { name: "webClx_1_工作中终端下拉列表的顺序", path: "tools/webClx" },
+          { name: "webClx_14", path: "tools/webClx" },
+          { name: "webClx_15_终端如何与deepseek agent通讯", path: "tools/webClx" },
         ],
       };
     },
@@ -368,7 +368,7 @@ test("new terminal preview loads the current path numbering from the backend", a
 
   await sandbox.setTerminalSpecifiedTaskSourcePath("/home/codes/tools/webClx");
 
-  assert.deepEqual(requestedUrls, ["/api/terminal/sessions?path=webClx"]);
+  assert.deepEqual(requestedUrls, ["/api/terminal/sessions?path=tools%2FwebClx"]);
   assert.equal(preview.textContent, "webClx_16");
 });
 
@@ -639,14 +639,15 @@ test("new dialog keeps every Codex account while Claude filters sub2api", async 
   sandbox.terminalSpecifiedTaskAgent = () => "codex";
   await sandbox.loadTerminalSpecifiedTaskPresets();
   assert.deepEqual(requested, ["/api/auth/codex-accounts"]);
+  // 当前使用的账号置顶，其余账号按设置排序。
   assert.deepEqual(options.map((option) => option.value), [
-    "api-account",
     "imported-oauth",
+    "api-account",
     "sub2api-api",
   ]);
-  assert.equal(options[0].dataset.kind, "api");
-  assert.equal(options[1].dataset.kind, "oauth");
-  assert.equal(preset.value, "api-account");
+  assert.equal(options[0].dataset.kind, "oauth");
+  assert.equal(options[1].dataset.kind, "api");
+  assert.equal(preset.value, "imported-oauth");
   sandbox.terminalSpecifiedTaskAgent = () => "claude";
   await sandbox.loadTerminalSpecifiedTaskPresets();
   assert.equal(requested[1], "/api/auth/claude-presets");
@@ -734,6 +735,30 @@ test("new terminal dialog displays matching LLM_API accounts and label for each 
   assert.equal(sandbox.terminalSpecifiedTaskAccountLabel("devin"), "Devin 账号");
   assert.equal(sandbox.terminalSpecifiedTaskAccountLabel("agy"), "AGY 账号");
 
+  // 带 Agent 名的文案只用于状态提示；下拉字段标题必须保持中性，方便各 Agent 复用。
+  assert.match(
+    specifiedTaskSource,
+    /if \(presetLabel\) presetLabel\.textContent = "账号";/,
+    "新开对话框账号下拉标题必须保持中性",
+  );
+  assert.doesNotMatch(
+    specifiedTaskSource,
+    /presetLabel\.textContent = terminalSpecifiedTaskAccountLabel\(agent\)/,
+    "新开对话框账号下拉标题不得按 Agent 拼接名称",
+  );
+  for (const html of [indexHtml, terminalHtml]) {
+    assert.match(
+      html,
+      /id="terminal-specified-task-preset-field"[\s\S]*?<span>账号<\/span>/,
+      "新开对话框 HTML 的账号下拉初始标题必须为中性",
+    );
+    assert.doesNotMatch(
+      html,
+      /id="terminal-specified-task-preset-field"[\s\S]*?<span>Codex 账号<\/span>/,
+      "新开对话框 HTML 不得残留带 Agent 名的账号下拉标题",
+    );
+  }
+
   assert.equal(sandbox.terminalSpecifiedTaskHasAccounts("codex"), true);
   assert.equal(sandbox.terminalSpecifiedTaskHasAccounts("claude"), true);
   assert.equal(sandbox.terminalSpecifiedTaskHasAccounts("codebuddy"), true);
@@ -753,7 +778,7 @@ test("new terminal dialog displays matching LLM_API accounts and label for each 
   sandbox.terminalSpecifiedTaskAgent = () => "devin";
   await sandbox.loadTerminalSpecifiedTaskPresets();
   assert.equal(requested.includes("/api/auth/devin-accounts"), true);
-  assert.deepEqual(options.map((o) => o.value), ["dev-1", "dev-2"]);
+  assert.deepEqual(options.map((o) => o.value), ["dev-2", "dev-1"]);
   assert.equal(preset.value, "dev-2");
   assert.equal(preset.dataset.activeId, "dev-2");
 
@@ -779,6 +804,19 @@ test("new terminal dialog displays matching LLM_API accounts and label for each 
 
   await sandbox.applyTerminalSpecifiedAgentAccount("agy", "agy-2");
   assert.deepEqual(appliedEndpoints[2], { url: "/api/agy/presets/agy-2/apply", method: "PUT" });
+
+  // 验证未更改账号时跳过切换：源码必须包含根据 selectedAccountId !== previousActiveId 判定是否切换的保护
+  assert.match(
+    specifiedTaskSource,
+    /const needsSwitch = Boolean\(selectedAccountId && selectedAccountId !== previousActiveId\);/,
+    "启动终端前必须判断账号是否真正发生更改，未更改不得触发切换",
+  );
+  assert.match(
+    specifiedTaskSource,
+    /已使用当前 \$\{label\} 启动终端。/,
+    "未更改账号启动时状态提示必须明确为使用当前账号，不得伪装成已切换",
+  );
 });
+
 
 

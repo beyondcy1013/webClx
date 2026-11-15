@@ -87,6 +87,18 @@ The terminal tools `切换终端排序` action and `Ctrl+Alt+O` cycle through wo
 （请求 `151020-18e0185df8e93c70`）。后端重新构建并重启后，
 `/api/terminal/sessions` 的 `activity_agent` 才会显示 `Qoder`。
 
+## 2026-11-11 Codex 禁用动画状态与完成时间戳（Worked for 1m 35s • 10:38 AM）
+
+症状：Codex 配置禁用动画（`tui.animations = false`）后，部分执行中终端（如思考、执行长命令或工具调用期间长达数十秒无输出）在超过 15 秒 recent-output 窗口后被错误标记为 `completed` / `待查看`；同时 Codex 最新版本的完成行已追加时间戳（如 `Worked for 1m 35s • 10:38 AM`），旧规则将其误判为普通文本（prose）导致无法识别真正的完成状态。
+
+根因与修复：
+1. **完成行时间戳兼容**：`looks_like_elapsed_duration` 扩展 `is_valid_completion_remainder` 与 `looks_like_completion_timestamp`，允许 duration 后跟 `• 10:38 AM` / `· 11:05 PM` / `• 10:38` 等时间戳，同时排除 `yesterday` 等普通单词。
+2. **Turn 状态最新裁决与已提交指令感知**：`terminal_tail_has_working_status` 与 `terminal_tail_has_worked_status` 在剥离活动输入框（composer）后自下而上扫描。若在完成行之前遇到用户已提交指令（`› <prompt>`），判定当前 turn 仍在进行中（`working`），并使上一轮历史完成行失效。
+3. **Codex 超时保护**：`determine_activity_snapshot` 限制：Codex 类型的终端在未出现真实 `Worked for ...` 完成状态时，未查看输出超时绝不降级为 `completed`（待查看），必须保持为 `working`（工作中），杜绝因无动画静止被误判为完成。
+
+回归：
+`cargo test codex_working_status_without_animation_detects_uncompleted_turn`、`cargo test codex_without_completion_status_stays_working_after_recent_output_timeout`、`cargo test terminal_worked_status`，以及前端状态测试 `node tests/terminal-session-activity.test.mjs`。
+
 ## 2026-10-20 Codex 旁白型工作状态
 
 `webClx_2__把aws上的devin配置，同步到本机的llm` 使用
@@ -466,3 +478,60 @@ shell 提示符、Agent 忙、输入框只留下文字）该状态不会自行�
 回归：`cargo test --bin webclx compacting`（尾行正负例 + 探针状态，2 项通过）、
 `tests/terminal-auto-compact.test.mjs`、`tests/terminal-compact-agent-guard.test.mjs`
 （发送只记投递、压缩完成迁移）。静态资源版本 `20261020-compacting-observed`。
+
+
+## 自动压缩默认开启（2026-11-15）
+
+原实现按终端逐个加入 `webclx:terminal-auto-compact-sessions`：只有通过 UI 新建的
+终端会被自动加入，脚本/API 创建的终端不在集合内，因此停在“待查看”很久也不会
+发送 `/compact`（终端 100 的现场即为此种情况）。
+
+现改为默认开启、只记录显式关闭：存储键
+`webclx:terminal-auto-compact-disabled-sessions`，未出现在该集合中的终端一律参与
+自动压缩，包括脚本/API 创建的终端。触发条件不变：后端 `completed`（待查看）后
+持续 5 秒、再等 2 秒、非当前查看的终端、最近 20 行无 `/compact` 与
+`Context compacted`、距上次发送至少新增 20 行；CodeBuddy/Cline 仍被硬禁止。
+
+旧开启集合键不再读取。升级前“从未加入”和“手动关闭”无法区分，统一回到默认
+开启；需要保持关闭的终端请重新取消勾选。回归：
+`tests/terminal-compact-agent-guard.test.mjs`（新增默认开启与显式关闭两项）、
+`tests/terminal-auto-compact.test.mjs`。静态资源版本
+`20261115-default-autocompact`。
+
+
+
+## 自动压缩下沉到服务端（2026-11-15）
+
+浏览器端自动压缩只在页面打开时运行，且会话列表与会话开关都存放在浏览器
+localStorage，脚本/API 创建的终端容易漏配。现改为服务端判定与发送：
+
+- 判定依据全部取自后端探针：`activity_state == completed`（待查看）、
+  `last_viewed_output_at`、`last_output_at`；用户打开终端会推高查看时间戳，
+  会话随即离开 `completed`，因此"正在查看的终端不压缩"由查看确认天然保证。
+- 发送规则：待查看稳定 5 秒（`TERMINAL_AUTO_COMPACT_SETTLE_MS`）、距上次发送
+  ≥60 秒（`TERMINAL_AUTO_COMPACT_MIN_INTERVAL_MS`）、且其后有新输出
+  （`last_output_at > auto_compact_last_sent_output_at`）。三条同时满足才发送
+  `/compact`，扫描复用 `run_error_auto_continue_loop` 的 5 秒节拍。
+- 开关持久化在会话记录（`StoredTerminalSession.auto_compact_disabled`，默认
+  false），通过 `POST /api/terminal/sessions/{id}/auto-compact`
+  （body `{"enabled":bool}`）修改；CodeBuddy/Cline 仍由
+  `terminal_compact_command_blocked_agent` / 前端 `isSessionCompactCapableAgent`
+  双重禁止。
+- 前端只保留开关与"已压缩"标记：`maybeAutoCompactCompletedSessions()` 不再发送，
+  localStorage 的开启/关闭集合已移除。
+
+回归：`cargo test --bin webclx idle_auto_compact`（稳定时长/冷却/新输出三条判据）、
+`tests/terminal-compact-agent-guard.test.mjs`（前端不发送、开关写入服务端）。
+静态资源版本 `20261115-server-autocompact`。
+
+
+补充（同日）：除“最近 20 行含 `Context compacted`”外，服务端还会记住观察到
+压缩完成标记时的输出时间戳（`auto_compact_completed_output_at`）。只要用户的
+查看确认仍停在该时间点或更早，就持续抑制再次压缩——等价于前端“已压缩”标记；
+用户打开终端、查看确认越过压缩点后才解除，后续新 turn 仍可正常压缩。
+回归：`cargo test --bin webclx idle_auto_compact`（含 hold 判据）。
+
+
+调整（2026-11-15）：待查看稳定时长由 5 秒延长到 8 秒（TERMINAL_AUTO_COMPACT_SETTLE_MS = 8_000），给用户更长的取消/查看窗口。
+同批新增上下文阈值：仅当 pane 底部已用占用（如 Context 51% used）达到设置值（默认 50%，可在设置页修改，存于 config/terminal-auto-compact-settings.json，接口 GET/POST /api/terminal/auto-compact-settings）时才自动压缩；读不到占用率则不压缩。
+

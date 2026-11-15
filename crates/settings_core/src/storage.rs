@@ -45,7 +45,7 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
     let terminal_default_env_vars =
         sanitize_terminal_default_env_vars(&parsed.terminal_default_env_vars);
     let terminal_slash_commands =
-        sanitize_terminal_function_commands(&parsed.terminal_slash_commands);
+        merge_builtin_terminal_slash_commands(&parsed.terminal_slash_commands);
     let terminal_function_commands = sanitize_terminal_function_commands(
         &parsed
             .terminal_function_commands
@@ -169,6 +169,12 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         merge_builtin_terminal_error_keyword_actions(&parsed.terminal_error_keyword_actions);
     let terminal_activity_agent_display = parsed.terminal_activity_agent_display;
     let terminal_completion_bell_enabled = parsed.terminal_completion_bell_enabled;
+    let terminal_report_debounce_seconds =
+        normalize_terminal_report_debounce_seconds(parsed.terminal_report_debounce_seconds);
+    let terminal_message_queue_seconds =
+        normalize_terminal_message_queue_seconds(parsed.terminal_message_queue_seconds);
+    let terminal_task_timeout_secs =
+        normalize_terminal_task_timeout_secs(parsed.terminal_task_timeout_secs);
     let server_port_auto_increment = parsed.server_port_auto_increment;
     let compile_command_timeout_secs = parsed.compile_command_timeout_secs;
     let compile_max_concurrency = normalize_compile_max_concurrency(parsed.compile_max_concurrency);
@@ -194,6 +200,11 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
             .terminal_new_session_behavior
             .clone()
             .unwrap_or_else(default_terminal_new_session_behavior),
+        terminal_account_sort: sanitize_terminal_account_sort(
+            parsed
+                .terminal_account_sort
+                .or(parsed.terminal_codebuddy_account_sort),
+        ),
         desktop_terminal_soft_keyboard_enabled: parsed.desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale,
         terminal_floating_button_offset_vh,
@@ -216,6 +227,9 @@ pub(crate) fn load_saved_settings(config_path: &Path) -> Result<Option<LoadedSet
         terminal_error_keyword_actions,
         terminal_activity_agent_display,
         terminal_completion_bell_enabled,
+        terminal_report_debounce_seconds,
+        terminal_message_queue_seconds,
+        terminal_task_timeout_secs,
         server_port_auto_increment,
         compile_command_timeout_secs,
         compile_max_concurrency,
@@ -273,6 +287,7 @@ pub(crate) fn persist_settings_file(
     show_dot_entries: bool,
     show_all_workspace_sessions: bool,
     terminal_new_session_behavior: String,
+    terminal_account_sort: String,
     desktop_terminal_soft_keyboard_enabled: bool,
     terminal_soft_keyboard_scale: f32,
     terminal_floating_button_offset_vh: f32,
@@ -295,6 +310,9 @@ pub(crate) fn persist_settings_file(
     terminal_error_keyword_actions: &[TerminalErrorKeywordAction],
     terminal_activity_agent_display: TerminalActivityAgentDisplay,
     terminal_completion_bell_enabled: bool,
+    terminal_report_debounce_seconds: u32,
+    terminal_message_queue_seconds: u32,
+    terminal_task_timeout_secs: u64,
     server_port_auto_increment: bool,
     compile_command_timeout_secs: u64,
     compile_max_concurrency: u32,
@@ -376,6 +394,8 @@ pub(crate) fn persist_settings_file(
         show_dot_entries,
         show_all_workspace_sessions,
         terminal_new_session_behavior: Some(terminal_new_session_behavior),
+        terminal_account_sort: Some(terminal_account_sort),
+        terminal_codebuddy_account_sort: None,
         desktop_terminal_soft_keyboard_enabled,
         terminal_soft_keyboard_scale: normalize_terminal_soft_keyboard_scale(
             terminal_soft_keyboard_scale,
@@ -421,6 +441,9 @@ pub(crate) fn persist_settings_file(
         terminal_error_keyword_actions: sanitized_terminal_error_keyword_actions,
         terminal_activity_agent_display,
         terminal_completion_bell_enabled,
+        terminal_report_debounce_seconds,
+        terminal_message_queue_seconds,
+        terminal_task_timeout_secs: normalize_terminal_task_timeout_secs(terminal_task_timeout_secs),
         server_port_auto_increment,
         compile_command_timeout_secs: normalize_compile_command_timeout_secs(
             compile_command_timeout_secs,

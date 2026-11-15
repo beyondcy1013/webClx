@@ -7,6 +7,8 @@ const UNIFIED_TASK_TYPE_LABELS = {
   continue: "发送继续",
   "auto-continue": "自动继续",
   "preset-test": "预设 API 测试",
+  agent_message: "排队消息",
+  message: "排队消息",
 };
 
 // The manager is shared by workspace settings and the terminal dialog, but
@@ -136,6 +138,10 @@ function syncUnifiedDialogScopeLabel() {
 }
 
 function unifiedTaskMatchesCurrentWorkdir(task) {
+  // 当前活动终端的定时/排队任务始终在当前视图可见，避免因不同工作区路径被误过滤
+  if (typeof state !== "undefined" && state?.activeSessionId && task?.sessionId === state.activeSessionId) {
+    return true;
+  }
   const keys = unifiedTaskDirectoryKeys();
   if (!keys.size || !task) return false;
   const values = [task.workingDir];
@@ -831,7 +837,15 @@ function unifiedTaskTypeBadge(type, source) {
 function formatUnifiedTaskDue(dueAtMs) {
   if (!Number.isFinite(dueAtMs) || dueAtMs <= 0) return "-";
   try {
-    return new Date(dueAtMs).toLocaleString();
+    const date = new Date(dueAtMs);
+    if (Number.isNaN(date.getTime())) return "-";
+    const pad = (v) => String(v).padStart(2, "0");
+    const month = pad(date.getMonth() + 1);
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    return `${month}-${day} ${hours}:${minutes}:${seconds}`;
   } catch (_e) {
     return String(dueAtMs);
   }
@@ -978,9 +992,10 @@ function renderUnifiedTaskTable() {
         ? `<span class="mono-text unified-task-remaining" data-due-at="${task.dueAt}">${escapeHtml(formatUnifiedTaskRemaining(task.dueAt))}</span>`
         : '<span class="meta-text">-</span>';
       const targetText = `${task.terminalName || "-"}${task.workingDir ? ` @${task.workingDir}` : ""}`;
-      const targetDisplay = truncateUnifiedTaskTarget(targetText);
+      const targetDisplay = truncateUnifiedTaskTarget(targetText, dialogMode ? 42 : 20);
+      const rowTitle = dialogMode && (unifiedTaskIsPending(task) || task.editable) ? ' title="双击编辑该任务"' : "";
       return `
-        <tr data-task-id="${escapeHtml(task.taskId)}">
+        <tr data-task-id="${escapeHtml(task.taskId)}"${rowTitle}>
           ${dialogMode ? `
             <td>${actionCell}</td>
             <td title="${escapeHtml(`${unifiedTaskTypeLabel(task)} · ${sourceLabel}`)}">${escapeHtml(unifiedTaskTypeLabel(task))}</td>
@@ -1047,18 +1062,35 @@ async function cancelUnifiedTask(taskId) {
   return cancelUnifiedTaskBySource("server", taskId);
 }
 
-async function cancelUnifiedTaskBySource(source, taskId) {
-  if (!taskId) return;
-  if (source === "preset-test" && !window.confirm("确定删除此预设 API 测试任务？")) return;
+async function deleteUnifiedTaskBySource(source, taskId) {
   const path = source === "crontab"
     ? `/api/terminal/auto-continue-tasks/${encodeURIComponent(taskId)}`
     : source === "preset-test"
       ? `/api/auth/preset-test-schedules/${encodeURIComponent(taskId)}`
       : `/api/terminal/scheduled-inputs/${encodeURIComponent(taskId)}`;
+  await requestJson(path, {
+    method: "DELETE",
+  });
+}
+
+async function cancelUnifiedTaskBySource(source, taskId) {
+  if (!taskId) return;
+  const task = typeof findUnifiedTask === "function" ? findUnifiedTask(taskId) : null;
+  const typeLabel = source === "preset-test"
+    ? "预设 API 测试任务"
+    : source === "crontab"
+      ? "自动继续定时任务"
+      : (task?.type === "agent_message" ? "排队消息任务" : "排队/定时输入任务");
+  const targetInfo = task?.terminalName ? `\n目标终端：${task.terminalName}` : "";
+  const previewInfo = task?.text ? `\n任务内容：${task.text.slice(0, 60)}${task.text.length > 60 ? "…" : ""}` : "";
+  const confirmMessage = `确定要取消该${typeLabel}吗？${targetInfo}${previewInfo}\n\n⚠️ 取消后该任务将被直接删除，无法撤销！`;
+
+  const hasConfirm = typeof window !== "undefined" && typeof window.confirm === "function";
+  if (hasConfirm && !window.confirm(confirmMessage)) {
+    return;
+  }
   try {
-    await requestJson(path, {
-      method: "DELETE",
-    });
+    await deleteUnifiedTaskBySource(source, taskId);
     setUnifiedListStatus("已取消定时任务。", "ok");
     await loadUnifiedTasks();
   } catch (error) {
@@ -1098,8 +1130,20 @@ async function runUnifiedTaskNow(taskId) {
         body: JSON.stringify({ submit_enters: 1 }),
       });
     }
-    await cancelUnifiedTaskBySource("server", taskId);
-    setUnifiedListStatus("定时任务已立即发送并取消。", "ok");
+    // 消息已经发出，后续清理不能再走带确认的“取消任务”路径：确认框一旦被
+    // 取消，任务会残留在列表里。这里直接删除并刷新列表。
+    try {
+      await deleteUnifiedTaskBySource("server", taskId);
+    } catch (error) {
+      await loadUnifiedTasks();
+      setUnifiedListStatus(
+        `消息已发送，但从列表移除定时任务失败：${error?.message || error}`,
+        "warn",
+      );
+      return;
+    }
+    setUnifiedListStatus("定时任务已立即发送，已从列表移除。", "ok");
+    await loadUnifiedTasks();
   } catch (error) {
     setUnifiedListStatus(error?.message || "立即发送定时任务失败。", "warn");
   } finally {
@@ -1686,6 +1730,22 @@ function initUnifiedTaskBindings() {
     const cancelButton = event.target.closest?.(".unified-task-cancel");
     if (!cancelButton) return;
     cancelUnifiedTaskBySource(cancelButton.dataset.source || "server", cancelButton.dataset.taskId || "");
+  });
+
+  taskListEl?.addEventListener("dblclick", (event) => {
+    // 忽略点击在按钮、输入框、链接等交互元素上的双击
+    if (event.target.closest("button, input, select, textarea, a")) {
+      return;
+    }
+    const row = event.target.closest("tr[data-task-id]");
+    if (!row) return;
+    const taskId = row.dataset.taskId;
+    const task = findUnifiedTask(taskId);
+    if (!task) return;
+    // 双击该消息等同于编辑
+    if (unifiedTaskIsPending(task) || task.editable) {
+      editUnifiedTask(task.source || "server", task.taskId, Number(task.dueAt || 0));
+    }
   });
 
   updateUnifiedTargetModeVisibility();

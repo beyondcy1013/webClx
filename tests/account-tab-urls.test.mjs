@@ -5,7 +5,7 @@ import vm from "node:vm";
 const manager = fs.readFileSync("static/app-codex-account-manager.js", "utf8");
 const navigation = fs.readFileSync("static/app-navigation-tabs.js", "utf8");
 const app = fs.readFileSync("static/app.js", "utf8");
-const routes = { oauth: "/codex_oauth", api: "/codex_api", claude: "/claude_api", codebuddy: "/codebuddy", devin: "/devin", agy: "/agy" };
+const routes = { oauth: "/codex_oauth", api: "/codex_api", claude: "/claude_api", codebuddy: "/codebuddy", devin: "/devin", agy: "/agy", opencode: "/codex_api/opencode", codearts: "/codex_api/codearts", qoder: "/codex_api/qoder" };
 for (const [kind, path] of Object.entries(routes)) {
   const calls = [];
   const window = {
@@ -37,7 +37,7 @@ for (const [kind, path] of Object.entries(routes)) {
     assert.equal(new URLSearchParams(window.location.search).get("path"), "/workspace fixture");
   }
   const before = calls.length;
-  vm.runInContext('setAccountKind("agy", { push: true })', context);
+  vm.runInContext('setAccountKind("qoder", { push: true })', context);
   assert.equal(calls.length, before, "same tab must not duplicate history");
   window.location.pathname = path;
   window.applyAccountKindFromUrl();
@@ -48,4 +48,4 @@ for (const [kind, path] of Object.entries(routes)) {
   assert.equal(window.currentAccountPathname(), path, "non-account routes preserve last subtype");
 }
 assert.match(app, /const settingsTab = getInitialSettingsTab\(\);\s*window\.applyAccountKindFromUrl\?\.\(\);/);
-console.log("account tab URLs: all six deep links, switching, history and query preservation passed");
+console.log("account tab URLs: all nine deep links, switching, history and query preservation passed");

@@ -360,6 +360,10 @@ async function executeSpecifiedPreset(options = {}) {
       ownerKey: options.ownerKey,
       codexApiPresetId: !temporaryLaunch && agent === "codex" && presetKind === "api" ? selector.id : "",
       autoCompact: options.autoCompact !== false,
+      groupId: options.groupId,
+      groupRole: options.groupRole,
+      createGroup: options.createGroup,
+      createGroupCount: options.createGroupCount,
     };
     const terminalName = specifiedPresetTerminalName(options);
     if (terminalName) {

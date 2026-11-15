@@ -181,7 +181,9 @@ fn extract_resume_info_from_text(raw: &str) -> Option<(&'static str, String)> {
     for (line_index, line) in raw.split('\n').enumerate() {
         for token in line.split_whitespace() {
             match token.split_once('=') {
-                Some((prefix, suffix)) if prefix == "--resume-id" => {
+                Some((prefix, suffix))
+                    if matches!(prefix, "--resume-id" | "--resume" | "--conversation") =>
+                {
                     tokens.push(prefix);
                     token_lines.push(line_index);
                     if !suffix.is_empty() {
@@ -242,6 +244,12 @@ fn resume_program_at(tokens: &[&str], index: usize) -> Option<&'static str> {
         Some("codex")
     } else if program.eq_ignore_ascii_case("claude") && keyword.eq_ignore_ascii_case("--resume") {
         Some("claude")
+    } else if program.eq_ignore_ascii_case("codebuddy") && keyword.eq_ignore_ascii_case("--resume")
+    {
+        Some("codebuddy")
+    } else if program.eq_ignore_ascii_case("agy") && keyword.eq_ignore_ascii_case("--conversation")
+    {
+        Some("agy")
     } else if program.eq_ignore_ascii_case("kiro-cli")
         && keyword.eq_ignore_ascii_case("--resume-id")
     {
@@ -252,6 +260,14 @@ fn resume_program_at(tokens: &[&str], index: usize) -> Option<&'static str> {
         && (keyword.eq_ignore_ascii_case("-r") || keyword.eq_ignore_ascii_case("--resume"))
     {
         Some("devin")
+    } else if (program.eq_ignore_ascii_case("qoder") || program.eq_ignore_ascii_case("qodercli"))
+        && (keyword.eq_ignore_ascii_case("-r") || keyword.eq_ignore_ascii_case("--resume"))
+    {
+        Some("qoder")
+    } else if program.eq_ignore_ascii_case("qoderclicn")
+        && (keyword.eq_ignore_ascii_case("-r") || keyword.eq_ignore_ascii_case("--resume"))
+    {
+        Some("qoderclicn")
     } else {
         None
     }
@@ -367,12 +383,20 @@ pub fn codex_resume_command(resume_id: &str) -> String {
 pub fn resume_command_for_program(program: &str, resume_id: &str) -> String {
     if program.eq_ignore_ascii_case("claude") {
         format!("claude --resume {resume_id}")
+    } else if program.eq_ignore_ascii_case("agy") {
+        format!("agy --conversation={resume_id}")
+    } else if program.eq_ignore_ascii_case("codebuddy") {
+        format!("codebuddy --resume={resume_id}")
     } else if program.eq_ignore_ascii_case("kiro") {
         format!("kiro-cli --resume-id {resume_id}")
     } else if program.eq_ignore_ascii_case("grok") {
         format!("grok --resume {resume_id}")
     } else if program.eq_ignore_ascii_case("devin") {
         format!("devin -r {resume_id}")
+    } else if program.eq_ignore_ascii_case("qoder") || program.eq_ignore_ascii_case("qodercli") {
+        format!("qodercli --resume {resume_id}")
+    } else if program.eq_ignore_ascii_case("qoderclicn") {
+        format!("qoderclicn --resume {resume_id}")
     } else {
         codex_resume_command(resume_id)
     }
@@ -1518,5 +1542,53 @@ bash: /home/root/.local/bin/codex: No such file or directory";
         assert_eq!(state.title(), None);
         state.update_title("?".to_string());
         assert_eq!(state.title(), None);
+    }
+}
+
+#[cfg(test)]
+mod native_resume_command_tests {
+    #[test]
+    fn native_resume_commands_keep_agent_identity() {
+        assert_eq!(super::resume_command_for_program("agy", "abc"), "agy --conversation=abc");
+        assert_eq!(super::resume_command_for_program("codebuddy", "abc"), "codebuddy --resume=abc");
+        assert_eq!(super::resume_command_for_program("qoder", "abc"), "qodercli --resume abc");
+        assert_eq!(super::resume_command_for_program("qodercli", "abc"), "qodercli --resume abc");
+        assert_eq!(super::resume_command_for_program("qoderclicn", "abc"), "qoderclicn --resume abc");
+    }
+}
+
+#[cfg(test)]
+mod native_exit_resume_tests {
+    #[test]
+    fn parses_native_codebuddy_exit_and_agy_commands() {
+        let id = "01a15e5f-93d6-70c9-acba-b299d4566e53";
+        for command in [
+            format!("codebuddy --resume={id}"),
+            format!("codebuddy --resume {id}"),
+            "codebuddy --resume=01a15e5f-93d6-70c9-\nacba-b299d4566e53".into(),
+        ] {
+            let info = super::resume_command_info_from_text(&format!(
+                "To resume this session:\n{command}\n[root@host project]#"
+            ))
+            .unwrap();
+            assert_eq!(info.program, "codebuddy");
+            assert_eq!(info.resume_id, id);
+            assert_eq!(info.command, format!("codebuddy --resume={id}"));
+        }
+        let info =
+            super::resume_command_info_from_text(&format!("agy --conversation={id}")).unwrap();
+        assert_eq!(info.program, "agy");
+
+        let qoder_info =
+            super::resume_command_info_from_text(&format!("qodercli -r {id}")).unwrap();
+        assert_eq!(qoder_info.program, "qoder");
+        assert_eq!(qoder_info.resume_id, id);
+        assert_eq!(qoder_info.command, format!("qodercli --resume {id}"));
+
+        let qodercn_info =
+            super::resume_command_info_from_text(&format!("qoderclicn --resume {id}")).unwrap();
+        assert_eq!(qodercn_info.program, "qoderclicn");
+        assert_eq!(qodercn_info.resume_id, id);
+        assert_eq!(qodercn_info.command, format!("qoderclicn --resume {id}"));
     }
 }

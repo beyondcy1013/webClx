@@ -40,7 +40,7 @@ test("project commands expose server switching first and provide the configured 
   assert.match(terminalHtml, /id="terminal-server-switch-select"/);
   assert.match(
     terminalHtml,
-    /id="top-nav-server"[\s\S]*?id="top-nav-terminal-archives"/,
+    /id="top-nav-settings"[\s\S]*?id="top-nav-server"[\s\S]*?id="top-nav-terminal-archives"/,
   );
   assert.doesNotMatch(terminalHtml, /id="terminal-view-tabs"/);
   assert.doesNotMatch(terminalHtml, /id="terminal-view-tab-(terminal|server)"/);
@@ -58,20 +58,20 @@ test("project commands expose server switching first and provide the configured 
     /id="terminal-server-workspace"[\s\S]*?<iframe[^>]+id="terminal-server-frame"[^>]*title="远程 webClx 服务器"/,
   );
   for (const target of [
-    "PUBLIC_DOMAIN",
-    "PUBLIC_DOMAIN:PORT",
-    "PUBLIC_DOMAIN:14151",
-    "us.PUBLIC_DOMAIN",
-    "jd.PUBLIC_DOMAIN",
+    "fpsq.xyz",
+    "frp6.ccszxc.site:25401",
+    "fpsq.xyz:11112",
+    "fpsq.xyz:14151",
+    "us.fpsq.xyz",
+    "jd.fpsq.xyz",
+    "192.168.3.38",
   ]) {
     assert.match(terminalHtml, new RegExp(`value="${target.replaceAll(".", "\\.")}"`));
   }
-  assert.doesNotMatch(terminalHtml, /fpsq\.xyz/);
-  assert.doesNotMatch(terminalHtml, /ccszxc\.site/);
-  assert.doesNotMatch(terminalHtml, /192\.168\.\d+\.\d+/);
+  assert.doesNotMatch(terminalHtml, /fpsq\.xyz:10002/);
   assert.match(
     terminalHtml,
-    /value="PUBLIC_DOMAIN">PUBLIC_DOMAIN:PORT<\/option>\s*<option value="PUBLIC_DOMAIN:PORT">PUBLIC_DOMAIN:PORT<\/option>/,
+    /value="fpsq\.xyz">fpsq\.xyz:11111<\/option>\s*<option value="frp6\.ccszxc\.site:25401">frp6\.ccszxc\.site:25401<\/option>/,
   );
   assert.match(terminalHtml, /terminal-server-switch\.js\?v=/);
   assert.match(
@@ -179,14 +179,14 @@ test("server targets default to port 11111 and preserve the current terminal rou
   vm.createContext(sandbox);
   vm.runInContext(serverSwitchSource, sandbox);
 
-  assert.equal(sandbox.normalizeTerminalServerTarget("example.invalid"), "http://example.invalid:11111");
+  assert.equal(sandbox.normalizeTerminalServerTarget("fpsq.xyz"), "http://fpsq.xyz:11111");
   assert.equal(
-    sandbox.normalizeTerminalServerTarget("example.invalid:11112"),
-    "http://example.invalid:11112",
+    sandbox.normalizeTerminalServerTarget("fpsq.xyz:11112"),
+    "http://fpsq.xyz:11112",
   );
   assert.equal(
-    sandbox.buildTerminalServerSwitchUrl("127.0.0.1", sandbox.window.location),
-    "http://127.0.0.1:11111/terminal?path=webClx#session",
+    sandbox.buildTerminalServerSwitchUrl("192.168.3.38", sandbox.window.location),
+    "http://192.168.3.38:11111/terminal?path=webClx#session",
   );
   assert.equal(sandbox.editableTerminalServerTarget("example.test"), "example.test:11111");
   assert.equal(
@@ -212,9 +212,9 @@ test("server switching stays inside Android and falls back to browser navigation
   vm.createContext(sandbox);
   vm.runInContext(serverSwitchSource, sandbox);
 
-  const expected = "http://example.invalid:14151/terminal?path=webClx#session";
+  const expected = "http://fpsq.xyz:14151/terminal?path=webClx#session";
   assert.equal(
-    sandbox.navigateToTerminalServer("example.invalid:14151", location, {
+    sandbox.navigateToTerminalServer("fpsq.xyz:14151", location, {
       openInWebView(url) { openedInWebView.push(url); },
     }),
     expected,
@@ -222,7 +222,7 @@ test("server switching stays inside Android and falls back to browser navigation
   assert.deepEqual(openedInWebView, [expected]);
   assert.deepEqual(assigned, []);
 
-  sandbox.navigateToTerminalServer("example.invalid:14151", location, null);
+  sandbox.navigateToTerminalServer("fpsq.xyz:14151", location, null);
   assert.deepEqual(assigned, [expected]);
 });
 
@@ -242,7 +242,7 @@ test("server probing stops after a healthy current origin", async () => {
   const sandbox = {
     document: { getElementById() { return null; } },
     window: {
-      location: { origin: "http://example.invalid:11112" },
+      location: { origin: "http://fpsq.xyz:11112" },
       WebClxAndroid: {
         probeHost() {
           throw new Error("the synchronous bridge probe must never be called");
@@ -271,7 +271,33 @@ test("server probing stops after a healthy current origin", async () => {
   assert.equal(selected, null);
   assert.equal(probedUrls.length, 1);
   assert.ok(
-    probedUrls[0].startsWith("http://example.invalid:11112/favicon.svg?_probe="),
+    probedUrls[0].startsWith("http://fpsq.xyz:11112/favicon.svg?_probe="),
     "the current origin is probed over fetch, not the removed native bridge",
   );
+});
+
+
+test("host session is promoted before the only remote navigation and stale connections cannot win", async () => {
+  const navigations = [];
+  const pending = [];
+  const frame = { set src(value) { navigations.push(value); } };
+  const elements = {"terminal-server-frame": frame, "terminal-server-frame-select": {value: "fpsq.xyz:11112"}, "terminal-server-frame-status": {dataset: {}}};
+  const context = vm.createContext({URL, URLSearchParams,
+    document: {getElementById: id => elements[id] || null},
+    window: {location: {origin: "http://fpsq.xyz:11111", pathname: "/terminal"}, localStorage: {setItem() {}}},
+    fetch: async () => { throw new Error("unexpected fetch"); },
+  });
+  vm.runInContext(serverSwitchSource.slice(0, serverSwitchSource.indexOf("(() => {")), context);
+  context.ensureHostSessionForServerFrame = () => new Promise(resolve => pending.push(resolve));
+  context.issueTerminalServerFrameTicket = async () => "fixture-ticket";
+  const old = context.connectTerminalServerFrameWithHostAuth("fpsq.xyz:11112");
+  const latest = context.connectTerminalServerFrameWithHostAuth("fpsq.xyz:14151");
+  assert.equal(navigations.length, 0, "never load a remote page before host-cookie promotion");
+  pending[1](true); await latest;
+  pending[0](true); await old;
+  assert.equal(navigations.length, 1);
+  const url = new URL(navigations[0]);
+  assert.equal(url.port, "14151");
+  assert.equal(url.pathname, "/login");
+  assert.equal(url.searchParams.get("cross_instance_ticket"), "fixture-ticket");
 });

@@ -3,12 +3,12 @@ const LEGACY_IDLE_SESSION_STORAGE_KEY = "webclx:idle-terminal-sessions";
 const TERMINAL_PATH_EXPANDED_STORAGE_KEY = "webclx:terminal-path-expanded";
 const TERMINAL_WIDE_MODE_STORAGE_KEY = "webclx:terminal-wide-mode";
 const TERMINAL_AUTO_CONTINUE_STORAGE_KEY = "webclx:terminal-auto-continue-on-error";
-const TERMINAL_AUTO_COMPACT_STORAGE_KEY = "webclx:terminal-auto-compact-sessions";
 const TERMINAL_AUTO_COMPACT_STATUS_STORAGE_KEY = "webclx:terminal-auto-compact-status";
 const TERMINAL_AUTO_COMPACT_LAST_SENT_STORAGE_KEY = "webclx:terminal-auto-compact-last-sent";
 const TERMINAL_SESSION_REFLOW_STORAGE_KEY = "webclx:terminal-session-reflow-sessions";
 const TERMINAL_SESSION_DETAILS_STORAGE_KEY = "webclx:terminal-session-details";
 const TERMINAL_SESSION_AGENT_STORAGE_KEY = "webclx:terminal-session-agent";
+const TERMINAL_SESSION_MODEL_FAMILY_STORAGE_KEY = "webclx:terminal-session-model-family";
 const TERMINAL_SESSION_CONTEXT_STORAGE_KEY = "webclx:terminal-session-context";
 const TERMINAL_AUTO_CONTINUE_SCHEDULE_ACK_STORAGE_KEY =
   "webclx:terminal-auto-continue-schedule-acks";
@@ -60,6 +60,7 @@ const {
   MAX_TERMINAL_QUICK_COMMANDS,
   TERMINAL_KEYBOARD_CHECKBOX_ACTIONS,
   THEME_MODE_STORAGE_KEY,
+  FONT_SIZE_TIERS_STORAGE_KEY,
   cloneDefaultTerminalFunctionCommands,
   cloneDefaultTerminalCommandCollections,
   cloneDefaultTerminalAgentCommands,
@@ -89,6 +90,8 @@ const {
   normalizeTerminalTouchSelectionLongPressMs,
   normalizeThemeMode,
   readStoredThemeMode,
+  readStoredFontSizeTiers,
+  readStoredTerminalSoftKeyboardScale,
 } = globalThis.WebClxTerminalSettings;
 const {
   DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
@@ -101,6 +104,7 @@ const {
   nextTerminalSessionSortMode: sharedNextTerminalSessionSortMode,
   normalizeTerminalSessionSortMode: sharedNormalizeTerminalSessionSortMode,
   sessionActivityAgentLabel: sharedSessionActivityAgentLabel,
+  sessionModelFamilyLabel: sharedSessionModelFamilyLabel,
   sessionActivityAgentPrefix: sharedSessionActivityAgentPrefix,
   sessionActivityAgentSuffix: sharedSessionActivityAgentSuffix,
   sessionAfterOutputViewed: sharedSessionAfterOutputViewed,
@@ -194,6 +198,23 @@ function storeTerminalSessionAgent(enabled) {
   }
 }
 
+function readStoredTerminalSessionModelFamily() {
+  try {
+    const val = window.localStorage.getItem(TERMINAL_SESSION_MODEL_FAMILY_STORAGE_KEY);
+    return val === "true" || window.localStorage.getItem("webclx:terminal-session-model-type") === "true";
+  } catch {
+    return false;
+  }
+}
+
+function storeTerminalSessionModelFamily(enabled) {
+  try {
+    window.localStorage.setItem(TERMINAL_SESSION_MODEL_FAMILY_STORAGE_KEY, enabled ? "true" : "false");
+  } catch {
+    // Keep the toggle usable when storage is unavailable.
+  }
+}
+
 function readStoredTerminalSessionContext() {
   try {
     return window.localStorage.getItem(TERMINAL_SESSION_CONTEXT_STORAGE_KEY) === "true";
@@ -230,23 +251,6 @@ function storeTerminalAutoContinueOnError(enabled) {
     window.localStorage.setItem(TERMINAL_AUTO_CONTINUE_STORAGE_KEY, enabled ? "true" : "false");
   } catch {
     // Keep the runtime toggle active even if persistence is unavailable.
-  }
-}
-
-function readStoredTerminalAutoCompactSessionIds() {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(TERMINAL_AUTO_COMPACT_STORAGE_KEY) || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string" && id.trim()) : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function storeTerminalAutoCompactSessionIds(sessionIds) {
-  try {
-    window.localStorage.setItem(TERMINAL_AUTO_COMPACT_STORAGE_KEY, JSON.stringify(Array.from(sessionIds)));
-  } catch {
-    // Keep the runtime toggle usable when storage is unavailable.
   }
 }
 
@@ -313,9 +317,24 @@ function syncAutoCompactToggleForActiveSession() {
   const sessionId = String(state.activeSessionId || "");
   const session = state.sessions.find((item) => item?.id === sessionId);
   const allowed = Boolean(sessionId && isSessionCompactCapableAgent(session));
-  sessionAutoCompactToggleEl.checked = Boolean(allowed && state.autoCompactSessionIds.has(sessionId));
+  sessionAutoCompactToggleEl.checked = Boolean(allowed && !session?.auto_compact_disabled);
   sessionAutoCompactToggleEl.disabled = !allowed;
   sessionAutoCompactToggleEl.title = allowed ? "" : "此智能体禁止由 webClx 发送 /compact。";
+}
+
+function applySessionAutoCompactEnabled(sessionId, enabled) {
+  state.sessions = state.sessions.map((session) => (
+    session?.id === sessionId ? { ...session, auto_compact_disabled: !enabled } : session
+  ));
+}
+
+// 自动压缩由服务端执行并持久化；前端只负责写开关，不再本地记账或发送。
+function persistSessionAutoCompactEnabled(sessionId, enabled) {
+  return requestJson(`/api/terminal/sessions/${encodeURIComponent(sessionId)}/auto-compact`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: Boolean(enabled) }),
+  });
 }
 
 function setAutoCompactForActiveSession(enabled) {
@@ -325,50 +344,43 @@ function setAutoCompactForActiveSession(enabled) {
     syncAutoCompactToggleForActiveSession();
     return;
   }
-  if (enabled) state.autoCompactSessionIds.add(sessionId);
-  else {
-    state.autoCompactSessionIds.delete(sessionId);
-    state.autoCompactHandledSessions.delete(sessionId);
-    state.autoCompactLastSent.delete(sessionId);
-    state.terminalUserInputAt.delete(sessionId);
-    storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+  if (!enabled) {
     state.autoCompactStatusSessionIds.delete(sessionId);
     storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
   }
-  const scheduledTimer = state.autoCompactScheduledTimers.get(sessionId);
-  if (scheduledTimer) {
-    window.clearTimeout(scheduledTimer);
-    state.autoCompactScheduledTimers.delete(sessionId);
-  }
-  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
+  applySessionAutoCompactEnabled(sessionId, enabled);
   syncAutoCompactToggleForActiveSession();
-  if (enabled) maybeAutoCompactCompletedSessions();
+  persistSessionAutoCompactEnabled(sessionId, enabled)
+    .then((session) => {
+      if (session && typeof session === "object" && session.id) {
+        state.sessions = state.sessions.map((item) => (
+          item?.id === sessionId ? { ...item, ...session } : item
+        ));
+      }
+      syncAutoCompactToggleForActiveSession();
+    })
+    .catch((error) => {
+      applySessionAutoCompactEnabled(sessionId, !enabled);
+      syncAutoCompactToggleForActiveSession();
+      updateStatus(error.message || "保存自动压缩开关失败。", "warn");
+    });
 }
 
 function enableAutoCompactForSession(sessionId) {
   const normalizedId = String(sessionId || "").trim();
   if (!normalizedId) return;
-  state.autoCompactSessionIds.add(normalizedId);
-  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
+  applySessionAutoCompactEnabled(normalizedId, true);
+  persistSessionAutoCompactEnabled(normalizedId, true).catch(() => {});
   syncAutoCompactToggleForActiveSession();
 }
 
 function disableAutoCompactForSession(sessionId) {
   const normalizedId = String(sessionId || "").trim();
   if (!normalizedId) return;
-  state.autoCompactSessionIds.delete(normalizedId);
-  state.autoCompactHandledSessions.delete(normalizedId);
-  state.autoCompactLastSent.delete(normalizedId);
-  state.terminalUserInputAt.delete(normalizedId);
-  storeTerminalAutoCompactLastSent(state.autoCompactLastSent);
+  applySessionAutoCompactEnabled(normalizedId, false);
+  persistSessionAutoCompactEnabled(normalizedId, false).catch(() => {});
   state.autoCompactStatusSessionIds.delete(normalizedId);
-  const scheduledTimer = state.autoCompactScheduledTimers.get(normalizedId);
-  if (scheduledTimer) {
-    window.clearTimeout(scheduledTimer);
-    state.autoCompactScheduledTimers.delete(normalizedId);
-  }
   storeTerminalAutoCompactStatusSessionIds(state.autoCompactStatusSessionIds);
-  storeTerminalAutoCompactSessionIds(state.autoCompactSessionIds);
   syncAutoCompactToggleForActiveSession();
 }
 
@@ -468,12 +480,13 @@ const state = {
   currentPath: initialLocation.path,
   showAllWorkspaceSessions: true,
   terminalNewSessionBehavior: "dialog",
+  terminalAccountSort: "credits",
   terminalWorkspaceIconPath: DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
   resumeArchives: [],
   legacyIdleMigrationAttempted: false,
   loadingResumeArchives: false,
   desktopTerminalSoftKeyboardEnabled: true,
-  terminalSoftKeyboardScale: DEFAULT_TERMINAL_SOFT_KEYBOARD_SCALE,
+  terminalSoftKeyboardScale: readStoredTerminalSoftKeyboardScale(),
   terminalFloatingButtonOffsetVh: DEFAULT_TERMINAL_FLOATING_BUTTON_OFFSET_VH,
   terminalFabActionColor: DEFAULT_TERMINAL_FAB_ACTION_COLOR,
   terminalFabActionOpacity: DEFAULT_TERMINAL_FAB_ACTION_OPACITY,
@@ -481,7 +494,7 @@ const state = {
   terminalScrollbackLines: DEFAULT_TERMINAL_SCROLLBACK_LINES,
   temporaryDesktopTerminalSoftKeyboardVisible: false,
   themeMode: readStoredThemeMode(),
-  fontSizeTiers: [...DEFAULT_FONT_SIZE_TIERS],
+  fontSizeTiers: readStoredFontSizeTiers(),
   terminalQuickCommands: normalizeTerminalQuickCommands(DEFAULT_TERMINAL_QUICK_COMMANDS, undefined, { includeCommandLine: true }),
   terminalSlashCommands: ensureBuiltInTerminalSlashCommands(DEFAULT_TERMINAL_SLASH_COMMANDS),
   terminalFunctionCommands: ensureBuiltInTerminalFunctionCommands(DEFAULT_TERMINAL_FUNCTION_COMMANDS),
@@ -497,12 +510,12 @@ const state = {
   terminalSessionReflowIds: readStoredTerminalSessionReflowIds(),
   showSessionDetails: readStoredTerminalSessionDetails(),
   showSessionAgent: readStoredTerminalSessionAgent(),
+  showSessionModelFamily: readStoredTerminalSessionModelFamily(),
   showSessionContext: readStoredTerminalSessionContext(),
   sessionContextCache: new Map(),
   autoContinueOnError: readStoredTerminalAutoContinueOnError(),
   autoContinueHandledErrors: new Map(),
   autoContinueScheduledTimers: new Map(),
-  autoCompactSessionIds: readStoredTerminalAutoCompactSessionIds(),
   autoCompactHandledSessions: new Set(),
   autoCompactScheduledTimers: new Map(),
   autoCompactStatusSessionIds: readStoredTerminalAutoCompactStatusSessionIds(),
@@ -534,6 +547,7 @@ const sessionSelectEl = document.getElementById("session-switcher");
 const agentSessionSelectEl = document.getElementById("agent-session-switcher");
 const sessionDetailToggleEl = document.getElementById("session-detail-toggle");
 const sessionAgentToggleEl = document.getElementById("session-agent-toggle");
+const sessionModelFamilyToggleEl = document.getElementById("session-model-family-toggle") || document.getElementById("session-model-type-toggle");
 const sessionContextToggleEl = document.getElementById("session-context-toggle");
 const sessionAutoContinueToggleEl = document.getElementById("session-auto-continue-toggle");
 const sessionAutoCompactToggleEl = document.getElementById("session-auto-compact-toggle");
@@ -568,6 +582,11 @@ const terminalGroupFixedOrderEl = document.getElementById("terminal-group-fixed-
 const terminalGroupNameEl = document.getElementById("terminal-group-name");
 const terminalGroupColorEl = document.getElementById("terminal-group-color");
 const terminalGroupColorValueEl = document.getElementById("terminal-group-color-value");
+const terminalGroupJoinContainerEl = document.getElementById("terminal-group-join-container");
+const terminalGroupJoinSelectEl = document.getElementById("terminal-group-join-select");
+const terminalGroupJoinButtonEl = document.getElementById("terminal-group-join-button");
+const terminalGroupRenameButtonEl = document.getElementById("terminal-group-rename-button");
+const terminalGroupJoinHintEl = document.getElementById("terminal-group-join-hint");
 const terminalGroupSortTabs = Array.from(document.querySelectorAll(".terminal-group-sort-tab"));
 const terminalGroupManagerDialog = document.getElementById("terminal-group-manager-dialog");
 const terminalGroupManagerForm = document.getElementById("terminal-group-manager-form");
@@ -625,6 +644,11 @@ const terminalAgentsDocShowHiddenEl = document.getElementById("terminal-agents-d
 const terminalInputHistoryDialogEl = document.getElementById("terminal-input-history-dialog");
 const terminalInputHistoryListEl = document.getElementById("terminal-input-history-list");
 const terminalInputHistoryStatusEl = document.getElementById("terminal-input-history-status");
+const terminalInputHistoryHideMessagesCheckbox = document.getElementById("terminal-input-history-hide-messages");
+const terminalInputHistoryHideCompileCheckbox = document.getElementById("terminal-input-history-hide-compile");
+const terminalInputHistoryClearMessagesButton = document.getElementById("terminal-input-history-clear-messages");
+const terminalInputHistoryClearCompileButton = document.getElementById("terminal-input-history-clear-compile");
+const terminalInputHistoryClearButton = document.getElementById("terminal-input-history-clear");
 const terminalInputHistoryCopyButton = document.getElementById("terminal-input-history-copy");
 const terminalInputHistoryCloseButton = document.getElementById("terminal-input-history-close");
 const terminalPasteDialogEl = document.getElementById("terminal-paste-dialog");
@@ -632,9 +656,22 @@ const terminalScheduledTasksDialogEl = document.getElementById("terminal-schedul
 const terminalPasteFormEl = document.getElementById("terminal-paste-form");
 const terminalPasteTextEl = document.getElementById("terminal-paste-text");
 const terminalPasteCancelButton = document.getElementById("terminal-paste-cancel");
+const terminalPasteCloseButton = document.getElementById("terminal-paste-close");
 const terminalPasteSubmitButton = document.getElementById("terminal-paste-submit");
 const terminalPasteSubmitEnterButton = document.getElementById("terminal-paste-submit-enter");
 const terminalPasteAssetsEl = document.getElementById("terminal-paste-assets");
+const terminalPasteUploadImageButtonEl = document.getElementById("terminal-paste-upload-image-button");
+const terminalPasteImageInputEl = document.getElementById("terminal-paste-image-input");
+const terminalImagePasteDialogEl = document.getElementById("terminal-image-paste-dialog");
+const terminalImagePasteFormEl = document.getElementById("terminal-image-paste-form");
+const terminalImagePasteTextEl = document.getElementById("terminal-image-paste-text");
+const terminalImagePasteCancelButton = document.getElementById("terminal-image-paste-cancel");
+const terminalImagePasteSubmitButton = document.getElementById("terminal-image-paste-submit");
+const terminalImagePasteSubmitEnterButton = document.getElementById("terminal-image-paste-submit-enter");
+const terminalImagePasteAssetsEl = document.getElementById("terminal-image-paste-assets");
+const terminalImagePasteSelectButtonEl = document.getElementById("terminal-image-paste-select-button");
+const terminalImagePasteInputEl = document.getElementById("terminal-image-paste-input");
+let terminalImagePasteAssetEntries = [];
 const terminalPasteScheduleEl = document.getElementById("terminal-paste-schedule");
 const terminalPasteScheduleToggleEl = document.getElementById("terminal-paste-schedule-toggle");
 const terminalPasteScheduleDelayEl = document.getElementById("terminal-paste-schedule-delay");
@@ -646,6 +683,8 @@ const terminalPasteScheduleStatusEl = document.getElementById("terminal-paste-sc
 const terminalPasteScheduleChipEl = document.getElementById("terminal-paste-schedule-chip");
 const terminalPasteScheduleChipTextEl = document.getElementById("terminal-paste-schedule-chip-text");
 const terminalSelectionCopyButton = document.getElementById("terminal-selection-copy");
+const terminalSelectionCopyAllButton = document.getElementById("terminal-selection-copy-all");
+const terminalSelectionOpenImeButton = document.getElementById("terminal-selection-open-ime");
 const terminalSelectionStartHandle = document.getElementById("terminal-selection-start-handle");
 const terminalSelectionEndHandle = document.getElementById("terminal-selection-end-handle");
 const terminalContextMenuEl = document.getElementById("terminal-context-menu");
@@ -660,7 +699,8 @@ const terminalFunctionCommandButtonEl = document.getElementById("terminal-functi
 const terminalFunctionCommandMenuEl = document.getElementById("terminal-function-command-menu");
 const terminalFunctionCommandButtonsEl = document.getElementById("terminal-function-command-buttons");
 const terminalFunctionCommandSelectEl = terminalFunctionCommandButtonsEl || null;
-const terminalImageUploadInputEl = document.getElementById("terminal-image-upload-input");
+const terminalFileUploadInputEl = document.getElementById("terminal-file-upload-input");
+const terminalImageUploadInputEl = terminalFileUploadInputEl || document.getElementById("terminal-image-upload-input");
 const terminalSystemKeyboardCheckboxEl = document.getElementById("terminal-system-keyboard-checkbox");
 const terminalTouchCopyCheckboxEl = document.getElementById("terminal-touch-copy-checkbox");
 const terminalProjectCommandSelectEl = document.getElementById("terminal-project-command-select");
@@ -678,7 +718,6 @@ const terminalToolMenuStatusEl = document.getElementById("terminal-tool-menu-sta
 const terminalToolMenuBackEl = document.getElementById("terminal-tool-menu-back");
 const terminalToolsButtonEl = document.getElementById("terminal-tools-button");
 const terminalToolsMenuEl = document.getElementById("terminal-tools-menu");
-const terminalCodexFullAccessToggleEl = document.getElementById("terminal-codex-full-access-toggle");
 const terminalInterruptResumeButtonEl = document.getElementById("terminal-interrupt-resume");
 const terminalToolsStatusEl = document.getElementById("terminal-tools-status");
 
@@ -1143,6 +1182,12 @@ function sessionActivityAgentLabel(session) {
   return sharedSessionActivityAgentLabel(session);
 }
 
+function sessionModelFamilyLabel(session) {
+  return typeof sharedSessionModelFamilyLabel === "function"
+    ? sharedSessionModelFamilyLabel(session)
+    : String(session?.model_family || session?.modelFamily || "").trim();
+}
+
 function sessionActivityAgentPrefix(session) {
   return sharedSessionActivityAgentPrefix(session, state.terminalActivityAgentDisplay);
 }
@@ -1421,13 +1466,19 @@ document.addEventListener("focusin", (event) => {
   }
 }, true);
 
+let lastPageResumeTime = 0;
+
 function refreshSessionsAfterPageResume() {
   if (document.visibilityState === "hidden" || terminalSessionInitializing()) {
     return;
   }
+  const now = Date.now();
+  if (now - lastPageResumeTime < 2000) {
+    return;
+  }
+  lastPageResumeTime = now;
 
   refreshTerminalInputVisibilityAfterPageResume();
-  scheduleTerminalSizeSettle();
   loadSessions({
     preferredSessionId: state.activeSessionId || currentLocationSessionId(),
     preserveCurrentList: true,
@@ -1529,8 +1580,10 @@ document.addEventListener("keydown", handleTerminalFunctionShortcut, true);
 document.addEventListener("selectstart", preventNativeTerminalTouchSelection, { capture: true });
 
 terminalHost.addEventListener("click", focusTerminalFromTerminalTap);
-terminalHost.addEventListener("touchstart", rememberTerminalTouchScrollGesture, { passive: true });
-terminalHost.addEventListener("touchstart", rememberTerminalTouchSelectionCandidate, { passive: true });
+terminalHost.addEventListener("pointerdown", guardTerminalTouchPointerFocus, { capture: true });
+terminalHost.addEventListener("click", guardTerminalTouchSelectionClick, { capture: true });
+terminalHost.addEventListener("touchstart", rememberTerminalTouchScrollGesture, { passive: true, capture: true });
+terminalHost.addEventListener("touchstart", rememberTerminalTouchSelectionCandidate, { passive: false, capture: true });
 terminalHost.addEventListener("touchend", (event) => {
   for (const touch of terminalTouchItems(event.changedTouches)) {
     clearTerminalTouchScrollGesture(touch.identifier);
@@ -1543,7 +1596,9 @@ terminalHost.addEventListener("touchcancel", (event) => {
     clearTerminalTouchSelectionCandidate(touch.identifier);
   }
 });
-terminalHost.addEventListener("contextmenu", handleTerminalContextMenuSelection);
+// Handle touch selection before xterm's right-click handler focuses and moves
+// its helper textarea. The keyboard must remain untouched throughout selection.
+terminalHost.addEventListener("contextmenu", handleTerminalContextMenuSelection, { capture: true });
 // xterm.js converts wheel input into injected up/down arrow keys while a TUI
 // owns the alternate buffer, which made the Codex/Claude input box flip
 // through history on wheel scroll. Intercept at the host boundary in capture
@@ -1633,7 +1688,9 @@ if (terminalFunctionCommandButtonEl) {
   terminalFunctionCommandButtonEl.addEventListener("click", toggleTerminalFunctionCommandMenu);
 }
 
-if (terminalImageUploadInputEl) {
+if (terminalFileUploadInputEl) {
+  terminalFileUploadInputEl.addEventListener("change", handleTerminalFileUploadSelection);
+} else if (terminalImageUploadInputEl) {
   terminalImageUploadInputEl.addEventListener("change", handleTerminalImageUploadSelection);
 }
 
@@ -1791,6 +1848,50 @@ if (terminalSelectionCopyButton) {
       focusTerminalIfAllowed();
     } catch (error) {
       updateStatus(error?.message || "复制失败。", "warn");
+    }
+  });
+}
+
+if (terminalSelectionCopyAllButton) {
+  terminalSelectionCopyAllButton.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+  });
+  terminalSelectionCopyAllButton.addEventListener("click", async () => {
+    const text = readTerminalAllText();
+    if (!text) {
+      updateStatus("当前终端没有可复制的文本。", "muted");
+      return;
+    }
+
+    try {
+      const copied = await copyTextToClipboard(text);
+      if (!copied) {
+        throw new Error("复制失败");
+      }
+      if (typeof term.clearSelection === "function") {
+        term.clearSelection();
+      }
+      syncTerminalSelectionControls();
+      updateStatus("已复制终端全部文本。", "ok");
+      focusTerminalIfAllowed();
+    } catch (error) {
+      updateStatus(error?.message || "复制失败。", "warn");
+    }
+  });
+}
+
+if (terminalSelectionOpenImeButton) {
+  terminalSelectionOpenImeButton.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+  });
+  terminalSelectionOpenImeButton.addEventListener("click", () => {
+    setTerminalSystemImeEnabled(true, { clearSuppression: true });
+    focusTerminalFromTerminalTap();
+    showTerminalSystemKeyboardNatively();
+    syncTerminalImePolicy();
+    updateStatus("已打开系统输入法。", "ok");
+    if (typeof syncTerminalKeyboardCheckboxes === "function") {
+      syncTerminalKeyboardCheckboxes();
     }
   });
 }
@@ -1983,6 +2084,12 @@ if (terminalPasteDialogEl) {
   });
 }
 
+if (terminalImagePasteDialogEl) {
+  terminalImagePasteDialogEl.addEventListener("close", () => {
+    restoreTerminalFocusAfterDialogClose();
+  });
+}
+
 if (terminalScheduledTasksDialogEl) {
   terminalScheduledTasksDialogEl.addEventListener("close", () => {
     restoreTerminalFocusAfterDialogClose();
@@ -2112,9 +2219,39 @@ if (terminalAgentsDocDialogEl) {
   });
 }
 
+if (terminalInputHistoryHideMessagesCheckbox) {
+  terminalInputHistoryHideMessagesCheckbox.addEventListener("change", () => {
+    filterTerminalInputHistoryDisplay();
+  });
+}
+
+if (terminalInputHistoryHideCompileCheckbox) {
+  terminalInputHistoryHideCompileCheckbox.addEventListener("change", () => {
+    filterTerminalInputHistoryDisplay();
+  });
+}
+
 if (terminalInputHistoryCopyButton) {
   terminalInputHistoryCopyButton.addEventListener("click", () => {
     copyTerminalInputHistory();
+  });
+}
+
+if (terminalInputHistoryClearMessagesButton) {
+  terminalInputHistoryClearMessagesButton.addEventListener("click", () => {
+    clearTerminalInterAgentMessages();
+  });
+}
+
+if (terminalInputHistoryClearCompileButton) {
+  terminalInputHistoryClearCompileButton.addEventListener("click", () => {
+    clearTerminalCompileNotifications();
+  });
+}
+
+if (terminalInputHistoryClearButton) {
+  terminalInputHistoryClearButton.addEventListener("click", () => {
+    clearTerminalInputHistory();
   });
 }
 
@@ -2182,6 +2319,15 @@ if (sessionAgentToggleEl) {
   sessionAgentToggleEl.addEventListener("change", () => {
     state.showSessionAgent = sessionAgentToggleEl.checked;
     storeTerminalSessionAgent(state.showSessionAgent);
+    renderSessions();
+  });
+}
+
+if (sessionModelFamilyToggleEl) {
+  sessionModelFamilyToggleEl.checked = state.showSessionModelFamily;
+  sessionModelFamilyToggleEl.addEventListener("change", () => {
+    state.showSessionModelFamily = sessionModelFamilyToggleEl.checked;
+    storeTerminalSessionModelFamily(state.showSessionModelFamily);
     renderSessions();
   });
 }
@@ -2274,10 +2420,6 @@ if (sessionAutoCompactToggleEl) {
     setAutoCompactForActiveSession(sessionAutoCompactToggleEl.checked);
   });
   syncAutoCompactToggleForActiveSession();
-}
-
-if (terminalCodexFullAccessToggleEl) {
-  terminalCodexFullAccessToggleEl.addEventListener("change", toggleCodexFullAccess);
 }
 
 document.getElementById("terminal-save-experience")?.addEventListener("click", sendTerminalExperienceSave);
@@ -2640,12 +2782,47 @@ if (terminalGroupColorEl) {
   });
 }
 
-if (terminalPasteCancelButton) {
-  terminalPasteCancelButton.addEventListener("click", () => {
-    closeTerminalPasteDialog();
-    focusTerminalAfterTransientControl();
+if (terminalGroupJoinSelectEl) {
+  terminalGroupJoinSelectEl.addEventListener("change", () => {
+    const token = terminalGroupJoinSelectEl.value;
+    if (terminalGroupJoinButtonEl) {
+      terminalGroupJoinButtonEl.disabled = !token;
+    }
+    if (terminalGroupRenameButtonEl) {
+      terminalGroupRenameButtonEl.disabled = !token;
+    }
+    if (token && typeof applyJoinExistingGroup === "function") {
+      applyJoinExistingGroup(token);
+    }
   });
 }
+
+if (terminalGroupJoinButtonEl) {
+  terminalGroupJoinButtonEl.addEventListener("click", () => {
+    const token = terminalGroupJoinSelectEl?.value;
+    if (token && typeof applyJoinExistingGroup === "function") {
+      applyJoinExistingGroup(token);
+    }
+  });
+}
+
+if (terminalGroupRenameButtonEl) {
+  terminalGroupRenameButtonEl.addEventListener("click", () => {
+    const token = terminalGroupJoinSelectEl?.value;
+    if (token && typeof handleTerminalGroupRenamePrompt === "function") {
+      handleTerminalGroupRenamePrompt(token);
+    }
+  });
+}
+
+[terminalPasteCancelButton, terminalPasteCloseButton].forEach((button) => {
+  if (button) {
+    button.addEventListener("click", () => {
+      closeTerminalPasteDialog();
+      focusTerminalAfterTransientControl();
+    });
+  }
+});
 
 if (terminalPasteSubmitButton) {
   terminalPasteSubmitButton.addEventListener("click", () => {
@@ -2655,6 +2832,85 @@ if (terminalPasteSubmitButton) {
     if (!submitTerminalPasteDialog()) {
       terminalPasteTextEl?.focus();
     }
+  });
+}
+
+if (terminalPasteUploadImageButtonEl && terminalPasteImageInputEl) {
+  terminalPasteUploadImageButtonEl.addEventListener("click", () => {
+    if (terminalPasteBusy) {
+      return;
+    }
+    terminalPasteImageInputEl.value = "";
+    terminalPasteImageInputEl.click();
+  });
+}
+
+if (terminalPasteImageInputEl) {
+  terminalPasteImageInputEl.addEventListener("change", async () => {
+    const files = Array.from(terminalPasteImageInputEl.files || []);
+    terminalPasteImageInputEl.value = "";
+    if (files.length === 0) {
+      return;
+    }
+    try {
+      await applyTerminalPasteParts([{ type: "images", blobs: files }], { openDialog: false });
+    } catch (error) {
+      updateStatus(error?.message || "上传图片失败。", "warn");
+    } finally {
+      terminalPasteTextEl?.focus();
+    }
+  });
+}
+
+if (terminalImagePasteCancelButton) {
+  terminalImagePasteCancelButton.addEventListener("click", () => {
+    closeTerminalImagePasteDialog();
+    focusTerminalAfterTransientControl();
+  });
+}
+
+if (terminalImagePasteSubmitButton) {
+  terminalImagePasteSubmitButton.addEventListener("click", () => {
+    submitTerminalImagePasteDialog({ enter: false });
+  });
+}
+
+if (terminalImagePasteFormEl) {
+  terminalImagePasteFormEl.addEventListener("submit", (event) => {
+    event.preventDefault();
+    submitTerminalImagePasteDialog({ enter: true });
+  });
+}
+
+if (terminalImagePasteSelectButtonEl && terminalImagePasteInputEl) {
+  terminalImagePasteSelectButtonEl.addEventListener("click", () => {
+    terminalImagePasteInputEl.value = "";
+    terminalImagePasteInputEl.click();
+  });
+}
+
+if (terminalImagePasteInputEl) {
+  terminalImagePasteInputEl.addEventListener("change", async () => {
+    const files = Array.from(terminalImagePasteInputEl.files || []);
+    terminalImagePasteInputEl.value = "";
+    if (files.length === 0) {
+      return;
+    }
+    await applyTerminalImagePasteBlobs(files);
+  });
+}
+
+if (terminalImagePasteDialogEl) {
+  terminalImagePasteDialogEl.addEventListener("paste", (event) => {
+    const parts = dataTransferToPasteParts(event.clipboardData);
+    const imageParts = parts.filter((part) => part.type === "images");
+    if (imageParts.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    applyTerminalImagePasteBlobs(imageParts.flatMap((p) => p.blobs)).catch((error) => {
+      updateStatus(error?.message || "处理剪贴板图片失败。", "warn");
+    });
   });
 }
 
@@ -2818,13 +3074,21 @@ window.addEventListener("storage", (event) => {
 });
 
 window.addEventListener("storage", (event) => {
-  if (event.key !== THEME_MODE_STORAGE_KEY) {
+  if (event.key === THEME_MODE_STORAGE_KEY) {
+    applyThemeMode(event.newValue || DEFAULT_THEME_MODE);
+    setTerminalCursorHiddenForCorrection(terminalCursorCorrectionActive, { force: true });
+    fitTerminal({ force: true });
+    scheduleTerminalSizeSettle();
     return;
   }
-  applyThemeMode(event.newValue || DEFAULT_THEME_MODE);
-  setTerminalCursorHiddenForCorrection(terminalCursorCorrectionActive, { force: true });
-  fitTerminal({ force: true });
-  scheduleTerminalSizeSettle();
+  if (event.key === FONT_SIZE_TIERS_STORAGE_KEY && event.newValue) {
+    try {
+      const parsed = JSON.parse(event.newValue);
+      if (Array.isArray(parsed) && parsed.length >= 4) {
+        applyTypographySettings(parsed);
+      }
+    } catch {}
+  }
 });
 
 // Settings panel -> terminal page: cancel a pending background paste send.
@@ -2891,7 +3155,23 @@ function applyTerminalViewportResizeLayout(pageSnapshot, { settle = false } = {}
   updatePageScrollRail();
 }
 
+let lastObservedViewportWidth = null;
+let lastObservedViewportHeight = null;
+
 function handleTerminalViewportResize() {
+  const currentWidth = Math.round(window.visualViewport ? window.visualViewport.width : window.innerWidth);
+  const currentHeight = Math.round(window.visualViewport ? window.visualViewport.height : window.innerHeight);
+  if (
+    lastObservedViewportWidth !== null &&
+    lastObservedViewportHeight !== null &&
+    Math.abs(currentWidth - lastObservedViewportWidth) < 2 &&
+    Math.abs(currentHeight - lastObservedViewportHeight) < 2
+  ) {
+    return;
+  }
+  lastObservedViewportWidth = currentWidth;
+  lastObservedViewportHeight = currentHeight;
+
   if (terminalViewportResizeTimer === null) {
     terminalViewportResizePageSnapshot = capturePageScrollSnapshotForLayout();
     const sessionId = state.activeSessionId;
@@ -2925,7 +3205,6 @@ function handleTerminalViewportResize() {
 
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", handleTerminalViewportResize);
-  window.visualViewport.addEventListener("scroll", handleTerminalViewportResize, { passive: true });
 }
 window.addEventListener("resize", handleTerminalViewportResize, { passive: true });
 window.addEventListener("orientationchange", handleTerminalViewportResize, { passive: true });

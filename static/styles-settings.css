@@ -2258,6 +2258,12 @@ body.scheduled-tasks-window .unified-task-actions-cell .button {
   color: #966508;
 }
 
+.task-type-badge[data-type="agent_message"],
+.task-type-badge[data-type="message"] {
+  background: rgba(230, 110, 0, 0.12);
+  color: #d96800;
+}
+
 .task-type-badge[data-type="auto-continue"] {
   background: rgba(150, 80, 180, 0.12);
   color: #8240a8;
@@ -2792,7 +2798,7 @@ textarea.terminal-tool-action-parameter {
   overflow-wrap: anywhere;
 }
 .terminal-scheduled-tasks-dialog {
-  width: min(680px, calc(100vw - 28px));
+  width: min(860px, calc(100vw - 28px));
   max-height: min(77dvh, 700px);
   padding: 0;
   border: 0;
@@ -2876,17 +2882,25 @@ textarea.terminal-tool-action-parameter {
 }
 
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(1),
-.terminal-scheduled-tasks-form .unified-task-table td:nth-child(1) { width: 178px; }
+.terminal-scheduled-tasks-form .unified-task-table td:nth-child(1) { width: 124px; }
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(2),
 .terminal-scheduled-tasks-form .unified-task-table td:nth-child(2) { width: 86px; }
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(3),
-.terminal-scheduled-tasks-form .unified-task-table td:nth-child(3) { width: 116px; }
+.terminal-scheduled-tasks-form .unified-task-table td:nth-child(3) { width: 260px; }
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(4),
 .terminal-scheduled-tasks-form .unified-task-table td:nth-child(4) { width: 126px; }
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(5),
 .terminal-scheduled-tasks-form .unified-task-table td:nth-child(5) { width: 72px; }
 .terminal-scheduled-tasks-form .unified-task-table th:nth-child(6),
 .terminal-scheduled-tasks-form .unified-task-table td:nth-child(6) { width: auto; }
+
+.terminal-scheduled-tasks-form .unified-task-table tbody tr {
+  cursor: pointer;
+}
+
+.terminal-scheduled-tasks-form .unified-task-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
 
 .terminal-scheduled-tasks-form .unified-task-table th,
 .terminal-scheduled-tasks-form .unified-task-table td {
@@ -2901,17 +2915,22 @@ textarea.terminal-tool-action-parameter {
 }
 
 .terminal-scheduled-tasks-form .unified-task-actions-cell {
-  gap: 4px;
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 3px;
 }
 
 .terminal-scheduled-tasks-form .unified-task-actions-cell .button {
-  padding: 1px 6px;
+  padding: 1px 4px;
   font-size: 11px;
   line-height: 1.2;
+  white-space: nowrap;
 }
 
 .terminal-scheduled-tasks-form .unified-task-table td:first-child {
-  padding-left: 8px;
+  padding-left: 4px;
+  padding-right: 2px;
 }
 
 .terminal-scheduled-tasks-form .unified-task-table tr:last-child td:first-child {

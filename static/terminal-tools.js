@@ -89,28 +89,6 @@ function setTerminalToolsMenuExpanded(expanded, { restoreFocus = false } = {}) {
   }
 }
 
-async function refreshCodexFullAccessToggle() {
-  if (!terminalCodexFullAccessToggleEl) {
-    return;
-  }
-  terminalCodexFullAccessToggleEl.disabled = true;
-  setTerminalToolsStatus("读取中…", "info");
-  try {
-    const result = await requestJson("/api/terminal/codex-full-access", {
-      method: "GET",
-    });
-    terminalCodexFullAccessToggleEl.checked = result?.enabled === true;
-    setTerminalToolsStatus("");
-  } catch (error) {
-    setTerminalToolsStatus(error?.message || "读取 Codex 权限状态失败。", "warn");
-  } finally {
-    terminalCodexFullAccessToggleEl.disabled = false;
-    if (terminalToolsMenuEl && !terminalToolsMenuEl.hidden) {
-      terminalCodexFullAccessToggleEl.focus({ preventScroll: true });
-    }
-  }
-}
-
 function handleTerminalToolsMenuAction(event) {
   const button = event.target instanceof Element
     ? event.target.closest("button[data-action]")
@@ -146,54 +124,6 @@ function toggleTerminalToolsMenu() {
     if (typeof openTerminalToolMenu === "function") {
       openTerminalToolMenu("tools", terminalToolsButtonEl);
     }
-    refreshCodexFullAccessToggle();
-  }
-}
-
-async function toggleCodexFullAccess() {
-  if (!terminalCodexFullAccessToggleEl) {
-    return;
-  }
-
-  const enabled = terminalCodexFullAccessToggleEl.checked;
-  const previous = !enabled;
-  if (enabled && (!state.activeSessionId || !isTerminalConnected())) {
-    terminalCodexFullAccessToggleEl.checked = previous;
-    setTerminalToolsStatus("当前终端尚未连接。", "warn");
-    return;
-  }
-  const targetSessionId = state.activeSessionId;
-  terminalCodexFullAccessToggleEl.disabled = true;
-  setTerminalToolsStatus(enabled ? "正在开启…" : "正在关闭…", "info");
-  try {
-    const result = await requestJson("/api/terminal/codex-full-access", {
-      method: enabled ? "PUT" : "DELETE",
-    });
-    if (result?.enabled !== enabled) {
-      throw new Error("Codex 权限状态与请求不一致。");
-    }
-    terminalCodexFullAccessToggleEl.checked = enabled;
-    const user = String(result?.user || "当前终端用户");
-    if (!enabled) {
-      setTerminalToolsStatus("已关闭", "ok");
-      updateStatus(`已恢复 ${user} 的 Codex 权限配置。`, "ok");
-      return;
-    }
-
-    setTerminalToolsStatus("已开启，正在启动…", "info");
-    const sent = await sendTerminalAutoTypedInput("codex", { sessionId: targetSessionId });
-    if (!sent) {
-      setTerminalToolsStatus("已开启，启动失败", "warn");
-      updateStatus("Codex 最高权限已开启，但启动命令发送失败。", "warn");
-      return;
-    }
-    setTerminalToolsStatus("已开启", "ok");
-    updateStatus(`已为 ${user} 启动 Codex 最高权限。`, "ok");
-  } catch (error) {
-    terminalCodexFullAccessToggleEl.checked = previous;
-    setTerminalToolsStatus(error?.message || "切换 Codex 最高权限失败。", "warn");
-  } finally {
-    terminalCodexFullAccessToggleEl.disabled = false;
   }
 }
 

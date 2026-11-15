@@ -38,6 +38,8 @@ struct UpdateCodeBuddyAutoRequest {
     checkin: Option<bool>,
     #[serde(default)]
     travel: Option<bool>,
+    #[serde(rename = "blockInternationalAutoSwitch", default)]
+    block_international_auto_switch: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +48,12 @@ struct UpdateCodeBuddyOptionsRequest {
     bypass_permissions: bool,
     #[serde(default)]
     sandbox: bool,
+    #[serde(rename = "deviceFingerprint", default = "default_device_fingerprint")]
+    device_fingerprint: bool,
+}
+
+fn default_device_fingerprint() -> bool {
+    true
 }
 
 pub(super) fn routes() -> axum::Router<AppState> {
@@ -225,22 +233,9 @@ async fn update_codebuddy_auto(
     State(state): State<AppState>,
     Json(payload): Json<UpdateCodeBuddyAutoRequest>,
 ) -> ApiResult<Json<Value>> {
-    let auto = state.codebuddy_manager.auto_config();
-    let checkin = payload.checkin.unwrap_or_else(|| {
-        auto.get("auto")
-            .and_then(|value| value.get("checkin"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    });
-    let travel = payload.travel.unwrap_or_else(|| {
-        auto.get("auto")
-            .and_then(|value| value.get("travel"))
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    });
     let result = state
         .codebuddy_manager
-        .set_auto_config(checkin, travel)
+        .set_auto_config(payload.checkin, payload.travel, payload.block_international_auto_switch)
         .map_err(AppError::bad_request)?;
     Ok(Json(result))
 }
@@ -255,7 +250,7 @@ async fn update_codebuddy_options(
 ) -> ApiResult<Json<Value>> {
     let result = state
         .codebuddy_manager
-        .set_cli_options(payload.bypass_permissions, payload.sandbox)
+        .set_cli_options(payload.bypass_permissions, payload.sandbox, payload.device_fingerprint)
         .map_err(AppError::bad_request)?;
     Ok(Json(result))
 }

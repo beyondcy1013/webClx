@@ -150,7 +150,7 @@ function readCssPixelValue(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function connectTerminalServerFrame(rawTarget) {
+function connectTerminalServerFrame(rawTarget, { navigate = true } = {}) {
   const { frameSelect, frame } = terminalServerViewElements();
   const select = frameSelect || document.getElementById("terminal-server-switch-select");
   if (!select || !frame) {
@@ -174,7 +174,7 @@ function connectTerminalServerFrame(rawTarget) {
   select.value = target;
   rememberTerminalServerTarget(target);
   setTerminalServerFrameStatus(`正在连接 ${target}...`, "info");
-  frame.src = targetUrl;
+  if (navigate) frame.src = targetUrl;
   return targetUrl;
 }
 
@@ -224,22 +224,28 @@ function terminalServerFrameLoginUrl(targetUrl, ticket) {
   return url.toString();
 }
 
+let terminalServerConnectGeneration = 0;
 async function connectTerminalServerFrameWithHostAuth(rawTarget) {
-  const targetUrl = connectTerminalServerFrame(rawTarget);
-  if (!targetUrl) {
-    return "";
-  }
+  const generation = ++terminalServerConnectGeneration;
+  const targetUrl = connectTerminalServerFrame(rawTarget, { navigate: false });
+  if (!targetUrl) return "";
+  // Promote the host's legacy cookie before any remote page can set a shared cookie.
   const authenticated = await ensureHostSessionForServerFrame();
-  if (authenticated) {
+  if (generation !== terminalServerConnectGeneration) return "";
+  let frameUrl = targetUrl;
+  if (authenticated && new URL(targetUrl).origin !== window.location.origin) {
     try {
       const ticket = await issueTerminalServerFrameTicket(targetUrl);
-      const loginUrl = terminalServerFrameLoginUrl(targetUrl, ticket);
-      const frame = document.getElementById("terminal-server-frame");
-      if (frame) frame.src = loginUrl;
+      frameUrl = terminalServerFrameLoginUrl(targetUrl, ticket);
     } catch (error) {
-      setTerminalServerFrameStatus(error.message || "跨实例免登录失败。", "warn");
+      if (generation === terminalServerConnectGeneration) {
+        setTerminalServerFrameStatus(error.message || "跨实例免登录失败。", "warn");
+      }
     }
   }
+  if (generation !== terminalServerConnectGeneration) return "";
+  const frame = document.getElementById("terminal-server-frame");
+  if (frame) frame.src = frameUrl;
   return targetUrl;
 }
 
@@ -260,7 +266,8 @@ function setTerminalServerView(active, rawTarget = "") {
 
   if (!serverActive) {
     setTerminalServerFrameStatus("");
-    frame?.style.removeProperty("height");
+    terminalServerConnectGeneration++;
+    views.frame?.style.removeProperty("height");
     window.dispatchEvent(new Event("resize"));
     return;
   }

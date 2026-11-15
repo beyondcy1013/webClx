@@ -14,10 +14,14 @@ function announceSettingsMutation(settings = {}) {
 
 function renderCodexCommonConfig(result = {}) {
   if (codexCommonApprovalNeverInputEl) {
-    codexCommonApprovalNeverInputEl.checked = Boolean(result.approval_never);
+    codexCommonApprovalNeverInputEl.checked = typeof result.approval_never === "undefined"
+      ? true
+      : Boolean(result.approval_never);
   }
   if (codexCommonSandboxFullAccessInputEl) {
-    codexCommonSandboxFullAccessInputEl.checked = Boolean(result.sandbox_full_access);
+    codexCommonSandboxFullAccessInputEl.checked = typeof result.sandbox_full_access === "undefined"
+      ? true
+      : Boolean(result.sandbox_full_access);
   }
   if (codexCommonAnimationsDisabledInputEl) {
     codexCommonAnimationsDisabledInputEl.checked = Boolean(result.animations_disabled);
@@ -181,8 +185,21 @@ async function loadSettings() {
   try {
     const previousTerminalUser = state.terminalUser;
     const settings = await requestJson("/api/settings");
+    let webUser = "";
+    let webUserRole = "";
+    try {
+      const session = await requestJson("/api/auth/session");
+      webUser = String(session?.user || "").trim();
+      webUserRole = String(session?.role || "").trim();
+    } catch {
+      // The settings page still shows the terminal identity when the session probe fails.
+    }
+    state.webUser = webUser;
+    state.webUserRole = webUserRole;
     state.hostName = normalizeHostName(settings.host_name);
     applyDocumentTitle();
+    state.webUser = state.webUser || settings.web_user || "";
+    state.webUserRole = state.webUserRole || settings.web_user_role || "";
     state.workspaceDir = settings.workspace_dir;
     state.defaultWorkspaceDir = settings.default_workspace_dir;
     state.terminalUser = normalizeTerminalUser(settings.terminal_user);
@@ -290,6 +307,9 @@ async function loadSettings() {
     state.terminalNewSessionBehavior = WebClxNewTerminal.normalizeBehavior(
       settings.terminal_new_session_behavior,
     );
+    state.terminalAccountSort = normalizeTerminalAccountSort(
+      settings.terminal_account_sort,
+    );
     state.desktopTerminalSoftKeyboardEnabled = Boolean(
       settings.desktop_terminal_soft_keyboard_enabled,
     );
@@ -328,6 +348,25 @@ async function loadSettings() {
       settings.terminal_auto_continue_respect_manual_interrupt !== false;
     // Retain the legacy field without exposing a bypass for the agent guard.
     state.terminalAutoCompactSkipCodebuddy = true;
+    state.terminalReportDebounceSeconds =
+      typeof settings.terminal_report_debounce_seconds === "number"
+        ? Math.min(600, Math.max(0, Math.trunc(settings.terminal_report_debounce_seconds)))
+        : DEFAULT_TERMINAL_REPORT_DEBOUNCE_SECONDS;
+    state.terminalMessageQueueSeconds =
+      typeof settings.terminal_message_queue_seconds === "number"
+        ? Math.min(600, Math.max(1, Math.trunc(settings.terminal_message_queue_seconds)))
+        : DEFAULT_TERMINAL_MESSAGE_QUEUE_SECONDS;
+    {
+      const rawTimeout =
+        typeof settings.terminal_task_timeout_secs === "number"
+          ? settings.terminal_task_timeout_secs
+          : settings.default_terminal_task_timeout_secs ?? DEFAULT_TERMINAL_TASK_TIMEOUT_SECS;
+      const parsedTimeout = Math.trunc(Number(rawTimeout) || DEFAULT_TERMINAL_TASK_TIMEOUT_SECS);
+      state.terminalTaskTimeoutSecs = Math.min(
+        120,
+        Math.max(10, parsedTimeout),
+      );
+    }
     state.terminalAutoContinueTimePatterns = normalizeTerminalAutoContinueTimePatterns(
       settings.terminal_auto_continue_time_patterns || DEFAULT_TERMINAL_AUTO_CONTINUE_TIME_PATTERNS,
     );
@@ -426,9 +465,9 @@ async function loadSettings() {
       settings.terminal_workspace_icon_path,
       DEFAULT_TERMINAL_WORKSPACE_ICON_PATH,
     );
-    state.terminalGroupManagerEmoji = window.localStorage.getItem("webclx:terminal-group-manager-emoji") || "👑";
-    state.terminalGroupExecutorEmojiMode = window.localStorage.getItem("webclx:terminal-group-executor-emoji-mode") === "fixed" ? "fixed" : "random";
-    state.terminalGroupExecutorEmoji = window.localStorage.getItem("webclx:terminal-group-executor-emoji") || "⚙️";
+    state.terminalGroupManagerEmoji = window.localStorage.getItem("webclx:terminal-group-manager-emoji") || "🔱";
+    state.terminalGroupExecutorEmojiMode = window.localStorage.getItem("webclx:terminal-group-executor-emoji-mode") === "random" ? "random" : "fixed";
+    state.terminalGroupExecutorEmoji = window.localStorage.getItem("webclx:terminal-group-executor-emoji") || "🚀";
     state.terminalUserHome = settings.terminal_user_home || "";
     state.serverVersion =
       typeof settings.server_version === "string" && settings.server_version.trim()
@@ -443,7 +482,9 @@ async function loadSettings() {
     ]);
     applyTypographySettings(state.fontSizeTiers);
     settingsCurrentDirEl.textContent = settings.workspace_dir;
-    settingsCurrentUserEl.textContent = state.terminalUser;
+    settingsCurrentUserEl.textContent = state.webUser
+      ? `${state.webUserRole === "super_admin" ? "👑 " : ""}${state.webUser} | 超级管理员 | 终端用户 ${state.terminalUser}`
+      : state.terminalUser;
     settingsUserHomeEl.textContent = [
       settings.terminal_user_home || "",
       settings.terminal_user_shell || "",
@@ -494,6 +535,9 @@ async function loadSettings() {
     showAllWorkspaceSessionsInputEl.checked = state.showAllWorkspaceSessions;
     if (terminalNewSessionBehaviorInputEl) {
       terminalNewSessionBehaviorInputEl.value = state.terminalNewSessionBehavior;
+    }
+    if (terminalAccountSortInputEl) {
+      terminalAccountSortInputEl.value = state.terminalAccountSort;
     }
     desktopTerminalSoftKeyboardInputEl.checked = state.desktopTerminalSoftKeyboardEnabled;
     if (terminalSoftKeyboardScaleInputEl) {
@@ -552,6 +596,25 @@ async function loadSettings() {
     if (terminalAutoCompactSkipCodebuddyInputEl) {
       terminalAutoCompactSkipCodebuddyInputEl.checked =
         state.terminalAutoCompactSkipCodebuddy;
+    }
+    const terminalMessageQueueInputEl = document.getElementById(
+      "terminal-message-queue-seconds-input",
+    );
+    if (terminalMessageQueueInputEl) {
+      terminalMessageQueueInputEl.value = formatTerminalMessageQueueSeconds(
+        state.terminalMessageQueueSeconds,
+      );
+    }
+    const terminalReportDebounceInputEl = document.getElementById(
+      "terminal-report-debounce-seconds-input",
+    );
+    if (terminalReportDebounceInputEl) {
+      terminalReportDebounceInputEl.value = formatTerminalReportDebounceSeconds(
+        state.terminalReportDebounceSeconds,
+      );
+    }
+    if (terminalTaskTimeoutSecsInputEl) {
+      terminalTaskTimeoutSecsInputEl.value = String(state.terminalTaskTimeoutSecs);
     }
     if (terminalAutoContinueTimePatternsInputEl) {
       terminalAutoContinueTimePatternsInputEl.value = formatTerminalAutoContinueTimePatterns(
@@ -657,6 +720,7 @@ async function saveSettings(
   nextShowDotEntries,
   nextShowAllWorkspaceSessions,
   nextTerminalNewSessionBehavior,
+  nextTerminalAccountSort,
   nextDesktopTerminalSoftKeyboardEnabled,
   nextTerminalSoftKeyboardScale,
   nextTerminalFloatingButtonOffsetVh,
@@ -671,6 +735,9 @@ async function saveSettings(
   nextTerminalAutoContinueBackoffMaxMinutes,
   nextTerminalAutoContinueRespectManualInterrupt,
   nextTerminalAutoCompactSkipCodebuddy,
+  nextTerminalReportDebounceSeconds,
+  nextTerminalMessageQueueSeconds,
+  nextTerminalTaskTimeoutSecs,
   nextTerminalAutoContinueTimePatterns,
   nextTerminalAutoContinueActiveWindow,
   nextTerminalScheduledInputAvoidWindow,
@@ -724,6 +791,7 @@ async function saveSettings(
         show_dot_entries: nextShowDotEntries,
         show_all_workspace_sessions: nextShowAllWorkspaceSessions,
         terminal_new_session_behavior: nextTerminalNewSessionBehavior,
+        terminal_account_sort: nextTerminalAccountSort,
         desktop_terminal_soft_keyboard_enabled: nextDesktopTerminalSoftKeyboardEnabled,
         terminal_soft_keyboard_scale: nextTerminalSoftKeyboardScale,
         terminal_floating_button_offset_vh: nextTerminalFloatingButtonOffsetVh,
@@ -739,6 +807,9 @@ async function saveSettings(
         terminal_auto_continue_respect_manual_interrupt:
           nextTerminalAutoContinueRespectManualInterrupt,
         terminal_auto_compact_skip_codebuddy: nextTerminalAutoCompactSkipCodebuddy,
+        terminal_report_debounce_seconds: nextTerminalReportDebounceSeconds,
+        terminal_message_queue_seconds: nextTerminalMessageQueueSeconds,
+        terminal_task_timeout_secs: nextTerminalTaskTimeoutSecs,
         terminal_auto_continue_time_patterns: nextTerminalAutoContinueTimePatterns,
         terminal_auto_continue_active_window: nextTerminalAutoContinueActiveWindow,
         terminal_scheduled_input_avoid_window: nextTerminalScheduledInputAvoidWindow,

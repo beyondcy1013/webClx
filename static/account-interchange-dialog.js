@@ -8,7 +8,9 @@
     function download(blob,name) {const url=URL.createObjectURL(blob),a=el('a',{href:url,download:name});documentRef.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);}
     async function copy(text) {
       try {if(clipboard?.writeText){await clipboard.writeText(text);return true;}} catch {}
-      const area=el('textarea',{value:text});area.style.cssText='position:fixed;left:-9999px;top:0';documentRef.body.append(area);area.select();let ok=false;
+      const openDialogs = documentRef.querySelectorAll?.("dialog[open]");
+      const container = (dialog && dialog.open) ? dialog : (openDialogs && openDialogs.length > 0 ? openDialogs[openDialogs.length - 1] : documentRef.body);
+      const area=el('textarea',{value:text});area.style.cssText='position:fixed;left:-9999px;top:0;opacity:0;';container.append(area);area.focus();area.select();if(typeof area.setSelectionRange==='function'){area.setSelectionRange(0,area.value.length);}let ok=false;
       try {ok=!!documentRef.execCommand?.('copy');} finally {area.remove();}return ok;
     }
     function close(){if(state?.busy)return;generation++;if(state)state.text.value='';dialog?.close();state=null;}

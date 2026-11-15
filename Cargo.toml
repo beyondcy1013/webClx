@@ -1,6 +1,6 @@
 [package]
 name = "webclx"
-version = "1.10.22"
+version = "1.10.24"
 edition = "2024"
 
 [workspace]

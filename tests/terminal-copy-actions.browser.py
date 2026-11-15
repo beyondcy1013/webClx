@@ -1,4 +1,6 @@
 import asyncio
+import os
+import shutil
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -6,7 +8,10 @@ from playwright.async_api import async_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = ROOT / "static"
-CHROMIUM = "/home/root/.cache/ms-playwright/chromium-1217/chrome-linux64/chrome"
+CHROMIUM = os.environ.get(
+    "WEBCLX_TEST_CHROMIUM",
+    shutil.which("chromium") or "/home/codes/third_party/browser-tools/bin/chromium",
+)
 WRONG_SELECTION = "Already viewing the wrong terminal selection"
 TERMINAL_NAME = "outlook-mail-reference_1"
 SESSION_ID = "019ff696-55e1-7f23-ab83-3d0dcf6e321f"
@@ -138,7 +143,28 @@ async def main():
         await reset_selection()
         await page.evaluate("copyCurrentSessionIdAndAsk()")
         assert await clipboard_text() == (
-            f"调用codex db维护skill读取session id为 {SESSION_ID}并接受指令："
+            f"调用codex db维护skill读取codex session id为 {SESSION_ID}并接受指令："
+        )
+
+        # 验证 agy 会话时，会生成包含 agy session 的提问语句
+        await reset_selection()
+        await page.evaluate(
+            f"""async () => {{
+              const originalDetect = detectAgentResumeIdComplete;
+              detectAgentResumeIdComplete = async () => ({{
+                resumeId: {SESSION_ID!r},
+                command: 'agy --conversation={SESSION_ID}',
+                program: 'agy',
+              }});
+              try {{
+                await copyCurrentSessionIdAndAsk();
+              }} finally {{
+                detectAgentResumeIdComplete = originalDetect;
+              }}
+            }}"""
+        )
+        assert await clipboard_text() == (
+            f"调用codex db维护skill读取agy session id为 {SESSION_ID}并接受指令："
         )
 
         # Context 缺失/不匹配时也必须先走检测链拿 ID，再拼提问语句。
@@ -168,7 +194,7 @@ async def main():
             {"sessionId": "terminal-session", "context": None}
         ], mismatch_status
         assert await clipboard_text() == (
-            f"调用codex db维护skill读取session id为 {SESSION_ID}并接受指令："
+            f"调用codex db维护skill读取codex session id为 {SESSION_ID}并接受指令："
         )
         assert "尚未连接" not in mismatch_status["status"]["message"], mismatch_status["status"]
 

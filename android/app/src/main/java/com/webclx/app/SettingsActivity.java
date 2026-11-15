@@ -50,7 +50,9 @@ public final class SettingsActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         AppPreferences.applyTheme(this);
         super.onCreate(savedInstanceState);
-        setContentView(createScreen());
+        View root = createScreen();
+        setContentView(root);
+        WindowInsetsLayout.install(this, root, null);
         showTab(activeTab);
     }
 

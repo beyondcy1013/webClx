@@ -7,7 +7,7 @@ use super::session::{
 use super::tmux::{capture_tmux_initial_pane_snapshot_async, request_tmux_client_refresh};
 use super::{
     ClientMessage, MAX_INITIAL_REPLAY_BYTES, TERMINAL_INITIAL_SNAPSHOT_LINE_LIMIT,
-    TERMINAL_OUTPUT_VIEWED_MARK_INTERVAL_MS, TERMINAL_TASK_TIMEOUT_SECS,
+    TERMINAL_OUTPUT_VIEWED_MARK_INTERVAL_MS,
     TerminalBacklogReplayControl, TerminalConnectionError, TerminalInitialReplay, TerminalManager,
     TerminalManagerEvent, TerminalOutputFramingControl, TerminalSessionQuery,
     TerminalViewportSizeControl, terminal_session_for_socket,
@@ -34,6 +34,7 @@ pub(super) async fn handle_socket_connect(
     state: AppState,
     query: TerminalSessionQuery,
 ) {
+    let terminal_task_timeout_secs = state.workspace_settings.terminal_task_timeout_secs();
     let requested_session_id = query
         .session_id
         .as_deref()
@@ -42,7 +43,7 @@ pub(super) async fn handle_socket_connect(
         .unwrap_or("<latest>")
         .to_string();
     let session_result = tokio::time::timeout(
-        std::time::Duration::from_secs(TERMINAL_TASK_TIMEOUT_SECS + 2),
+        std::time::Duration::from_secs(terminal_task_timeout_secs + 2),
         terminal_session_for_socket(&state, &query),
     )
     .await;
@@ -61,7 +62,7 @@ pub(super) async fn handle_socket_connect(
                 socket,
                 format!(
                     "终端连接超时（{} 秒），可能是 tmux 或会话恢复无响应。",
-                    TERMINAL_TASK_TIMEOUT_SECS + 2
+                    terminal_task_timeout_secs + 2
                 ),
             )
             .await;

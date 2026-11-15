@@ -450,6 +450,16 @@ function drainTerminalOutputQueue(context = activeTerminalContext) {
     if (context === activeTerminalContext) {
       if (context.backlogReplayActive || stickToBottom) {
         scrollTerminalToBottom();
+        if (context.followOutput !== false) {
+          context.followOutput = true;
+          const metrics = terminalScrollMetrics();
+          terminalScrollPositions.set(context.sessionId, {
+            scrollTop: metrics?.maxScroll ?? 0,
+            maxScroll: metrics?.maxScroll ?? 0,
+            atBottom: true,
+            scrollIntentRevision: context.scrollIntentRevision,
+          });
+        }
       } else {
         updateTerminalScrollBottomButton();
       }
