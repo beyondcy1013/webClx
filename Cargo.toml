@@ -16,7 +16,7 @@ members = [
 [dependencies]
 anyhow = "1.0"
 api_catalog_core = { path = "crates/api_catalog_core" }
-argon2 = "0.5"
+argon2 = "0.6"
 auth_core = { path = "crates/auth_core" }
 axum = { version = "0.8", features = ["multipart", "ws"] }
 base64 = "0.23"
